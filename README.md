@@ -90,12 +90,14 @@ must provide.
 No release has been published. A release is an archive, `observer-linux-amd64.tar.gz`, built from one
 tagged commit. It unpacks into one directory, `observer-linux-amd64`, holding exactly these files:
 
-    observer                 the program: one static file, linux/amd64
-    README.md                this document
-    docs/compatibility.md    what a host must provide, and what the observer has been seen to run on
-    observer.config.json     the simplest configuration the program runs, for you to edit
-    LICENSE                  the Mozilla Public License 2.0
-    COMMIT                   the commit the archive was built from, one line
+    observer                     the program: one static file, linux/amd64
+    README.md                    this document
+    docs/compatibility.md        what a host must provide, and what the observer has been seen to run on
+    observer.config.json         the simplest configuration the program runs, for you to edit
+    LICENSE                      the Mozilla Public License 2.0
+    LICENSES/GPL-2.0-only.txt    the GNU General Public License version 2, the BPF programs' other licence
+    THIRD_PARTY_NOTICES          the third-party material in the program, with its licences and notices
+    COMMIT                       the commit the archive was built from, one line
 
 Beside the archive, and not inside it, is `observer-linux-amd64.sha256`: the digest of the program file.
 The other documents this README links to are in the repository, not in the archive.
@@ -220,9 +222,29 @@ privately, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) what is expected of ever
 
 ## Licence
 
-The probes are licensed under GPL-2.0: the BPF program sources, `bpf/*.c` and `bpf/*.h`, as their
-`SPDX-License-Identifier` headers state. Everything else is licensed under the Mozilla Public License
-2.0, in [LICENSE](LICENSE).
+The observer is licensed under the Mozilla Public License 2.0, in [LICENSE](LICENSE), apart from the BPF
+programs and what is generated from them:
 
-The programs declare their licence to the kernel as GPL because they call helpers the kernel offers only
-to GPL-compatible programs: `bpf_probe_read_kernel`, `bpf_probe_read_user` and `bpf_get_current_task`.
+    bpf/ssl.bpf.h  bpf/sslfull.bpf.c  bpf/sslmeta.bpf.c
+        the BPF program sources: the Mozilla Public License 2.0 or the GNU General Public License
+        version 2 only, at your choice, as each file's licence header states
+    bpf/full_arm64_bpfel.o  bpf/full_x86_bpfel.o  bpf/meta_arm64_bpfel.o  bpf/meta_x86_bpfel.o
+        the compiled programs, built from those sources: the same choice
+    bpf/full_arm64_bpfel.go  bpf/full_x86_bpfel.go  bpf/meta_arm64_bpfel.go  bpf/meta_x86_bpfel.go
+        the Go bindings bpf2go generates for them: the Mozilla Public License 2.0 for what they
+        describe of the programs, and the MIT licence for the code bpf2go's template supplies
+
+The programs declare their licence to the kernel as "Dual MPL/GPL", which the kernel treats as
+GPL-compatible. They need that, because they call helpers the kernel offers only to GPL-compatible
+programs: `bpf_probe_read_kernel`, `bpf_probe_read_user` and `bpf_get_current_task`.
+
+[REUSE.toml](REUSE.toml) records every file's licence in a form tools can read. The licence texts it
+names are in [LICENSES](LICENSES), each copied unchanged from release v3.29.0 of the SPDX License List
+data, https://github.com/spdx/license-list-data:
+
+    LICENSES/MPL-2.0.txt         text/MPL-2.0.txt, sha256 66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172
+    LICENSES/GPL-2.0-only.txt    text/GPL-2.0-only.txt, sha256 aaf135472f81c5b4a0dca9367e5bb5e9750032b5bebe5442b36e4c0a47430df3
+    LICENSES/MIT.txt             text/MIT.txt, sha256 b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5
+
+[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) lists the third-party material in the program and in the
+compiled BPF programs, with each one's licence and notice.

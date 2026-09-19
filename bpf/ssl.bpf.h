@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: MPL-2.0 OR GPL-2.0-only
 //
 // Shared body of the two OpenSSL plaintext probes: one file compiled twice,
 // differing in one guarded region. sslfull.bpf.c defines READ_PAYLOAD 1 and
@@ -2442,8 +2442,9 @@ int obs_exec(void *ctx)
 	return 0;
 }
 
-// GPL: the kernel offers bpf_probe_read_kernel, bpf_probe_read_user and
-// bpf_get_current_task only to GPL-compatible programs.
-char _license[] SEC("license") = "GPL";
+// The kernel reads "Dual MPL/GPL" as GPL-compatible, and it offers
+// bpf_probe_read_kernel, bpf_probe_read_user and bpf_get_current_task only to
+// GPL-compatible programs.
+char _license[] SEC("license") = "Dual MPL/GPL";
 
 #endif
