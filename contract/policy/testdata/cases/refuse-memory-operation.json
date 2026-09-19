@@ -1,0 +1,21 @@
+{
+  "purpose": "a declaration asking for an execution memory budget, which this draft has no operation for: refused as an unknown operation, and the pipeline it does not reach activates",
+  "documents": [
+    {"source": "pack", "document": {
+      "vocabulary": "observer.policy/draft",
+      "requirements": [
+        {"id": "r-memory", "target": {"kind": "component", "name": "classifier"}, "operation": "bound_execution_memory",
+         "parameters": {"max_bytes": 67108864}, "failure_action": "stop_pipeline"}
+      ]
+    }}
+  ],
+  "expected": {
+    "findings": [
+      {"declaration": "r-memory", "disposition": "refuse_activation", "reason": "unknown_operation", "pipelines": ["capture"]}
+    ],
+    "activations": [
+      {"pipeline": "capture", "activates": false, "refused_by": ["r-memory"]},
+      {"pipeline": "diagnostics", "activates": true}
+    ]
+  }
+}

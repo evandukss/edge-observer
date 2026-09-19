@@ -1,0 +1,33 @@
+{
+  "purpose": "structurally valid, the enforcement point present, the parameter outside its range: activation of the affected pipeline is refused and the other pipeline activates",
+  "documents": [
+    {"source": "operator", "document": {
+      "vocabulary": "observer.policy/draft",
+      "requirements": [
+        {"id": "r-queue", "target": {"kind": "queue", "name": "capture-out"}, "operation": "bound_size",
+         "parameters": {"max_records": 100001}, "failure_action": "drop_and_account"},
+        {"id": "r-truncate", "target": {"kind": "sink", "name": "local-account"}, "operation": "transform_field",
+         "parameters": {"field": "message.body", "transformation": "truncate", "arguments": {"length": 65537}},
+         "failure_action": "drop_and_account"}
+      ]
+    }},
+    {"source": "pack", "document": {
+      "vocabulary": "observer.policy/draft",
+      "requirements": [
+        {"id": "r-zero", "target": {"kind": "pipeline", "name": "diagnostics"}, "operation": "bound_size",
+         "parameters": {"max_record_bytes": 0}, "failure_action": "drop_and_account"}
+      ]
+    }}
+  ],
+  "expected": {
+    "findings": [
+      {"declaration": "r-queue", "disposition": "refuse_activation", "reason": "parameter_out_of_range", "pipelines": ["capture"]},
+      {"declaration": "r-truncate", "disposition": "refuse_activation", "reason": "parameter_out_of_range", "pipelines": ["capture"]},
+      {"declaration": "r-zero", "disposition": "refuse_activation", "reason": "parameter_out_of_range", "pipelines": ["diagnostics"]}
+    ],
+    "activations": [
+      {"pipeline": "capture", "activates": false, "refused_by": ["r-queue", "r-truncate"]},
+      {"pipeline": "diagnostics", "activates": false, "refused_by": ["r-zero"]}
+    ]
+  }
+}

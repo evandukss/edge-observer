@@ -1,0 +1,79 @@
+{
+  "purpose": "an acceptance through a sink states whether that sink leaves the host or keeps plaintext, so the account carries it",
+  "documents": [
+    {
+      "source": "operator",
+      "document": {
+        "vocabulary": "observer.policy/draft",
+        "requirements": [
+          {
+            "id": "r-dispatch",
+            "target": {
+              "kind": "pipeline",
+              "name": "diagnostics"
+            },
+            "operation": "dispatch_through",
+            "parameters": {
+              "sink": "diagnostics-log"
+            },
+            "failure_action": "stop_pipeline"
+          },
+          {
+            "id": "r-structure",
+            "target": {
+              "kind": "sink",
+              "name": "local-account"
+            },
+            "operation": "require_output_structure",
+            "parameters": {
+              "structure": "exchange-record"
+            },
+            "failure_action": "drop_and_account"
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "findings": [
+      {
+        "declaration": "r-dispatch",
+        "disposition": "accept",
+        "reason": "enforced",
+        "enforcement_point": "sink_dispatch",
+        "pipelines": [
+          "diagnostics"
+        ],
+        "sink_facts": {
+          "kind": "remote_log",
+          "leaves_host": true,
+          "retains_plaintext": false
+        }
+      },
+      {
+        "declaration": "r-structure",
+        "disposition": "accept",
+        "reason": "enforced",
+        "enforcement_point": "sink_admission",
+        "pipelines": [
+          "capture"
+        ],
+        "sink_facts": {
+          "kind": "local_account",
+          "leaves_host": false,
+          "retains_plaintext": true
+        }
+      }
+    ],
+    "activations": [
+      {
+        "pipeline": "capture",
+        "activates": true
+      },
+      {
+        "pipeline": "diagnostics",
+        "activates": true
+      }
+    ]
+  }
+}

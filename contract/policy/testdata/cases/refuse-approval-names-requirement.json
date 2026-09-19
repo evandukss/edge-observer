@@ -1,0 +1,27 @@
+{
+  "purpose": "an operator approval aimed at a requirement: a requirement is withdrawn, never approved into trusted behaviour, so the approval is refused while the requirement itself stands accepted",
+  "documents": [
+    {"source": "pack", "document": {
+      "vocabulary": "observer.policy/draft",
+      "requirements": [
+        {"id": "r-structure", "target": {"kind": "sink", "name": "local-account"}, "operation": "require_output_structure",
+         "parameters": {"structure": "exchange-record"}, "failure_action": "drop_and_account"}
+      ]
+    }},
+    {"source": "operator", "document": {
+      "vocabulary": "observer.policy/draft",
+      "approvals": [{"claim": "r-structure"}, {"claim": "c-nowhere"}]
+    }}
+  ],
+  "expected": {
+    "findings": [
+      {"declaration": "r-structure", "disposition": "accept", "reason": "enforced", "enforcement_point": "sink_admission", "pipelines": ["capture"]},
+      {"declaration": "approval:r-structure", "disposition": "refuse_activation", "reason": "approval_names_a_requirement", "pipelines": ["capture", "diagnostics"]},
+      {"declaration": "approval:c-nowhere", "disposition": "refuse_activation", "reason": "malformed", "pipelines": ["capture", "diagnostics"]}
+    ],
+    "activations": [
+      {"pipeline": "capture", "activates": false, "refused_by": ["approval:r-structure", "approval:c-nowhere"]},
+      {"pipeline": "diagnostics", "activates": false, "refused_by": ["approval:r-structure", "approval:c-nowhere"]}
+    ]
+  }
+}

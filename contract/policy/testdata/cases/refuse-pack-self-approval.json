@@ -1,0 +1,22 @@
+{
+  "purpose": "a pack approving its own claim: the approval is refused for not coming from the operator, and the claim is refused as unapproved",
+  "documents": [
+    {"source": "pack", "document": {
+      "vocabulary": "observer.policy/draft",
+      "claims": [
+        {"id": "c-redacts", "component": "classifier", "statement": "the classifier removes email addresses from message bodies"}
+      ],
+      "approvals": [{"claim": "c-redacts"}]
+    }}
+  ],
+  "expected": {
+    "findings": [
+      {"declaration": "c-redacts", "disposition": "refuse_activation", "reason": "trusted_behaviour_not_approved", "pipelines": ["capture"]},
+      {"declaration": "approval:c-redacts", "disposition": "refuse_activation", "reason": "approval_not_from_operator", "pipelines": ["capture", "diagnostics"]}
+    ],
+    "activations": [
+      {"pipeline": "capture", "activates": false, "refused_by": ["c-redacts", "approval:c-redacts"]},
+      {"pipeline": "diagnostics", "activates": false, "refused_by": ["approval:c-redacts"]}
+    ]
+  }
+}

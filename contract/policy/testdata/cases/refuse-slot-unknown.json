@@ -1,0 +1,56 @@
+{
+  "purpose": "a requirement naming a slot the inventory does not have is refused as a missing capability, and reaches every pipeline because which one it meant cannot be established",
+  "documents": [
+    {
+      "source": "operator",
+      "document": {
+        "vocabulary": "observer.policy/draft",
+        "requirements": [
+          {
+            "id": "r-project-slot",
+            "target": {
+              "kind": "slot",
+              "name": "capture.absent"
+            },
+            "operation": "project_fields",
+            "parameters": {
+              "fields": [
+                "message.body"
+              ]
+            },
+            "failure_action": "none"
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "findings": [
+      {
+        "declaration": "r-project-slot",
+        "disposition": "refuse_activation",
+        "reason": "missing_capability",
+        "pipelines": [
+          "capture",
+          "diagnostics"
+        ]
+      }
+    ],
+    "activations": [
+      {
+        "pipeline": "capture",
+        "activates": false,
+        "refused_by": [
+          "r-project-slot"
+        ]
+      },
+      {
+        "pipeline": "diagnostics",
+        "activates": false,
+        "refused_by": [
+          "r-project-slot"
+        ]
+      }
+    ]
+  }
+}

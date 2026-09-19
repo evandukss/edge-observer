@@ -1,0 +1,124 @@
+{
+  "purpose": "requirements naming a slot rather than a component are accepted against whatever fills the slot, and an ordering may name the processor by its slot",
+  "documents": [
+    {
+      "source": "operator",
+      "document": {
+        "vocabulary": "observer.policy/draft",
+        "requirements": [
+          {
+            "id": "r-project-slot",
+            "target": {
+              "kind": "slot",
+              "name": "capture.classify"
+            },
+            "operation": "project_fields",
+            "parameters": {
+              "fields": [
+                "message.body"
+              ]
+            },
+            "failure_action": "none"
+          },
+          {
+            "id": "r-transform-slot",
+            "target": {
+              "kind": "slot",
+              "name": "capture.redact"
+            },
+            "operation": "transform_field",
+            "parameters": {
+              "field": "message.body",
+              "transformation": "redact"
+            },
+            "failure_action": "drop_and_account"
+          },
+          {
+            "id": "r-suppress-slot",
+            "target": {
+              "kind": "slot",
+              "name": "diagnostics.count"
+            },
+            "operation": "suppress_matching",
+            "parameters": {
+              "all": [
+                {
+                  "field": "connection.id",
+                  "test": "present"
+                }
+              ]
+            },
+            "failure_action": "none"
+          },
+          {
+            "id": "r-order-slot",
+            "target": {
+              "kind": "sink",
+              "name": "local-account"
+            },
+            "operation": "order_before",
+            "parameters": {
+              "processor": "capture.classify"
+            },
+            "failure_action": "stop_pipeline"
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "findings": [
+      {
+        "declaration": "r-project-slot",
+        "disposition": "accept",
+        "reason": "enforced",
+        "enforcement_point": "component_input_construction",
+        "pipelines": [
+          "capture"
+        ]
+      },
+      {
+        "declaration": "r-transform-slot",
+        "disposition": "accept",
+        "reason": "enforced",
+        "enforcement_point": "builtin_transformation",
+        "pipelines": [
+          "capture"
+        ]
+      },
+      {
+        "declaration": "r-suppress-slot",
+        "disposition": "accept",
+        "reason": "enforced",
+        "enforcement_point": "suppression_evaluation",
+        "pipelines": [
+          "diagnostics"
+        ]
+      },
+      {
+        "declaration": "r-order-slot",
+        "disposition": "accept",
+        "reason": "enforced",
+        "enforcement_point": "pipeline_dispatch_order",
+        "pipelines": [
+          "capture"
+        ],
+        "sink_facts": {
+          "kind": "local_account",
+          "leaves_host": false,
+          "retains_plaintext": true
+        }
+      }
+    ],
+    "activations": [
+      {
+        "pipeline": "capture",
+        "activates": true
+      },
+      {
+        "pipeline": "diagnostics",
+        "activates": true
+      }
+    ]
+  }
+}

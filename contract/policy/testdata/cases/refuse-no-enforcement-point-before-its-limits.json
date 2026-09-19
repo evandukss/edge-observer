@@ -1,0 +1,22 @@
+{
+  "purpose": "a parameter beyond limits the runtime would hold it to, where the enforcement point holding those limits is absent: the missing point is the binding reason",
+  "without_enforcement_points": ["queue_admission"],
+  "documents": [
+    {"source": "operator", "document": {
+      "vocabulary": "observer.policy/draft",
+      "requirements": [
+        {"id": "r-queue", "target": {"kind": "queue", "name": "capture-out"}, "operation": "bound_size",
+         "parameters": {"max_records": 1000000}, "failure_action": "drop_and_account"}
+      ]
+    }}
+  ],
+  "expected": {
+    "findings": [
+      {"declaration": "r-queue", "disposition": "refuse_assurance", "reason": "no_enforcement_point", "pipelines": ["capture", "diagnostics"]}
+    ],
+    "activations": [
+      {"pipeline": "capture", "activates": false, "refused_by": ["r-queue"]},
+      {"pipeline": "diagnostics", "activates": false, "refused_by": ["r-queue"]}
+    ]
+  }
+}

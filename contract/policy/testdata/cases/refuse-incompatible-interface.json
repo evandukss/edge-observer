@@ -1,0 +1,38 @@
+{
+  "purpose": "a target kind the operation does not accept, a projected field the component's input does not carry, a predicate field no record carries, an ordering across pipelines, a built-in given no arguments where it defines one, and a claim on a built-in",
+  "documents": [
+    {"source": "operator", "document": {
+      "vocabulary": "observer.policy/draft",
+      "requirements": [
+        {"id": "r-kind", "target": {"kind": "pipeline", "name": "capture"}, "operation": "order_before",
+         "parameters": {"processor": "classifier"}, "failure_action": "stop_pipeline"},
+        {"id": "r-field", "target": {"kind": "component", "name": "classifier"}, "operation": "project_fields",
+         "parameters": {"fields": ["message.body", "process.cmdline"]}, "failure_action": "none"},
+        {"id": "r-predicate", "target": {"kind": "pipeline", "name": "diagnostics"}, "operation": "suppress_matching",
+         "parameters": {"all": [{"field": "tls.sni", "test": "equals", "value": "example.org"}]}, "failure_action": "none"},
+        {"id": "r-across", "target": {"kind": "sink", "name": "diagnostics-log"}, "operation": "order_before",
+         "parameters": {"processor": "classifier"}, "failure_action": "stop_pipeline"},
+        {"id": "r-arguments", "target": {"kind": "sink", "name": "local-account"}, "operation": "transform_field",
+         "parameters": {"field": "message.body", "transformation": "truncate"}, "failure_action": "drop_and_account"}
+      ],
+      "claims": [
+        {"id": "c-builtin", "component": "redactor", "statement": "the redactor never misses an email address"}
+      ],
+      "approvals": [{"claim": "c-builtin"}]
+    }}
+  ],
+  "expected": {
+    "findings": [
+      {"declaration": "r-kind", "disposition": "refuse_activation", "reason": "incompatible_interface", "pipelines": ["capture"]},
+      {"declaration": "r-field", "disposition": "refuse_activation", "reason": "incompatible_interface", "pipelines": ["capture"]},
+      {"declaration": "r-predicate", "disposition": "refuse_activation", "reason": "incompatible_interface", "pipelines": ["diagnostics"]},
+      {"declaration": "r-across", "disposition": "refuse_activation", "reason": "incompatible_interface", "pipelines": ["diagnostics"]},
+      {"declaration": "r-arguments", "disposition": "refuse_activation", "reason": "incompatible_interface", "pipelines": ["capture"]},
+      {"declaration": "c-builtin", "disposition": "refuse_activation", "reason": "incompatible_interface", "pipelines": ["capture"]}
+    ],
+    "activations": [
+      {"pipeline": "capture", "activates": false, "refused_by": ["r-kind", "r-field", "r-arguments", "c-builtin"]},
+      {"pipeline": "diagnostics", "activates": false, "refused_by": ["r-predicate", "r-across"]}
+    ]
+  }
+}

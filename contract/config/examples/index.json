@@ -1,0 +1,48 @@
+[
+  {
+    "name": "no-extension",
+    "purpose": "the no-extension path: pipelines with no slots, the same route through the core as any other. No default is chosen by it; it is written out",
+    "configuration": "no-extension.config.json",
+    "manifests": [],
+    "outcome": "accepted"
+  },
+  {
+    "name": "scopes-inbound-retained",
+    "purpose": "the approved api-server under one traffic scope and one retention and export scope: inbound on 8443, plaintext retained on the host, nothing exported",
+    "configuration": "scopes-inbound-retained.config.json",
+    "manifests": [],
+    "outcome": "accepted"
+  },
+  {
+    "name": "scopes-outbound-exported",
+    "purpose": "the SAME approved api-server, the same observation scope, under a different traffic scope and a different retention and export scope: outbound to 443, no plaintext retained, connection records exported. The three controls move independently",
+    "configuration": "scopes-outbound-exported.config.json",
+    "manifests": [],
+    "outcome": "accepted"
+  },
+  {
+    "name": "content-filter-is-not-approval",
+    "purpose": "the observation scope selects api-server and excludes curl. A process running /usr/bin/python3 /srv/batch/export.py whose requests begin GET /health would match the suppression, and is never inspected, because no target selects it: approval is decided before plaintext is copied, and the suppression is evaluated after capture on records of approved instances only",
+    "configuration": "content-filter-is-not-approval.config.json",
+    "manifests": [],
+    "outcome": "accepted"
+  },
+  {
+    "name": "configuration-only-pack",
+    "purpose": "a pack that supplies no implementation and selects the built-in truncating-redactor for the operator's redact slot",
+    "configuration": "configuration-only-pack.config.json",
+    "manifests": [
+      "packs/swap-redactor.json"
+    ],
+    "outcome": "accepted"
+  },
+  {
+    "name": "external-component",
+    "purpose": "an independently implementable external component declared with its input and output, state, ordering, lifecycle, version and failure results, placed after the built-in redactor, with the pack's claim approved by the operator and an enforceable ordering required",
+    "configuration": "external-component.config.json",
+    "manifests": [
+      "packs/acme-classifier.json"
+    ],
+    "outcome": "accepted"
+  }
+]

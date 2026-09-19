@@ -1,0 +1,36 @@
+{
+  "enforcement_points": {
+    "component_input_construction": {},
+    "builtin_transformation": {},
+    "pipeline_dispatch_order": {},
+    "sink_admission": {},
+    "suppression_evaluation": {},
+    "queue_admission": {"max_records": {"min": 1, "max": 100000}},
+    "record_admission": {"max_record_bytes": {"max": 16777216}},
+    "sink_dispatch": {}
+  },
+  "pipelines": {
+    "capture": {"components": ["classifier", "redactor"], "sinks": ["local-account"], "queues": ["capture-out"]},
+    "diagnostics": {"components": ["counter"], "sinks": ["diagnostics-log"], "queues": ["diagnostics-out"]}
+  },
+  "components": {
+    "classifier": {"execution": "external", "input_fields": ["message.body", "message.headers", "connection.id"]},
+    "redactor": {"execution": "builtin", "input_fields": ["message.body"]},
+    "counter": {"execution": "builtin", "input_fields": ["connection.id"]}
+  },
+  "record_fields": ["message.body", "message.headers", "connection.id", "process.cmdline"],
+  "transformations": {
+    "redact": {},
+    "truncate": {"length": {"min": 1, "max": 65536}}
+  },
+  "structures": ["exchange-record"],
+  "slots": {
+    "capture.classify": {"pipeline": "capture", "component": "classifier"},
+    "capture.redact": {"pipeline": "capture", "component": "redactor"},
+    "diagnostics.count": {"pipeline": "diagnostics", "component": "counter"}
+  },
+  "sinks": {
+    "local-account": {"kind": "local_account", "leaves_host": false, "retains_plaintext": true},
+    "diagnostics-log": {"kind": "remote_log", "leaves_host": true, "retains_plaintext": false}
+  }
+}

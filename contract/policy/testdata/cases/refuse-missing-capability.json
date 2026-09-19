@@ -1,0 +1,32 @@
+{
+  "purpose": "a transformation, a sink, a queue and a component the runtime does not have: the one whose target cannot be resolved reaches every pipeline",
+  "documents": [
+    {"source": "operator", "document": {
+      "vocabulary": "observer.policy/draft",
+      "requirements": [
+        {"id": "r-hash", "target": {"kind": "sink", "name": "local-account"}, "operation": "transform_field",
+         "parameters": {"field": "message.body", "transformation": "hash"}, "failure_action": "drop_and_account"},
+        {"id": "r-export", "target": {"kind": "pipeline", "name": "diagnostics"}, "operation": "dispatch_through",
+         "parameters": {"sink": "remote-export"}, "failure_action": "stop_pipeline"},
+        {"id": "r-ghost-queue", "target": {"kind": "queue", "name": "enrichment-out"}, "operation": "bound_size",
+         "parameters": {"max_records": 10}, "failure_action": "drop_and_account"}
+      ],
+      "claims": [
+        {"id": "c-enricher", "component": "enricher", "statement": "the enricher adds nothing it did not read"}
+      ],
+      "approvals": [{"claim": "c-enricher"}]
+    }}
+  ],
+  "expected": {
+    "findings": [
+      {"declaration": "r-hash", "disposition": "refuse_activation", "reason": "missing_capability", "pipelines": ["capture"]},
+      {"declaration": "r-export", "disposition": "refuse_activation", "reason": "missing_capability", "pipelines": ["diagnostics"]},
+      {"declaration": "r-ghost-queue", "disposition": "refuse_activation", "reason": "missing_capability", "pipelines": ["capture", "diagnostics"]},
+      {"declaration": "c-enricher", "disposition": "refuse_activation", "reason": "missing_capability", "pipelines": ["capture", "diagnostics"]}
+    ],
+    "activations": [
+      {"pipeline": "capture", "activates": false, "refused_by": ["r-hash", "r-ghost-queue", "c-enricher"]},
+      {"pipeline": "diagnostics", "activates": false, "refused_by": ["r-export", "r-ghost-queue", "c-enricher"]}
+    ]
+  }
+}
