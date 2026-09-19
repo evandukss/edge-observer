@@ -1,0 +1,42 @@
+name: Bug report
+description: The observer did something it should not, or did not do what it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not paste spool files, captured traffic or session directories.** They hold what
+        the observed processes sent and received in plaintext, credentials included.
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce it
+      description: The commands you ran, and the configuration with anything private removed.
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: The COMMIT file from the archive, or `git rev-parse HEAD` for a build from source.
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Host
+      description: The output of `uname -srm`, and the distribution.
+    validations:
+      required: true
+  - type: textarea
+    id: preflight
+    attributes:
+      label: Preflight
+      description: The output of `observer preflight <configuration> --text`, run as the user that runs the observer.
+      render: text

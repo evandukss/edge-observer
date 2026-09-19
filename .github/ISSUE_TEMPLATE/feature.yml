@@ -1,0 +1,16 @@
+name: Feature request
+description: Something the observer should do, observe or support that it does not.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What you need, and why
+      description: The situation you are in, rather than the solution you have in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: What it would observe
+      description: A TLS library, a protocol, a kind of process or host the observer does not cover today, if any.
