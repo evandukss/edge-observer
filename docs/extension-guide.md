@@ -96,16 +96,5 @@ one would be built.
 
 ## Checking a change
 
-    go vet ./... && go vet -tags attach ./...
-    go test ./...
-    go test -tags attach -p 1 ./probe/openssl/attach/... ./ebpf/...
-
-Until they are repaired, `go vet -tags attach ./...` reports two findings: `possible misuse of
-unsafe.Pointer` at `ebpf/arming_test.go:337` and `:338`, where a test fixture reads a supervised
-process's path argument through the test's own address space. Any other finding from these commands
-is new.
-
-The attach-tagged tests place real probes, so they need the privilege to load BPF programs on a Linux
-kernel that allows it (`HOST-REQUIREMENTS.md`). A change to `bpf/*.c` or `bpf/*.h` is followed by
-`go generate ./bpf/`, which needs clang and the libbpf headers, and the regenerated objects and
-bindings are committed with it; `go run ./bpf/cmd/verify` then checks the new objects' helper calls.
+[CONTRIBUTING.md](../CONTRIBUTING.md) has the commands that build and test a change, what they report
+today, and how a change to `bpf/*.c` or `bpf/*.h` regenerates the compiled programs.

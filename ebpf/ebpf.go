@@ -110,7 +110,7 @@ type Options struct {
 // A version is not the gate; the load is. Vendor kernels backport, and the
 // programs read kernel structures through CO-RE, so a host must publish its own
 // BTF (a build option, not a version); without it the load is refused rather
-// than run degraded (bpf/ssl.bpf.h, HOST-REQUIREMENTS.md).
+// than run degraded (bpf/ssl.bpf.h, docs/compatibility.md).
 const MinimumKernel = "5.15"
 
 // RefusalReason names why something was not observed. It is a value rather
