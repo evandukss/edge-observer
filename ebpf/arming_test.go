@@ -357,6 +357,11 @@ func notificationPath(listener int, request seccompNotification) (string, error)
 		}
 		if end := bytes.IndexByte(chunk[:n], 0); end >= 0 {
 			path = append(path, chunk[:end]...)
+			// Re-check that the call is still pending: between the read above and
+			// here the trapping task can exit and its pid be reused, and the bytes
+			// would then be another process's. Removing this leaves every test
+			// passing, because none can reuse a pid inside this window on demand,
+			// so none exercises it. That holds until such a window can be staged.
 			id := request.ID
 			if _, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(listener),
 				unix.SECCOMP_IOCTL_NOTIF_ID_VALID, uintptr(unsafe.Pointer(&id))); errno != 0 {
