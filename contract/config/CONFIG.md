@@ -293,29 +293,33 @@ available set (`replacement_not_resolvable`) or is incompatible with its slot or
 
 Every refusal the structural check can make, one line each: the member, the reason, and the condition.
 A document refused as unreadable or at its version is not read further; otherwise every rule is applied
-and every finding reported. `<target>`, `<rule>`, `<sink>`, `<pipeline>` and `<component>` stand for one
-entry of that list.
+and every finding reported. `<target>`, `<rule>`, `<library>`, `<sink>`, `<pipeline>` and `<component>`
+stand for one entry of that list, written out in full wherever a row names a member of another.
 
 **The configuration** - document `configuration`:
 
     (document)                              malformed        not JSON, an undefined member, a key written twice,
                                                              a value of the wrong type, or anything after the document
     version                                 unknown_version  not observer.config/draft
-    observer.log                            malformed        absent; or neither stdout nor an absolute path
-    observer.directory                      malformed        absent; or not an absolute path
+    observer.log                            malformed        absent
+    observer.log                            malformed        neither stdout nor an absolute path
+    observer.directory                      malformed        absent
+    observer.directory                      malformed        not an absolute path
     observer.spool_bound_mib                malformed        present and below 1
     observer.state_every_seconds            malformed        present and below 1
     observation_scope.targets               malformed        absent or empty: a configuration selecting no instance
                                                              observes nothing
     observation_scope.targets               duplicate_name   two targets with one name
     <target>.name                           malformed        absent
-    <target>.match, exclude[i]              malformed        names none of exe, args, cgroup, pid, port, interface:
+    <target>.match                          malformed        names none of exe, args, cgroup, pid, port, interface:
                                                              a match with no condition would select every instance
-    <target>.match.port, exclude[i].port    malformed        outside 1 to 65535
+    observation_scope.exclude[i]            malformed        as for <target>.match
+    <target>.match.port                     malformed        outside 1 to 65535
+    observation_scope.exclude[i].port       malformed        outside 1 to 65535
     <target>.descendants.<each of five>     malformed        absent
     observation_scope.libraries             malformed        absent (written empty, it approves any library)
-    libraries[i].build_id                   malformed        absent
-    libraries[i].symbols                    malformed        absent or empty
+    <library>.build_id                      malformed        absent
+    <library>.symbols                       malformed        absent or empty
     traffic_scope.rules                     malformed        absent or empty
     <rule>.direction                        malformed        absent, or not inbound, outbound or any
     <rule>                                  malformed        a local or remote port outside 1 to 65535
@@ -336,12 +340,13 @@ and may be absent in a manifest:
 
     <pipeline>.name, .input                 malformed        absent
     <pipeline>.slots                        malformed        absent (written empty for the no-extension path)
-    slots[j].name, .implementation          malformed        absent
-    slots[j].on_failure                     malformed        absent, or not drop_and_account or stop_pipeline
+    <pipeline>.slots[j].name,               malformed        absent
+      .implementation
+    <pipeline>.slots[j].on_failure          malformed        absent, or not drop_and_account or stop_pipeline
     <pipeline>.slots                        duplicate_name   two slots with one name
     <pipeline>.sinks                        malformed        absent or empty: a pipeline dispatches through at least one sink
     <pipeline>.sinks                        duplicate_name   one sink named twice
-    queues[j].name                          malformed        absent
+    <pipeline>.queues[j].name               malformed        absent
     <pipeline>.queues                       duplicate_name   two queues with one name
     pipelines                               duplicate_name   two pipelines with one name
 
@@ -374,9 +379,11 @@ between starts:
     <component>.lifecycle.<each of five>    malformed        absent, or not handled or ignored
     <component>.lifecycle                   malformed        state is not none and stream_closure or flush is not
                                                              handled: kept state would have no end
-    <component>.failures                    malformed        absent or empty; or a value not record_error, fatal or
-                                                             configuration_refused; or fatal not among them, because
-                                                             every component can fail fatally
+    <component>.failures                    malformed        absent or empty
+    <component>.failures                    malformed        a value that is not record_error, fatal or
+                                                             configuration_refused
+    <component>.failures                    malformed        fatal not among them, because every component can
+                                                             fail fatally
     <component>.failures                    duplicate_name   one failure result listed twice
     <component>.output                      malformed        a subscriber returning records, derived records or
                                                              suppression decisions, or not returning findings
