@@ -105,7 +105,7 @@ type Options struct {
 // before 5.12 with "BPF_XADD uses reserved fields"; the full object holds 35
 // such instructions and the metadata-only one 28. They cannot drop the fetch:
 // an allocator exists to return a unique number. The published floor is 5.15,
-// the oldest kernel tested, above the 5.12 the object forces.
+// above the 5.12 the object forces; no run at 5.15 is recorded (FloorProved).
 //
 // A version is not the gate; the load is. Vendor kernels backport, and the
 // programs read kernel structures through CO-RE, so a host must publish its own
