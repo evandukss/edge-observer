@@ -21,6 +21,10 @@ root="$(cd "$(dirname "$0")/../.." && pwd)"
 # exception <path>: the obligations the path is excused from, a bar, and why.
 # An entry holds only while nothing but the named reader reads the file; a test
 # that starts reading one takes it off this list in the same change.
+#
+# LICENSES/, THIRD_PARTY_NOTICES and REUSE.toml are left off on purpose. A change
+# to them runs every obligation, which costs a run and cannot skip a check, and
+# two of them ship in the release archive, so the artifact check reads them anyway.
 exception() {
 	case "$1" in
 	.github/CODEOWNERS | .github/PULL_REQUEST_TEMPLATE.md | .github/ISSUE_TEMPLATE/*)
