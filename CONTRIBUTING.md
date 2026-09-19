@@ -47,13 +47,9 @@ building needs no BPF toolchain.
 
 `gofmt -l .` prints nothing when every file is formatted.
 
-Until they are repaired, `go vet -tags attach ./...` reports two findings: `possible misuse of
-unsafe.Pointer` at `ebpf/arming_test.go:337` and `:338`, where a test fixture reads a supervised
-process's path argument through the test's own address space. `golangci-lint run --build-tags attach
-./...` reports those two and four unchecked `Close` errors, at `ebpf/execution_io_linux_test.go:66`,
-`:71`, `:285` and `ebpf/execution_zombies_test.go:156`. Run by a user who cannot act as another user,
-`go test ./...` fails three tests with `operation not permitted`, because each starts a process as
-uid 65534: `TestConfirmChecksTheStartAnyoneMayReadAndNamesAFailedReadForWhatItIs` in `ebpf`, and
+Run by a user who cannot act as another user, `go test ./...` fails three tests with `operation not
+permitted`, because each starts a process as uid 65534:
+`TestConfirmChecksTheStartAnyoneMayReadAndNamesAFailedReadForWhatItIs` in `ebpf`, and
 `TestAListenerWhoseOwnerCannotBeReadIsUnresolvedRatherThanEmpty` and
 `TestAProcessThisReaderMayNotReadIsNamedAsUnreadableRatherThanAbsent` in `process`. Run as root, they
 pass. Any other finding from these commands is new.

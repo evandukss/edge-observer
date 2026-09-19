@@ -20,11 +20,6 @@ proven, and what does not work. Read it before relying on anything here.
   the catalogue for its processes, which are then handed to the OpenSSL adapter, and it refuses them.
   Registered first, it is attached to every supported process, OpenSSL ones included.
   [docs/extension-guide.md](docs/extension-guide.md) names the code that still assumes OpenSSL.
-- **Static checks of the attach-tagged tests report six findings.** `go vet -tags attach ./...` reports
-  `possible misuse of unsafe.Pointer` at `ebpf/arming_test.go:337` and `:338`, a test fixture that is
-  correct only while the process it supervises is an unmodified fork of the test.
-  `golangci-lint run --build-tags attach ./...` reports those and four unchecked `Close` errors, at
-  `ebpf/execution_io_linux_test.go:66`, `:71`, `:285` and `ebpf/execution_zombies_test.go:156`.
 
 ### Built but not proven
 

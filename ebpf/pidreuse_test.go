@@ -199,8 +199,14 @@ func exerciseIndependentPIDReuse(t *testing.T) {
 				coordinated <- result{err: err}
 				return
 			}
+			opensProcfs := false
+			if !opened && request.Data.Number == int32(unix.SYS_OPENAT) {
+				var path string
+				path, staged.err = notificationPath(listener, request)
+				opensProcfs = staged.err == nil && path == procfs
+			}
 			switch {
-			case !opened && request.Data.Number == int32(unix.SYS_OPENAT) && notificationPath(request.Data.Arguments[1]) == procfs:
+			case opensProcfs:
 				old, staged.err = reuseCommand(actor, "T", "old")
 				if staged.err == nil {
 					staged.old, staged.err = process.Identify(procfs, old.observer)

@@ -153,7 +153,7 @@ func TestExecutionRetainedTerminalGroupHasAnActualNonrunningResult(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer session.Close()
+			defer func() { _ = session.Close() }()
 			admitted := independentAdmittedIdentity(t, session, parent)
 			if _, err := io.WriteString(actor.input, "P\n"); err != nil {
 				t.Fatal(err)

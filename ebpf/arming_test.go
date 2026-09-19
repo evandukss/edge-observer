@@ -4,6 +4,7 @@ package ebpf_test
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -331,14 +332,42 @@ func installArmingListener() (int, error) {
 	return int(fd), nil
 }
 
-func notificationPath(address uint64) string {
+// notificationPath reads a trapped call's path argument from the process that
+// made the call, by the pid the kernel reports, since the address is only valid
+// in that process. An actor that traps here must be visible in this pid
+// namespace and readable by this process under ptrace rules. The read stands
+// only if the call is still pending afterwards, so the pid was not reused.
+func notificationPath(listener int, request seccompNotification) (string, error) {
 	const maximum = 4096
-	for length := uintptr(0); length < maximum; length++ {
-		if *(*byte)(unsafe.Pointer(uintptr(address) + length)) == 0 {
-			return unsafe.String((*byte)(unsafe.Pointer(uintptr(address))), length)
+	page := uintptr(os.Getpagesize())
+	address := uintptr(request.Data.Arguments[1])
+	var path []byte
+	for len(path) < maximum {
+		// To the end of the page, so a path that ends before an unmapped page reads.
+		chunk := make([]byte, page-address%page)
+		local := []unix.Iovec{{Base: &chunk[0]}}
+		local[0].SetLen(len(chunk))
+		remote := []unix.RemoteIovec{{Base: address, Len: len(chunk)}}
+		n, err := unix.ProcessVMReadv(int(request.PID), local, remote, 0)
+		if err != nil {
+			return "", fmt.Errorf("read the path argument of pid %d: %w", request.PID, err)
 		}
+		if n == 0 {
+			return "", fmt.Errorf("read the path argument of pid %d: no bytes at %#x", request.PID, address)
+		}
+		if end := bytes.IndexByte(chunk[:n], 0); end >= 0 {
+			path = append(path, chunk[:end]...)
+			id := request.ID
+			if _, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(listener),
+				unix.SECCOMP_IOCTL_NOTIF_ID_VALID, uintptr(unsafe.Pointer(&id))); errno != 0 {
+				return "", fmt.Errorf("the call pid %d trapped was not pending after its path was read: %w", request.PID, errno)
+			}
+			return string(path), nil
+		}
+		path = append(path, chunk[:n]...)
+		address += uintptr(n)
 	}
-	return ""
+	return "", fmt.Errorf("the path argument of pid %d is not terminated within %d bytes", request.PID, maximum)
 }
 
 func notification(listener int, request *seccompNotification) error {
@@ -394,9 +423,14 @@ func coordinateArming(listener int, fixture *armingProcess) armingCoordination {
 			}
 
 			var actionErr error
+			opensProcfs := false
+			if request.Data.Number == int32(unix.SYS_OPENAT) && !windowOpen {
+				var path string
+				path, actionErr = notificationPath(listener, request)
+				opensProcfs = actionErr == nil && path == procfs
+			}
 			switch {
-			case request.Data.Number == int32(unix.SYS_OPENAT) &&
-				!windowOpen && notificationPath(request.Data.Arguments[1]) == procfs:
+			case opensProcfs:
 				children.live, actionErr = fixture.child('L', "live")
 				if actionErr == nil {
 					children.transient, actionErr = fixture.child('T', "transient")

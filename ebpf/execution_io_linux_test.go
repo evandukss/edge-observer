@@ -63,12 +63,12 @@ func executionSupervised(t *testing.T, f executionFixture, intervene func(execut
 	case <-time.After(5 * time.Second):
 		t.Fatal("fixture: syscall listener was not installed")
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	memory, err := os.Open("/proc/self/mem")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer memory.Close()
+	defer func() { _ = memory.Close() }()
 	var seen []executionIO
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -282,7 +282,7 @@ func executionMeasuredDirentSize(t *testing.T) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	buffer := make([]byte, 8192)
 	n, err := unix.ReadDirent(fd, buffer)
 	if err != nil {
