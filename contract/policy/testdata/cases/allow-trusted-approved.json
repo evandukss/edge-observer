@@ -1,0 +1,26 @@
+{
+  "purpose": "custom behaviour a pack supplies as trusted plugin functionality, approved by the operator: allowed, and the pipeline activates carrying the labelled limitation",
+  "documents": [
+    {"source": "pack", "document": {
+      "vocabulary": "observer.policy/draft",
+      "claims": [
+        {"id": "c-redacts", "component": "classifier", "statement": "the classifier removes email addresses from message bodies"}
+      ]
+    }},
+    {"source": "operator", "document": {
+      "vocabulary": "observer.policy/draft",
+      "approvals": [{"claim": "c-redacts"}]
+    }}
+  ],
+  "expected": {
+    "findings": [
+      {"declaration": "c-redacts", "disposition": "allow_trusted", "reason": "operator_approved", "pipelines": ["capture"],
+       "limitation": "extension-declared, not core-enforced: the classifier removes email addresses from message bodies"}
+    ],
+    "activations": [
+      {"pipeline": "capture", "activates": true,
+       "limitations": ["extension-declared, not core-enforced: the classifier removes email addresses from message bodies"]},
+      {"pipeline": "diagnostics", "activates": true}
+    ]
+  }
+}

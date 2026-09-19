@@ -1,0 +1,34 @@
+{
+  "purpose": "a missing failure action, a count written as a string, a failure action the operation does not permit, a condition test outside the finite set, and a claim with no statement",
+  "documents": [
+    {"source": "operator", "document": {
+      "vocabulary": "observer.policy/draft",
+      "requirements": [
+        {"id": "r-no-action", "target": {"kind": "queue", "name": "capture-out"}, "operation": "bound_size",
+         "parameters": {"max_records": 10000}},
+        {"id": "r-string-count", "target": {"kind": "pipeline", "name": "diagnostics"}, "operation": "bound_size",
+         "parameters": {"max_record_bytes": "4096"}, "failure_action": "drop_and_account"},
+        {"id": "r-wrong-action", "target": {"kind": "component", "name": "classifier"}, "operation": "project_fields",
+         "parameters": {"fields": ["message.body"]}, "failure_action": "drop_and_account"},
+        {"id": "r-regex", "target": {"kind": "sink", "name": "diagnostics-log"}, "operation": "suppress_matching",
+         "parameters": {"all": [{"field": "connection.id", "test": "matches", "value": "^1"}]}, "failure_action": "none"}
+      ],
+      "claims": [
+        {"id": "c-empty", "component": "classifier"}
+      ]
+    }}
+  ],
+  "expected": {
+    "findings": [
+      {"declaration": "r-no-action", "disposition": "refuse_activation", "reason": "malformed", "pipelines": ["capture"]},
+      {"declaration": "r-string-count", "disposition": "refuse_activation", "reason": "malformed", "pipelines": ["diagnostics"]},
+      {"declaration": "r-wrong-action", "disposition": "refuse_activation", "reason": "malformed", "pipelines": ["capture"]},
+      {"declaration": "r-regex", "disposition": "refuse_activation", "reason": "malformed", "pipelines": ["diagnostics"]},
+      {"declaration": "c-empty", "disposition": "refuse_activation", "reason": "malformed", "pipelines": ["capture"]}
+    ],
+    "activations": [
+      {"pipeline": "capture", "activates": false, "refused_by": ["r-no-action", "r-wrong-action", "c-empty"]},
+      {"pipeline": "diagnostics", "activates": false, "refused_by": ["r-string-count", "r-regex"]}
+    ]
+  }
+}

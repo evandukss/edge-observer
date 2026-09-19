@@ -1,0 +1,82 @@
+{
+  "version": "observer.config/draft",
+  "observer": {
+    "log": "stdout",
+    "directory": "/var/lib/observer",
+    "spool_bound_mib": 64,
+    "state_every_seconds": 30
+  },
+  "observation_scope": {
+    "targets": [
+      {
+        "name": "api-server",
+        "match": {
+          "exe": "/usr/bin/php",
+          "args": [
+            "/srv/api/main.php"
+          ]
+        },
+        "descendants": {
+          "existing": true,
+          "future": true,
+          "boundary": "exec_ends_the_grant",
+          "root_exit": "survivors_keep_their_grants",
+          "replacement": "needs_restart"
+        }
+      }
+    ],
+    "exclude": [],
+    "libraries": []
+  },
+  "traffic_scope": {
+    "rules": [
+      {
+        "targets": [
+          "api-server"
+        ],
+        "direction": "outbound",
+        "local_ports": [],
+        "remote_ports": [
+          443
+        ]
+      }
+    ]
+  },
+  "retention_and_export": {
+    "retain_plaintext": false,
+    "export_sinks": [
+      "export"
+    ]
+  },
+  "packs": [],
+  "sinks": [
+    {
+      "name": "export",
+      "kind": "remote_export"
+    },
+    {
+      "name": "summary",
+      "kind": "stdout_summary"
+    }
+  ],
+  "pipelines": [
+    {
+      "name": "connections",
+      "input": "connection",
+      "slots": [
+        {
+          "name": "summarise",
+          "implementation": "connection-summariser",
+          "on_failure": "stop_pipeline"
+        }
+      ],
+      "sinks": [
+        "export",
+        "summary"
+      ],
+      "queues": []
+    }
+  ],
+  "subscribers": [],
+  "policy": []
+}

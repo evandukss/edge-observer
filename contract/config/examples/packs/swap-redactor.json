@@ -1,0 +1,18 @@
+{
+  "version": "observer.pack/draft",
+  "name": "swap-redactor",
+  "pack_version": "0.1.0",
+  "components": [],
+  "pipelines": [],
+  "replacements": [
+    {
+      "pipeline": "exchanges",
+      "slot": "redact",
+      "implementation": "truncating-redactor",
+      "configuration": {
+        "length": 4096
+      }
+    }
+  ],
+  "policy": []
+}

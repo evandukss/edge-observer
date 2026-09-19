@@ -1,0 +1,22 @@
+{
+  "purpose": "structurally valid, the operation known and every reference resolved, and the runtime has no enforcement point for it: the whole configuration is refused, not only the pipeline",
+  "without_enforcement_points": ["sink_admission"],
+  "documents": [
+    {"source": "operator", "document": {
+      "vocabulary": "observer.policy/draft",
+      "requirements": [
+        {"id": "r-structure", "target": {"kind": "sink", "name": "local-account"}, "operation": "require_output_structure",
+         "parameters": {"structure": "exchange-record"}, "failure_action": "drop_and_account"}
+      ]
+    }}
+  ],
+  "expected": {
+    "findings": [
+      {"declaration": "r-structure", "disposition": "refuse_assurance", "reason": "no_enforcement_point", "pipelines": ["capture", "diagnostics"]}
+    ],
+    "activations": [
+      {"pipeline": "capture", "activates": false, "refused_by": ["r-structure"]},
+      {"pipeline": "diagnostics", "activates": false, "refused_by": ["r-structure"]}
+    ]
+  }
+}

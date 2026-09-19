@@ -1,0 +1,121 @@
+{
+  "version": "observer.config/draft",
+  "observer": {
+    "log": "stdout",
+    "directory": "/var/lib/observer",
+    "spool_bound_mib": 64,
+    "state_every_seconds": 30
+  },
+  "observation_scope": {
+    "targets": [
+      {
+        "name": "api-server",
+        "match": {
+          "exe": "/usr/bin/php",
+          "args": [
+            "/srv/api/main.php"
+          ]
+        },
+        "descendants": {
+          "existing": true,
+          "future": true,
+          "boundary": "exec_ends_the_grant",
+          "root_exit": "survivors_keep_their_grants",
+          "replacement": "needs_restart"
+        }
+      }
+    ],
+    "exclude": [],
+    "libraries": []
+  },
+  "traffic_scope": {
+    "rules": [
+      {
+        "targets": [],
+        "direction": "any",
+        "local_ports": [],
+        "remote_ports": []
+      }
+    ]
+  },
+  "retention_and_export": {
+    "retain_plaintext": true,
+    "export_sinks": [
+      "export"
+    ]
+  },
+  "packs": [
+    "acme-classifier"
+  ],
+  "sinks": [
+    {
+      "name": "account",
+      "kind": "local_account"
+    },
+    {
+      "name": "export",
+      "kind": "remote_export"
+    }
+  ],
+  "pipelines": [
+    {
+      "name": "exchanges",
+      "input": "reconstruction",
+      "slots": [
+        {
+          "name": "redact",
+          "implementation": "http-redactor",
+          "on_failure": "drop_and_account"
+        },
+        {
+          "name": "classify",
+          "implementation": "acme-classifier",
+          "configuration": {
+            "labels": "operations"
+          },
+          "on_failure": "stop_pipeline"
+        }
+      ],
+      "sinks": [
+        "account"
+      ],
+      "queues": [
+        {
+          "name": "classify-in"
+        }
+      ]
+    }
+  ],
+  "subscribers": [
+    {
+      "name": "notes",
+      "stream": "exchanges",
+      "implementation": "annotation-subscriber"
+    }
+  ],
+  "policy": [
+    {
+      "vocabulary": "observer.policy/draft",
+      "requirements": [
+        {
+          "id": "classify-before-account",
+          "target": {
+            "kind": "sink",
+            "name": "account"
+          },
+          "operation": "order_before",
+          "parameters": {
+            "processor": "acme-classifier"
+          },
+          "failure_action": "stop_pipeline"
+        }
+      ],
+      "claims": [],
+      "approvals": [
+        {
+          "claim": "acme-labels"
+        }
+      ]
+    }
+  ]
+}
