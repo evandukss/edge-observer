@@ -1,0 +1,10 @@
+# Runners authorised to run the attach tests, which load BPF programs and place
+# uprobes inside a privileged container. One runner label per line.
+#
+# While this list is empty, no runner is authorised, the attach tests do not
+# run, and a change they apply to is reported PENDING AUTHORISATION rather than
+# green. Adding a label is the authorisation, and the pull request that adds it
+# runs the attach tests on that runner as its own check.
+#
+# Only a disposable runner belongs here: any pull request's code runs on it with
+# privilege, because a pull request can change the workflow that runs it.
