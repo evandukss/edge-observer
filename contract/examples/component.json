@@ -1,0 +1,46 @@
+{
+  "interface": "observer.component/draft",
+  "name": "acme-classifier",
+  "version": "2.3.0",
+  "role": "processor",
+  "execution": "external",
+  "input": {
+    "types": [
+      "reconstruction"
+    ],
+    "delivery": "batch"
+  },
+  "output": {
+    "records": [
+      "reconstruction"
+    ],
+    "derived": [
+      "annotation"
+    ],
+    "suppression": true,
+    "findings": false
+  },
+  "state": "per_connection",
+  "ordering": {
+    "records": "in_order_per_connection",
+    "after": [
+      "http-redactor"
+    ],
+    "before": []
+  },
+  "lifecycle": {
+    "startup": "handled",
+    "configuration_change": "handled",
+    "stream_closure": "handled",
+    "flush": "handled",
+    "shutdown": "handled"
+  },
+  "failures": [
+    "record_error",
+    "fatal",
+    "configuration_refused"
+  ],
+  "configuration_schema": {
+    "carried": "as supplied; its notation is not interpreted by this draft"
+  }
+}

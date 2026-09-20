@@ -1,0 +1,134 @@
+{
+  "account": "observer.account/1-draft",
+  "session": "dummy-session",
+  "moment": "sealed",
+  "at": {
+    "state": "undetermined",
+    "domain": "wall",
+    "unit": "nanoseconds"
+  },
+  "provenance": {
+    "state": "carried",
+    "observer": {
+      "state": "not_carried"
+    },
+    "contracts": [
+      "observer.account/1-draft",
+      "observer.record/1-draft"
+    ],
+    "configuration": {
+      "state": "not_carried"
+    },
+    "pipelines": {
+      "state": "not_carried"
+    }
+  },
+  "scope": {
+    "state": "carried",
+    "requested": {
+      "state": "not_carried"
+    },
+    "targets": [],
+    "exclusions": [],
+    "overlap": {
+      "state": "not_carried"
+    },
+    "placement": {
+      "state": "not_carried"
+    },
+    "coverage": {
+      "state": "not_carried"
+    },
+    "instances": {
+      "state": "not_carried"
+    },
+    "filters": {
+      "state": "not_carried"
+    },
+    "limits": [
+      "Constructed dummy documents; no capture was performed."
+    ]
+  },
+  "capture": {
+    "state": "unavailable",
+    "why": "Constructed dummy documents; no capture was performed."
+  },
+  "reconstruction": {
+    "state": "not_carried"
+  },
+  "processing": {
+    "state": "not_carried"
+  },
+  "requirements": {
+    "state": "not_carried"
+  },
+  "seal": {
+    "state": "carried",
+    "stopped": {
+      "state": "undetermined",
+      "domain": "wall",
+      "unit": "nanoseconds"
+    },
+    "sealed": {
+      "state": "undetermined",
+      "domain": "wall",
+      "unit": "nanoseconds"
+    },
+    "complete": false,
+    "because": [
+      "Constructed dummy documents; no capture was performed."
+    ],
+    "withdrawal": {
+      "at": {
+        "state": "undetermined",
+        "domain": "wall",
+        "unit": "nanoseconds"
+      },
+      "instances": "0",
+      "complete": false
+    },
+    "drain": {
+      "delivered": {
+        "state": "undetermined",
+        "unit": "events"
+      },
+      "outstanding": {
+        "state": "undetermined",
+        "unit": "events"
+      },
+      "complete": false
+    },
+    "interrupted": {
+      "state": "undetermined",
+      "unit": "calls"
+    },
+    "counters": {},
+    "conserved": [],
+    "recorded": {
+      "state": "not_carried"
+    },
+    "members": [
+      {
+        "role": "observations",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "records": "0"
+      },
+      {
+        "role": "connections",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "records": "0"
+      },
+      {
+        "role": "reconstructions",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "records": "0"
+      },
+      {
+        "role": "reassembly",
+        "sha256": "35922dcdca287ebab289cd207945ad3610bba2d59f3b2ff890634848ab8af0cc",
+        "records": "1"
+      }
+    ]
+  },
+  "extensions": {}
+}

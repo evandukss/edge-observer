@@ -2,10 +2,9 @@
 
 Status: Live, draft contracts `observer.config/draft`, `observer.pack/draft` and
 `observer.component/draft`. The notation below is the one the examples in `examples/` and the worked
-cases in `testdata/cases/` are written in. **It is not a frozen schema**: which schema language the
-contracts are written in, and how a validator executes it, is an open decision, and the versions stay
-`draft` until it is taken. What is specified here is the SEMANTICS and the static check, which no
-schema language supplies.
+cases in `testdata/cases/` are written in. **These remain draft contracts.** No machine-readable schema is published; example JSON files
+show the document shapes, and the tool's Go validators enforce the contracts. What is specified here
+is the semantics and the static check.
 
 ## Three documents and one inventory
 

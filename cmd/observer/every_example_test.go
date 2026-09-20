@@ -47,7 +47,7 @@ func moduleRoot(t *testing.T) string {
 // examplesFloor is the fewest example files the walk must find before its
 // result means anything: the count when set, held as a floor so later
 // examples need no edit here.
-const examplesFloor = 10
+const examplesFloor = 18
 
 // executor is the program an examples directory describes, run over that
 // directory through a filesystem that records every file opened. It returns
@@ -64,6 +64,8 @@ type executor struct {
 var executors = []executor{
 	{"contract/config/examples", "observer dry-run over every *.config.json", dryRunEvery},
 	{"contract/config/examples", "the configuration check over every example index.json lists", checkAsIndexed},
+	{"contract/examples/bundle", "the account validator over the dummy bundle", checkDocumentBundle},
+	{"contract", "the configuration and policy checks over standalone declarations", checkDocumentDeclarations},
 }
 
 // notExecuted is every example file deliberately executed by nothing, each

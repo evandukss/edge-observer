@@ -1,0 +1,23 @@
+{
+  "vocabulary": "observer.policy/draft",
+  "requirements": [
+    {
+      "id": "classify-before-account",
+      "target": {
+        "kind": "sink",
+        "name": "account"
+      },
+      "operation": "order_before",
+      "parameters": {
+        "processor": "acme-classifier"
+      },
+      "failure_action": "stop_pipeline"
+    }
+  ],
+  "claims": [],
+  "approvals": [
+    {
+      "claim": "acme-labels"
+    }
+  ]
+}

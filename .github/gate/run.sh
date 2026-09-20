@@ -32,7 +32,7 @@ static)
 	target=go memory=2304m result=steps steps=7
 	;;
 unit)
-	target=go memory=1472m result=tests floor=521 list=list-unit
+	target=go memory=1472m result=tests floor=522 list=list-unit
 	;;
 attach)
 	# Loading BPF programs and placing uprobes needs a privileged container. Some
