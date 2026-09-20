@@ -11,9 +11,8 @@
 // round it silently.
 package record
 
-// Version names the contract these types encode. It is a DRAFT: the notation a
-// schema would be written in is not decided, and nothing here is frozen until it
-// is.
+// Version names the draft contract these types encode. No machine-readable
+// schema is published; the tool's Go validators enforce the contract.
 const Version = "observer.record/1-draft"
 
 // The record kinds, carried on every record so a line read alone says what it

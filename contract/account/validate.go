@@ -205,7 +205,7 @@ const (
 	// has.
 	SchemaUnavailable = "schema_unavailable"
 	// SchemaNotExecutable is a schema the bundle carries and nothing here can
-	// execute, because no schema language is chosen.
+	// execute.
 	SchemaNotExecutable = "schema_not_executable"
 )
 

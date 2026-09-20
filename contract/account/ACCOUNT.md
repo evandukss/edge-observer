@@ -1,9 +1,9 @@
 # Observer account contract
 
 Versions: account `observer.account/1-draft`, bundle `observer.bundle/1-draft`. **DRAFT and not frozen.**
-The notation a schema is written in, and how a Go validator executes one, are not decided; until they are,
-this document is the contract and the Go types in this directory encode it. Where the two disagree this
-document is corrected first.
+No machine-readable schema is published; example JSON files show the document shapes, and the tool's
+Go validators enforce the contracts. This document is the contract and the Go types in this directory
+encode it. Where the two disagree this document is corrected first.
 
 The account is what the observer says about ONE capture session: what was asked for and what it resolved
 to, what was attached, what came through, what was lost, what could not be established, what processing
@@ -344,8 +344,8 @@ causes are several findings.
 
 `extensions[]` has one `{namespace, schema, state, why}` per section: `conforms`, `nonconforming`, or
 `not_checked` with `schema_unavailable` - neither the bundle nor the validator has that id - or
-`schema_not_executable` - the bundle carries a schema file and nothing can execute it, because no schema
-language is chosen. A nonconforming section refuses the bundle with `extension_invalid`.
+`schema_not_executable` - the bundle carries a schema file and the validator has no checker for its id.
+A nonconforming section refuses the bundle with `extension_invalid`.
 
 `examined` says how much was looked at - `members`, `records`, `blocks` - so a result can be told from one
 that examined nothing.
@@ -439,9 +439,8 @@ that protects any case where the cause does not block inspection, and not the ca
 reference.** A refused link beside a member genuinely absent elsewhere is two findings.
 
 The result says how many files it read and how many references it found, so a tree with none is told from a
-check that read nothing. **Whether an identifier with a scheme is ever FETCHED is a property of whatever
-executes a schema, and that is not chosen**; the check refuses the forms that would reach outside by location,
-and the schema language brings its own reference forms when it is chosen.
+check that read nothing. **This check does not execute carried schemas or fetch identifiers with a
+scheme**; it refuses the reference forms described above that would reach outside by location.
 
 ## Writing an account and a bundle
 

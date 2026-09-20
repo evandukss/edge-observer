@@ -1,8 +1,9 @@
 # Observer record contracts
 
-Version: `observer.record/1-draft`. **DRAFT and not frozen.** The notation a schema is written in, and how
-a Go validator executes one, are not decided; until they are, this document is the contract and the Go
-types in this directory encode it. Where the two disagree this document is corrected first.
+Version: `observer.record/1-draft`. **DRAFT and not frozen.** No machine-readable schema is published;
+example JSON files show the document shapes, and the tool's Go validators enforce the contract. This
+document is the contract and the Go types in this directory encode it. Where the two disagree this
+document is corrected first.
 
 These are the records the observer PRODUCES about what it captured. They are domain-neutral: nothing here
 names a business operation or a privacy rule, and a field that only a domain reader needs belongs to a pack.

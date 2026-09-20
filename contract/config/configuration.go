@@ -12,8 +12,8 @@ package config
 
 import "encoding/json"
 
-// Versions this draft reads. They stay drafts until the schema language is
-// chosen, so no document written against them is frozen.
+// Versions this draft reads. No machine-readable schema is published;
+// example JSON files show the shapes, and the Go validators enforce the contracts.
 const (
 	ConfigurationVersion = "observer.config/draft"
 	ManifestVersion      = "observer.pack/draft"

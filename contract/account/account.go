@@ -14,8 +14,8 @@ import (
 	"github.com/evandukss/edge-observer/contract/record"
 )
 
-// The versions this draft names. They are drafts: nothing is frozen until the
-// schema notation is decided.
+// The versions this draft names. No machine-readable schema is published;
+// example JSON files show the shapes, and the Go validators enforce the contracts.
 const (
 	Version       = "observer.account/1-draft"
 	BundleVersion = "observer.bundle/1-draft"

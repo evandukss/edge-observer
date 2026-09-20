@@ -9,8 +9,8 @@
 // validated its structure and not implemented its behaviour.
 package policy
 
-// Vocabulary is the one version this draft reads. It stays a draft until the
-// schema language is chosen, so no document written against it is frozen.
+// Vocabulary is the one version this draft reads. No machine-readable schema is
+// published; example JSON files show the shapes, and the Go validators enforce it.
 const Vocabulary = "observer.policy/draft"
 
 // Source is who declared a document. It is attached by whoever loaded the

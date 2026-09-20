@@ -115,8 +115,8 @@ operator gives none, and what it holds, is not decided here (`examples/no-extens
 such configuration written out, not a default).
 
 A slot's `configuration` and a replacement's `configuration` are carried as supplied. They are checked
-against nothing in this draft, because the component's `configuration_schema` is in the notation the
-open schema decision chooses.
+against nothing in this draft, because the Go validators carry the component's `configuration_schema`
+without interpreting it.
 
 ### Subscribers
 
@@ -217,7 +217,7 @@ that lifecycle hooks are supporting and carry no processing.
 encoding of records and batches on the wire; how a derived record's link to observation ids is carried;
 how a suppression decision names the record it suppresses; how and when each lifecycle hook is
 delivered and acknowledged; flow control, back-pressure and timeouts; how a `fatal` or a crash is
-observed and how `configuration_refused` is reported; how `configuration_schema` is expressed; and
+observed and how `configuration_refused` is reported; and
 version negotiation between the core and a component. **No execution budget is part of this interface**
 (`contract/policy`, VOCABULARY.md, "Not in this vocabulary").
 

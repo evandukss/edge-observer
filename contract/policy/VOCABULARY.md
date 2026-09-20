@@ -1,9 +1,9 @@
 # The policy-declaration vocabulary
 
 Status: Live, draft vocabulary `observer.policy/draft`. The notation below is the one the worked cases
-in `testdata/cases/` are written in. **It is not a frozen schema**: which schema language the contracts
-are written in, and how a validator executes it, is an open decision, and the version identifier stays
-`draft` until it is taken. What is specified here is the SEMANTICS, which no schema language supplies.
+in `testdata/cases/` are written in. **This remains a draft contract.** No machine-readable schema is
+published; example JSON files show the document shapes, and the tool's Go validators enforce the
+contract. What is specified here is the SEMANTICS, which no schema language supplies.
 
 ## The guarantee
 

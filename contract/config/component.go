@@ -35,8 +35,8 @@ type Component struct {
 
 	// ConfigurationSchema is the schema the component's own configuration is
 	// checked against. It is DECLARED: a configuration it admits is well formed,
-	// which says nothing about whether the component obeys it. Its notation is
-	// the open schema decision, so it is carried and not interpreted.
+	// which says nothing about whether the component obeys it. It is carried
+	// and not interpreted by this draft's Go validators.
 	ConfigurationSchema json.RawMessage `json:"configuration_schema,omitempty"`
 }
 
