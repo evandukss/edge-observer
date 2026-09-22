@@ -8,3 +8,4 @@
 #
 # Only a disposable runner belongs here: any pull request's code runs on it with
 # privilege, because a pull request can change the workflow that runs it.
+ubuntu-24.04
