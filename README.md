@@ -30,10 +30,13 @@ proven, and what does not work. Read it before relying on anything here.
   maintainer authorises one. [CONTRIBUTING.md](CONTRIBUTING.md) says how to run them yourself.
 - **Whether the observer needs the host's pid namespace when it runs in a container is not
   established.** Its tests do: in one container run without it, 27 of their 182 failed.
-- **x86-64 is the only architecture declared, and it has never been observed.** No recorded run has
-  loaded the programs on an x86-64 host. Every recorded run was on arm64, where `observer preflight`
-  reports the architecture as missing. [docs/compatibility.md](docs/compatibility.md) lists the kernels
-  observed.
+- **x86-64 is the only architecture declared, and `observer preflight` refuses arm64 - the
+  architecture the observer demonstrably runs on.** The x86-64 programs were first exercised on
+  2026-09-22, on a hosted runner reporting `Linux 6.17.0-1022-azure x86_64`, where the attach suite
+  ran all 182 of its tests with none skipped and none failed. Every run before that was on arm64,
+  where preflight reports the architecture as missing and so returns NOT READY. Whether the
+  declaration should change is open. [docs/compatibility.md](docs/compatibility.md) lists what has
+  been observed and what that run does and does not establish.
 - **The kernel floor, 5.15, has never been observed.** It is the oldest release declared; no run on it
   is recorded, and every account the observer writes says so.
 - **The exchanges `inspect --text` prints are checked on constructed input only.** The test that runs
