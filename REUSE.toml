@@ -1,15 +1,16 @@
 version = 1
 
 # Every file is the project's own and under the Mozilla Public License 2.0,
-# unless the file states otherwise itself, as the three BPF sources do.
+# unless the file states otherwise itself, as the three BPF sources do: they
+# are GPL-2.0-only, which is the exception this default is read against.
 [[annotations]]
 path = "**"
 precedence = "closest"
 SPDX-FileCopyrightText = "The Edge Observer contributors"
 SPDX-License-Identifier = "MPL-2.0"
 
-# The compiled BPF programs, built from those sources and offered under the same
-# choice of licence.
+# The compiled BPF programs, built from those sources and under the same licence
+# as them.
 [[annotations]]
 path = [
 	"bpf/full_arm64_bpfel.o",
@@ -19,10 +20,11 @@ path = [
 ]
 precedence = "override"
 SPDX-FileCopyrightText = "The Edge Observer contributors"
-SPDX-License-Identifier = "MPL-2.0 OR GPL-2.0-only"
+SPDX-License-Identifier = "GPL-2.0-only"
 
 # The Go bindings bpf2go generates beside them: what they describe of the
-# programs is the project's, and the code around it is bpf2go's template.
+# programs is the project's and travels with the programs' licence, and the
+# code around it is bpf2go's template, which stays MIT.
 [[annotations]]
 path = [
 	"bpf/full_arm64_bpfel.go",
@@ -37,4 +39,4 @@ SPDX-FileCopyrightText = [
 	"2018, 2019 Cloudflare",
 	"2019 Authors of Cilium",
 ]
-SPDX-License-Identifier = "MPL-2.0 AND MIT"
+SPDX-License-Identifier = "GPL-2.0-only AND MIT"

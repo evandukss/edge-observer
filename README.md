@@ -222,21 +222,26 @@ privately, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) what is expected of ever
 
 ## Licence
 
-The observer is licensed under the Mozilla Public License 2.0, in [LICENSE](LICENSE), apart from the BPF
-programs and what is generated from them:
+The observer is licensed under the Mozilla Public License 2.0, in [LICENSE](LICENSE). **The BPF
+component is the exception, and it is GPL-2.0-only**:
 
     bpf/ssl.bpf.h  bpf/sslfull.bpf.c  bpf/sslmeta.bpf.c
-        the BPF program sources: the Mozilla Public License 2.0 or the GNU General Public License
-        version 2 only, at your choice, as each file's licence header states
+        the BPF program sources: the GNU General Public License version 2 only, as each file's
+        licence header states
     bpf/full_arm64_bpfel.o  bpf/full_x86_bpfel.o  bpf/meta_arm64_bpfel.o  bpf/meta_x86_bpfel.o
-        the compiled programs, built from those sources: the same choice
+        the compiled programs, built from those sources: the same
     bpf/full_arm64_bpfel.go  bpf/full_x86_bpfel.go  bpf/meta_arm64_bpfel.go  bpf/meta_x86_bpfel.go
-        the Go bindings bpf2go generates for them: the Mozilla Public License 2.0 for what they
-        describe of the programs, and the MIT licence for the code bpf2go's template supplies
+        the Go bindings bpf2go generates for them, each embedding one of those objects: the same
+        for what they describe of the programs, and the MIT licence for the code bpf2go's template
+        supplies
 
-The programs declare their licence to the kernel as "Dual MPL/GPL", which the kernel treats as
-GPL-compatible. They need that, because they call helpers the kernel offers only to GPL-compatible
-programs: `bpf_probe_read_kernel`, `bpf_probe_read_user` and `bpf_get_current_task`.
+The programs declare their licence to the kernel as "GPL". They need a GPL-compatible declaration,
+because they call helpers the kernel offers only to GPL-compatible programs:
+`bpf_probe_read_kernel`, `bpf_probe_read_user` and `bpf_get_current_task`.
+
+**This arrangement is what Linux expressly permits**: a GPL BPF program runs alongside userspace
+software under a separate licence, so the observer's own code stays MPL-2.0 and only the programs
+the kernel loads are GPL.
 
 [REUSE.toml](REUSE.toml) records every file's licence in a form tools can read. The licence texts it
 names are in [LICENSES](LICENSES), each copied unchanged from release v3.29.0 of the SPDX License List
