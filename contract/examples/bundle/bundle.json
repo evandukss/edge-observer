@@ -1,0 +1,37 @@
+{
+  "bundle": "observer.bundle/1-draft",
+  "session": "dummy-session",
+  "members": [
+    {
+      "role": "account",
+      "path": "account.json",
+      "contract": "observer.account/1-draft",
+      "sha256": "91f9b35c75b5079c63fc2313e5a6942dd5e440f14fa2b8ce82353fa9efdd7253"
+    },
+    {
+      "role": "observations",
+      "path": "observations.jsonl",
+      "contract": "observer.record/1-draft",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "role": "connections",
+      "path": "connections.jsonl",
+      "contract": "observer.record/1-draft",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "role": "reconstructions",
+      "path": "reconstructions.jsonl",
+      "contract": "observer.record/1-draft",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "role": "reassembly",
+      "path": "reassembly.jsonl",
+      "contract": "observer.record/1-draft",
+      "sha256": "35922dcdca287ebab289cd207945ad3610bba2d59f3b2ff890634848ab8af0cc"
+    }
+  ],
+  "schemas": []
+}

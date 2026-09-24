@@ -1,0 +1,21 @@
+{
+  "purpose": "a document written against a vocabulary version this runtime does not read: nothing in it is read, and every pipeline is refused",
+  "documents": [
+    {"source": "operator", "document": {
+      "vocabulary": "observer.policy/v1",
+      "requirements": [
+        {"id": "r-queue", "target": {"kind": "queue", "name": "capture-out"}, "operation": "bound_size",
+         "parameters": {"max_records": 10000}, "failure_action": "drop_and_account"}
+      ]
+    }}
+  ],
+  "expected": {
+    "findings": [
+      {"declaration": "document:0", "disposition": "refuse_activation", "reason": "unknown_version", "pipelines": ["capture", "diagnostics"]}
+    ],
+    "activations": [
+      {"pipeline": "capture", "activates": false, "refused_by": ["document:0"]},
+      {"pipeline": "diagnostics", "activates": false, "refused_by": ["document:0"]}
+    ]
+  }
+}

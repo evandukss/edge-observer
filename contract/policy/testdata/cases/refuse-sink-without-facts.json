@@ -1,0 +1,78 @@
+{
+  "purpose": "a sink the runtime cannot say leaves the host or keeps plaintext is a missing capability, whether a requirement targets it or dispatches through it",
+  "without_sink_facts": [
+    "diagnostics-log"
+  ],
+  "documents": [
+    {
+      "source": "operator",
+      "document": {
+        "vocabulary": "observer.policy/draft",
+        "requirements": [
+          {
+            "id": "r-dispatch",
+            "target": {
+              "kind": "pipeline",
+              "name": "diagnostics"
+            },
+            "operation": "dispatch_through",
+            "parameters": {
+              "sink": "diagnostics-log"
+            },
+            "failure_action": "stop_pipeline"
+          },
+          {
+            "id": "r-structure",
+            "target": {
+              "kind": "sink",
+              "name": "diagnostics-log"
+            },
+            "operation": "require_output_structure",
+            "parameters": {
+              "structure": "exchange-record"
+            },
+            "failure_action": "drop_and_account"
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "findings": [
+      {
+        "declaration": "r-dispatch",
+        "disposition": "refuse_activation",
+        "reason": "missing_capability",
+        "pipelines": [
+          "diagnostics"
+        ]
+      },
+      {
+        "declaration": "r-structure",
+        "disposition": "refuse_activation",
+        "reason": "missing_capability",
+        "pipelines": [
+          "capture",
+          "diagnostics"
+        ]
+      }
+    ],
+    "activations": [
+      {
+        "pipeline": "capture",
+        "activates": false,
+        "refused_by": [
+          "r-structure"
+        ]
+      },
+      {
+        "pipeline": "diagnostics",
+        "activates": false,
+        "refused_by": [
+          "r-dispatch",
+          "r-structure"
+        ]
+      }
+    ]
+  }
+}

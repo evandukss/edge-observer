@@ -1,0 +1,60 @@
+# A release: pushing a v* tag runs the whole gate on the tagged commit and, only
+# if it is green, publishes the archive built from that exact commit, its digest,
+# a signed provenance attestation and notes.
+#
+# This is the only workflow that can write to the repository, and a fork cannot
+# trigger it: pushing a tag needs write access. A tag names a release once, and an
+# existing release is never replaced - a correction is a new version.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    uses: ./.github/workflows/gate.yml
+
+  publish:
+    needs: gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write # create the release and attach its files
+      id-token: write # sign the provenance attestation
+      attestations: write # store it
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: The tag names a reviewed commit on main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "::error::$GITHUB_REF_NAME names $GITHUB_SHA, which is not on main"
+            exit 1
+          }
+      - name: Build the archive
+        env:
+          GATE_OUT: ${{ runner.temp }}/gate
+        run: |
+          test -z "$(git status --porcelain)" || { echo "the checkout is not clean"; exit 1; }
+          .github/gate/run.sh archive "$GITHUB_SHA"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/gate/archive/observer-linux-amd64.tar.gz
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          DIR: ${{ runner.temp }}/gate/archive
+        run: |
+          flags=(--verify-tag --generate-notes --title "$TAG")
+          case "$TAG" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$TAG" "${flags[@]}" \
+            "$DIR/observer-linux-amd64.tar.gz" "$DIR/observer-linux-amd64.sha256"

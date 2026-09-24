@@ -1,0 +1,90 @@
+{
+  "purpose": "a pipeline dispatches through a sink that is not configured",
+  "configuration": {
+    "version": "observer.config/draft",
+    "observer": {
+      "log": "stdout",
+      "directory": "/var/lib/observer",
+      "spool_bound_mib": 64,
+      "state_every_seconds": 30
+    },
+    "observation_scope": {
+      "targets": [
+        {
+          "name": "api-server",
+          "match": {
+            "exe": "/usr/bin/php",
+            "args": [
+              "/srv/api/main.php"
+            ]
+          },
+          "descendants": {
+            "existing": true,
+            "future": true,
+            "boundary": "exec_ends_the_grant",
+            "root_exit": "survivors_keep_their_grants",
+            "replacement": "needs_restart"
+          }
+        }
+      ],
+      "exclude": [],
+      "libraries": []
+    },
+    "traffic_scope": {
+      "rules": [
+        {
+          "targets": [],
+          "direction": "any",
+          "local_ports": [],
+          "remote_ports": []
+        }
+      ]
+    },
+    "retention_and_export": {
+      "retain_plaintext": true,
+      "export_sinks": []
+    },
+    "packs": [],
+    "sinks": [
+      {
+        "name": "account",
+        "kind": "local_account"
+      }
+    ],
+    "pipelines": [
+      {
+        "name": "exchanges",
+        "input": "reconstruction",
+        "slots": [
+          {
+            "name": "redact",
+            "implementation": "http-redactor",
+            "on_failure": "drop_and_account"
+          }
+        ],
+        "sinks": [
+          "absent"
+        ],
+        "queues": [
+          {
+            "name": "exchanges-out"
+          }
+        ]
+      }
+    ],
+    "subscribers": [],
+    "policy": []
+  },
+  "manifests": [],
+  "expected": {
+    "outcome": "composition_refused",
+    "structural": [],
+    "composition": [
+      {
+        "document": "configuration",
+        "subject": "sink:absent",
+        "reason": "unknown_sink"
+      }
+    ]
+  }
+}

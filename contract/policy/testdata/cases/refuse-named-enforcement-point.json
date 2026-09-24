@@ -1,0 +1,14 @@
+{
+  "purpose": "a requirement that names its own enforcement point: the member is undefined, so the document does not decode, and a declarer cannot introduce a guarantee by naming one",
+  "documents": [
+    {"source": "pack", "document": {
+      "vocabulary": "observer.policy/draft",
+      "requirements": [
+        {"id": "r-structure", "target": {"kind": "sink", "name": "local-account"}, "operation": "require_output_structure",
+         "parameters": {"structure": "exchange-record"}, "failure_action": "drop_and_account",
+         "enforcement_point": "sink_admission"}
+      ]
+    }}
+  ],
+  "expected": {"decode_refused": true}
+}

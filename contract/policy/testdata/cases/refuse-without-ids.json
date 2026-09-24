@@ -1,0 +1,31 @@
+{
+  "purpose": "two requirements and a claim with no id: each is refused under a name made from its position, so no two refusals share a name in what an activation lists",
+  "documents": [
+    {"source": "operator", "document": {
+      "vocabulary": "observer.policy/draft",
+      "requirements": [
+        {"target": {"kind": "queue", "name": "capture-out"}, "operation": "bound_size",
+         "parameters": {"max_records": 10000}, "failure_action": "drop_and_account"},
+        {"target": {"kind": "sink", "name": "local-account"}, "operation": "require_output_structure",
+         "parameters": {"structure": "exchange-record"}, "failure_action": "drop_and_account"}
+      ]
+    }},
+    {"source": "pack", "document": {
+      "vocabulary": "observer.policy/draft",
+      "claims": [
+        {"component": "classifier", "statement": "the classifier removes email addresses from message bodies"}
+      ]
+    }}
+  ],
+  "expected": {
+    "findings": [
+      {"declaration": "requirement:0.0", "disposition": "refuse_activation", "reason": "malformed", "pipelines": ["capture"]},
+      {"declaration": "requirement:0.1", "disposition": "refuse_activation", "reason": "malformed", "pipelines": ["capture"]},
+      {"declaration": "claim:1.0", "disposition": "refuse_activation", "reason": "malformed", "pipelines": ["capture"]}
+    ],
+    "activations": [
+      {"pipeline": "capture", "activates": false, "refused_by": ["requirement:0.0", "requirement:0.1", "claim:1.0"]},
+      {"pipeline": "diagnostics", "activates": true}
+    ]
+  }
+}

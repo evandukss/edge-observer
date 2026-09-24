@@ -1,0 +1,150 @@
+# The gate. It runs on every pull request, on every push to main - which is how a
+# merge arrives - and on a release tag, through release.yml.
+#
+# The one required check is `verdict`. It names every obligation, and it is green
+# only when every obligation the change is subject to ran and passed; plan.sh
+# decides which those are from the paths the change touches.
+#
+# A pull request's code runs here before anybody has reviewed it, and it can
+# change this file. So no job here holds a secret or a token that can write, and
+# the one privileged job runs only on runners listed in
+# .github/gate/privileged-runners.
+name: gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      plan: ${{ steps.plan.outputs.plan }}
+      static: ${{ steps.plan.outputs.static }}
+      unit: ${{ steps.plan.outputs.unit }}
+      bpf: ${{ steps.plan.outputs.bpf }}
+      artifact: ${{ steps.plan.outputs.artifact }}
+      attach: ${{ steps.plan.outputs.attach }}
+      runners: ${{ steps.plan.outputs.runners }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          # A pull request is checked out as its merge into the base branch, so
+          # the change is that commit against its first parent.
+          if [ "$EVENT" = pull_request ]; then
+            .github/gate/plan.sh diff HEAD^1 HEAD
+          elif [[ "$REF" == refs/tags/* ]]; then
+            .github/gate/plan.sh all "a release is qualified on every obligation"
+          elif [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ] \
+            && git fetch --no-tags --depth=1 origin "$BEFORE"; then
+            .github/gate/plan.sh diff "$BEFORE" HEAD
+          else
+            .github/gate/plan.sh all "the commit before this push is not available to compare against"
+          fi
+
+  static:
+    needs: plan
+    if: needs.plan.outputs.static == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: .github/gate/run.sh static
+        env:
+          GATE_OUT: ${{ runner.temp }}/gate
+
+  unit:
+    needs: plan
+    if: needs.plan.outputs.unit == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: .github/gate/run.sh unit
+        env:
+          GATE_OUT: ${{ runner.temp }}/gate
+
+  bpf:
+    needs: plan
+    if: needs.plan.outputs.bpf == 'true'
+    # bpf/gen.go compiles against the arm64 multiarch include directory, so the
+    # objects can be regenerated only on arm64.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: .github/gate/run.sh bpf
+        env:
+          GATE_OUT: ${{ runner.temp }}/gate
+
+  artifact:
+    needs: plan
+    if: needs.plan.outputs.artifact == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The archive is built exactly as a release builds it, checked, and thrown
+      # away: nothing here uploads or publishes it.
+      - run: |
+          test -z "$(git status --porcelain)" || { echo "the checkout is not clean"; exit 1; }
+          .github/gate/run.sh archive "$(git rev-parse HEAD)"
+        env:
+          GATE_OUT: ${{ runner.temp }}/gate
+
+  attach:
+    needs: plan
+    if: needs.plan.outputs.attach == 'true' && needs.plan.outputs.runners != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(needs.plan.outputs.runners) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: uname -srm && .github/gate/run.sh attach
+        env:
+          GATE_OUT: ${{ runner.temp }}/gate
+
+  verdict:
+    needs: [plan, static, unit, bpf, artifact, attach]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: .github/gate/verdict.sh
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          PLAN: ${{ needs.plan.outputs.plan }}

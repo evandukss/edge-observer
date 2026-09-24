@@ -1,0 +1,27 @@
+{
+  "purpose": "the memory budget smuggled onto bound_size as a parameter it does not define, beside a valid one and in place of the required one: named as an unknown parameter both times",
+  "documents": [
+    {"source": "pack", "document": {
+      "vocabulary": "observer.policy/draft",
+      "requirements": [
+        {"id": "r-beside", "target": {"kind": "queue", "name": "capture-out"}, "operation": "bound_size",
+         "parameters": {"max_records": 10000, "max_memory_bytes": 67108864}, "failure_action": "stop_pipeline"},
+        {"id": "r-instead", "target": {"kind": "queue", "name": "diagnostics-out"}, "operation": "bound_size",
+         "parameters": {"max_memory_bytes": 67108864}, "failure_action": "stop_pipeline"},
+        {"id": "r-other-kind", "target": {"kind": "queue", "name": "diagnostics-out"}, "operation": "bound_size",
+         "parameters": {"max_record_bytes": 4096}, "failure_action": "stop_pipeline"}
+      ]
+    }}
+  ],
+  "expected": {
+    "findings": [
+      {"declaration": "r-beside", "disposition": "refuse_activation", "reason": "unknown_parameter", "pipelines": ["capture"]},
+      {"declaration": "r-instead", "disposition": "refuse_activation", "reason": "unknown_parameter", "pipelines": ["diagnostics"]},
+      {"declaration": "r-other-kind", "disposition": "refuse_activation", "reason": "unknown_parameter", "pipelines": ["diagnostics"]}
+    ],
+    "activations": [
+      {"pipeline": "capture", "activates": false, "refused_by": ["r-beside"]},
+      {"pipeline": "diagnostics", "activates": false, "refused_by": ["r-instead", "r-other-kind"]}
+    ]
+  }
+}

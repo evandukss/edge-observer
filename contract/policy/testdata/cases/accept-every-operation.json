@@ -1,0 +1,48 @@
+{
+  "purpose": "every operation, supported and in range, is accepted and names the enforcement point it rests on",
+  "documents": [
+    {"source": "operator", "document": {
+      "vocabulary": "observer.policy/draft",
+      "requirements": [
+        {"id": "r-project", "target": {"kind": "component", "name": "classifier"}, "operation": "project_fields",
+         "parameters": {"fields": ["message.body", "connection.id"]}, "failure_action": "none"},
+        {"id": "r-transform", "target": {"kind": "sink", "name": "local-account"}, "operation": "transform_field",
+         "parameters": {"field": "message.body", "transformation": "truncate", "arguments": {"length": 256}},
+         "failure_action": "drop_and_account"},
+        {"id": "r-redact", "target": {"kind": "component", "name": "classifier"}, "operation": "transform_field",
+         "parameters": {"field": "message.headers", "transformation": "redact"}, "failure_action": "stop_pipeline"},
+        {"id": "r-order", "target": {"kind": "sink", "name": "local-account"}, "operation": "order_before",
+         "parameters": {"processor": "classifier"}, "failure_action": "stop_pipeline"},
+        {"id": "r-structure", "target": {"kind": "sink", "name": "local-account"}, "operation": "require_output_structure",
+         "parameters": {"structure": "exchange-record"}, "failure_action": "drop_and_account"},
+        {"id": "r-suppress", "target": {"kind": "pipeline", "name": "diagnostics"}, "operation": "suppress_matching",
+         "parameters": {"all": [{"field": "connection.id", "test": "present"},
+                                {"field": "process.cmdline", "test": "has_prefix", "value": "/usr/bin/curl"}]},
+         "failure_action": "none"},
+        {"id": "r-queue", "target": {"kind": "queue", "name": "capture-out"}, "operation": "bound_size",
+         "parameters": {"max_records": 100000}, "failure_action": "drop_and_account"},
+        {"id": "r-record", "target": {"kind": "pipeline", "name": "diagnostics"}, "operation": "bound_size",
+         "parameters": {"max_record_bytes": 1}, "failure_action": "stop_pipeline"},
+        {"id": "r-dispatch", "target": {"kind": "pipeline", "name": "diagnostics"}, "operation": "dispatch_through",
+         "parameters": {"sink": "diagnostics-log"}, "failure_action": "stop_pipeline"}
+      ]
+    }}
+  ],
+  "expected": {
+    "findings": [
+      {"declaration": "r-project", "disposition": "accept", "reason": "enforced", "enforcement_point": "component_input_construction", "pipelines": ["capture"]},
+      {"declaration": "r-transform", "disposition": "accept", "reason": "enforced", "enforcement_point": "builtin_transformation", "pipelines": ["capture"]},
+      {"declaration": "r-redact", "disposition": "accept", "reason": "enforced", "enforcement_point": "builtin_transformation", "pipelines": ["capture"]},
+      {"declaration": "r-order", "disposition": "accept", "reason": "enforced", "enforcement_point": "pipeline_dispatch_order", "pipelines": ["capture"]},
+      {"declaration": "r-structure", "disposition": "accept", "reason": "enforced", "enforcement_point": "sink_admission", "pipelines": ["capture"]},
+      {"declaration": "r-suppress", "disposition": "accept", "reason": "enforced", "enforcement_point": "suppression_evaluation", "pipelines": ["diagnostics"]},
+      {"declaration": "r-queue", "disposition": "accept", "reason": "enforced", "enforcement_point": "queue_admission", "pipelines": ["capture"]},
+      {"declaration": "r-record", "disposition": "accept", "reason": "enforced", "enforcement_point": "record_admission", "pipelines": ["diagnostics"]},
+      {"declaration": "r-dispatch", "disposition": "accept", "reason": "enforced", "enforcement_point": "sink_dispatch", "pipelines": ["diagnostics"]}
+    ],
+    "activations": [
+      {"pipeline": "capture", "activates": true},
+      {"pipeline": "diagnostics", "activates": true}
+    ]
+  }
+}
