@@ -167,6 +167,14 @@ type Inspector interface {
 
 // Request is what a caller asks an adapter to attach to, and what it demands.
 type Request struct {
+	// DeliveryGate is shared by every placement and the processing worker for
+	// this capture. Nil preserves ungated delivery for callers that explicitly
+	// permit retention; protected activation must refuse a missing gate.
+	// Refusals reports DeliveryWithoutGate for every decoded event taking the
+	// nil path, so a missing gate is visible in the run's account. Reloads retain
+	// the gate installed at attachment and cannot replace it through a request.
+	DeliveryGate *DeliveryGate
+
 	// Processes is the whole approved set. Probes are placed on files and fire for
 	// every process running one, so asking per process would place (and report)
 	// everything twice. Which process an event came from is decided per event.
