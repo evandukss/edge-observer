@@ -228,6 +228,7 @@ type Account struct {
 	Admissions *Admissions           `json:"admissions,omitempty"`
 	Refused    *Refused              `json:"refused,omitempty"`
 	Spool      *spool.Stats          `json:"spool,omitempty"`
+	Processing *Processing           `json:"processing,omitempty"`
 
 	// Seal is how a sealed session ended; SealError why it could not be finalised.
 	Seal      *connection.Seal `json:"seal,omitempty"`
@@ -245,6 +246,31 @@ type Run struct {
 	Grants      []probe.Grant
 	GrantsErr   error
 	Spool       *spool.Stats
+	Processing  *Processing
+}
+
+// Processing carries session aggregates, never per-pipeline attribution.
+// Authorized and Written count route records: permission is not completion or
+// durable flush. ProcessingFailures counts affected active durable routes for
+// each batch's processing refusals: all active routes for a batch refusal, or
+// the affected pipeline's routes once for a pipeline refusal. Already-stopped
+// routes do not count again. These are not unique-route, batch or exchange counts;
+// a route may write a useful prefix and also count a refused suffix. OutputFailures
+// counts failed approved writes; neither is policy suppression or capture loss.
+// Internal artifact-serialization defects use the terminal error/seal reason,
+// not either counter.
+// GateReason is the current capture-wide invalidation reason, independently of
+// whether a candidate reached authorization. StoppedPipelines names the
+// pipelines stopped by their configured failure action, not a session terminal
+// state. Counts are the last returned worker outcome; the gate is read later.
+// Its presence identifies a session that does not create a raw spool.
+type Processing struct {
+	GateReason         probe.GateReason `json:"gate_reason"`
+	ProcessingFailures uint64           `json:"processing_failures"`
+	OutputFailures     uint64           `json:"output_failures"`
+	Authorized         uint64           `json:"authorized"`
+	Written            uint64           `json:"written"`
+	StoppedPipelines   []string         `json:"stopped_pipelines"`
 }
 
 // Plan is the account of a policy resolved and not attached. inspect, where
@@ -326,6 +352,12 @@ func (a *Account) Ran(at time.Time, run Run) {
 		a.Admissions = nil
 	}
 	a.Spool = run.Spool
+	a.Processing = nil
+	if run.Processing != nil {
+		copy := *run.Processing
+		copy.StoppedPipelines = append([]string{}, copy.StoppedPipelines...)
+		a.Processing = &copy
+	}
 }
 
 // Closed is how the session ended. An error means it could not be finalised,
@@ -656,6 +688,16 @@ func Render(to io.Writer, a Account, local bool) {
 			a.Spool.Written, a.Spool.Dropped, a.Spool.Refused, a.Spool.Bytes, a.Spool.Limit)
 		say("joined     %d connection records, %d dropped at the bound, %d refused",
 			a.Spool.Connections, a.Spool.ConnectionsDropped, a.Spool.ConnectionsRefused)
+	}
+	if p := a.Processing; p != nil {
+		say("processed  %d route processing failures, %d output failures", p.ProcessingFailures, p.OutputFailures)
+		say("approved   %d route records authorized, %d written", p.Authorized, p.Written)
+		if p.GateReason != "" {
+			say("release    refused: %s", p.GateReason)
+		}
+		if len(p.StoppedPipelines) != 0 {
+			say("pipelines  stopped: %s", strings.Join(p.StoppedPipelines, ", "))
+		}
 	}
 }
 

@@ -1,6 +1,9 @@
 package config
 
-import "github.com/evandukss/edge-observer/contract/policy"
+import (
+	"encoding/json"
+	"github.com/evandukss/edge-observer/contract/policy"
+)
 
 // Supplied is one document as it was handed to the check: the bytes, and the
 // name whoever loaded it gives it.
@@ -223,10 +226,11 @@ type Resolved struct {
 
 // ResolvedObserver is the observer settings with every optional one resolved.
 type ResolvedObserver struct {
-	Log               string `json:"log"`
-	Directory         string `json:"directory"`
-	SpoolBoundMiB     int64  `json:"spool_bound_mib"`
-	StateEverySeconds int64  `json:"state_every_seconds"`
+	Log                    string `json:"log"`
+	Directory              string `json:"directory"`
+	ApprovedOutputBoundMiB int64  `json:"approved_output_bound_mib"`
+	StateEverySeconds      int64  `json:"state_every_seconds"`
+	AdmittedEventLimit     int64  `json:"admitted_event_limit"`
 }
 
 // EffectivePipeline is a pipeline as it will be composed.
@@ -242,8 +246,12 @@ type EffectivePipeline struct {
 
 // EffectiveSlot is a slot and who selected what fills it.
 type EffectiveSlot struct {
-	Name           string `json:"name"`
-	Implementation string `json:"implementation"`
+	Name           string          `json:"name"`
+	Implementation string          `json:"implementation"`
+	Configuration  json.RawMessage `json:"configuration,omitempty"`
+	OnFailure      string          `json:"on_failure"`
+	// Arguments is populated only by CompileProcessing, after validation.
+	Arguments *HeaderArguments `json:"arguments,omitempty"`
 
 	// SelectedBy is "configuration" or "pack:<name>".
 	SelectedBy string `json:"selected_by"`

@@ -139,8 +139,8 @@ its size. A JSON body is also described by its shape - field names, nesting and 
 body that is not JSON is reported without a shape, with the reason. The parser is strict: where two
 endpoints could read a message differently, it refuses the message and says why rather than choosing.
 
-**There is no parser for any other protocol, HTTP/2 included.** Such traffic is still captured into the
-spool, and is not reconstructed.
+**There is no parser for any other protocol, HTTP/2 included.** Such traffic can enter the bounded
+volatile intake; the intake does not parse it or make it eligible for durable output.
 
 Reconstruction runs when a finished session is read back with `observer inspect`, never while it is
 capturing.

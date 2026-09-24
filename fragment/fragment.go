@@ -111,8 +111,9 @@ func (r Record) Truncated() bool {
 // ErrInvalid is what every Validate failure wraps.
 var ErrInvalid = errors.New("invalid fragment record")
 
-// Validate reports what would make this record unusable. Capture checks it
-// before spooling, so a bad record is refused where it is produced.
+// Validate reports what would make this record unusable to a consumer. The
+// volatile intake stores records without interpreting them; consumers validate
+// before relying on their positions.
 func (r Record) Validate() error {
 	switch {
 	case r.Process.PID <= 0:

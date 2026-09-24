@@ -25,7 +25,7 @@ func independentRuleConfiguration() config.Configuration {
 	return config.Configuration{
 		Version: "observer.config/draft",
 		Observer: config.Observer{
-			Log: "stdout", Directory: "/var/lib/observer", SpoolBoundMiB: &bound, StateEverySeconds: &every,
+			Log: "stdout", Directory: "/var/lib/observer", ApprovedOutputBoundMiB: &bound, StateEverySeconds: &every,
 		},
 		ObservationScope: config.ObservationScope{
 			Targets: []config.Target{{

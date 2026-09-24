@@ -543,7 +543,29 @@ type Reconstruction struct {
 // Processing is what the configured pipelines did with what capture delivered.
 type Processing struct {
 	Block
-	Pipelines []Processed `json:"pipelines"`
+	Pipelines []Processed          `json:"pipelines"`
+	Aggregate *ProcessingAggregate `json:"aggregate,omitempty" account:"optional"`
+}
+
+// ProcessingAggregate is session-wide evidence without per-pipeline counts.
+// Counts are decimal strings. ProcessingFailures counts affected active durable
+// routes per batch processing refusal: every active route for a batch refusal,
+// or the affected pipeline's routes once for a pipeline refusal. Already-stopped
+// routes are excluded; this is not a unique-route, batch or exchange count. A
+// useful prefix can be written on a route whose suffix incurs a processing failure.
+// Authorized and Written count permitted and completed route records separately;
+// OutputFailures counts failed approved writes. Internal serialization defects
+// use the terminal error/seal reason, not these counters. A gate reason is not an
+// output failure, policy suppression or a capture-loss count.
+// StoppedPipelines supplies identities only, never invented attribution of the
+// aggregate counts. No whole-session terminal-state claim is made here.
+type ProcessingAggregate struct {
+	GateReason         string   `json:"gate_reason"`
+	ProcessingFailures string   `json:"processing_failures" account:"count"`
+	OutputFailures     string   `json:"output_failures" account:"count"`
+	Authorized         string   `json:"authorized" account:"count"`
+	Written            string   `json:"written" account:"count"`
+	StoppedPipelines   []string `json:"stopped_pipelines"`
 }
 
 // Processed is one pipeline's dispositions.

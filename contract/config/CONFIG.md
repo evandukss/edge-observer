@@ -32,7 +32,8 @@ below lists every rule.
     {
       "version": "observer.config/draft",
       "observer": {"log": "stdout", "directory": "/var/lib/observer",
-                   "spool_bound_mib": 64, "state_every_seconds": 30},
+                   "approved_output_bound_mib": 64, "admitted_event_limit": 16384,
+                   "state_every_seconds": 30},
       "observation_scope": {"targets": [<target>, ...], "exclude": [<match>, ...],
                             "libraries": [{"build_id": "...", "symbols": {"SSL_read": 221920}}]},
       "traffic_scope": {"rules": [<rule>, ...]},
@@ -68,12 +69,25 @@ A target is `{"name", "match", "descendants"}`. A match names at least one of `e
 `pid` (`{"pid", "start", "boot"}`, an instance and not a number), `port` and `interface` - the
 conditions the observer's admission reads. `libraries` names the library builds a probe may be placed
 on, each by build id with the offsets its entry points are approved at; written empty it approves any
-library, as an empty approval does in `process` `ApproveLibrary`. `spool_bound_mib`
-and `state_every_seconds` are the observer's own settings and are OPTIONAL: absent, they are 64 and 30
-(`DefaultSpoolBoundMiB`, `DefaultStateEverySeconds`), and the resolved view carries the value in force
+library, as an empty approval does in `process` `ApproveLibrary`. `approved_output_bound_mib`,
+`admitted_event_limit` and `state_every_seconds` are the observer's own settings and are OPTIONAL: absent, they are 64, 16384 and 30
+(`DefaultApprovedOutputBoundMiB`, `DefaultAdmittedEventLimit`, `DefaultStateEverySeconds`), and the resolved view carries the value in force
 either way. The observer (`policy`) reads its configuration through this check and turns the
 resolved values into its own settings, and a test loads a file stating neither setting through it and
-fails when its values and these disagree.
+fails when its values and these disagree. `approved_output_bound_mib` is the aggregate approved
+durable-output allowance per session; it does not bound admitted events or process memory.
+`spool_bound_mib` is retired and refused as an undefined member.
+`admitted_event_limit` counts decoded events reaching the shared delivery gate and defaults
+to 16384. That default chooses a finite diagnostic population: it is not measured service
+headroom and not an execution-memory budget. The volatile intake allowance is the
+admitted-event count times `ebpf.MaxEventPayloadBytes`, which at that ceiling's declared
+value puts the default at a nominal 64 MiB. That product is checked when the observer
+activates rather than by this configuration check, so a configuration accepted here can
+still be refused there as unrepresentable. It is independent of `approved_output_bound_mib`.
+The externally verified execution envelope is the memory assurance, and it holds only under
+the launch precondition: the observer enters its bounded, no-swap cgroup BEFORE exec. After
+exec the core verifies its membership and the limits in force; it cannot establish that no
+allocation predates entry.
 `observer.log` is `stdout` or an absolute path and `observer.directory` an absolute path: a relative path
 would resolve against the observer process's working directory, which nothing configures, so one
 configuration would write to different places depending on how the process was started.
@@ -114,9 +128,109 @@ pipeline: a configuration names its pipelines. Whether a runtime supplies a conf
 operator gives none, and what it holds, is not decided here (`examples/no-extension.config.json` is one
 such configuration written out, not a default).
 
-A slot's `configuration` and a replacement's `configuration` are carried as supplied. They are checked
-against nothing in this draft, because the Go validators carry the component's `configuration_schema`
-without interpreting it.
+A slot's `configuration` and a replacement's `configuration` are carried as supplied by `Check`.
+That general contract check does not interpret a component's `configuration_schema`.
+`CompileProcessing` additionally checks the bounded processing profile below.
+
+### Bounded processing profile
+
+`CompileProcessing(configuration, manifests)` compiles without capture state or attachment. It
+returns either a `ProcessingPlan` or refusal findings, never both. This is a static decision, not
+evidence that processing ran. The activation caller must compile before admitting capture and the
+executor must consume the accepted plan; calling `Check` alone does not enable this profile.
+
+The activation entry point is `policy.CompileProcessing`, which wraps this compiler and the same
+process-approval/settings assembler used by the ordinary loader. It returns a `policy.Policy` with
+`Processing` set only on success. It also enforces the existing observation selector rules through
+`process.Rule.Validate`, including absolute executable/cgroup paths, guarded PID identity and
+interface/port compatibility. Future descendants without existing descendants have no supported
+admission mode. A refusal is a `policy.Refused` with outcome `processing_refused` and named findings;
+no attachment or payload input is needed to decide it. The ordinary `policy.Load` remains a separate
+profile; it does not enable processing implicitly.
+
+`ProcessingPlan` has private backing state. `Pipelines()`, `Routes()` and `Exclusions()` return deep
+copies; `Observer()` returns defaulted settings by value. A worker takes its own view once during
+setup and executes its ordered slots without changing them. No caller can mutate the compiled
+plan through those views. Inputs need not outlive compilation. The activation `Revision` binds the
+configuration and every supplied manifest, including disabled ones, with length-delimited names
+and bytes in supplied order; with no manifests it retains the ordinary configuration content hash.
+
+The profile uses the general structural and composition checks, including enabled pack resolution,
+replacement conflicts, type compatibility and inherited ordering. Replacements replace both the
+implementation and its arguments, even when the replacement omits arguments. They retain the slot's
+failure action. Only the effective implementation's arguments are compiled. A disabled pack adds no
+pipeline, replacement, component or requirement; supplied documents are still checked structurally.
+
+The runtime inventory is fixed by the compiler. It supports `reconstruction` and metadata-only
+`connection` pipelines through `local_account` sinks. Raw `observation` payload cannot be a durable
+input. A reconstruction pipeline can have no slots. External components, subscribers, queues,
+narrowed traffic rules and other policy operations are refused. Configuration-only packs add
+pipelines or select built-ins without executable components. The general illustrative inventory
+in `examples/runtime.json` is not this runtime inventory.
+
+The supported processors take reconstruction records. Each acts on every matching field in both
+headers and trailers, in both messages of an exchange, including repeated and differently cased
+names. They act on the value left by preceding slots and never add an absent field:
+
+| implementation | required `configuration` members | action |
+|---|---|---|
+| `remove-headers` | `headers` | remove the named fields and their values |
+| `replace-header-values` | `headers`, `value` | replace each selected value with the configured string |
+| `truncate-header-values` | `headers`, `length` | keep at most `length` bytes of each selected value |
+
+Arguments must be an object with exactly those members. Null, missing, duplicate, case-misspelled
+and unknown members are refused. `headers` is a nonempty list of distinct HTTP token names,
+case-insensitively unique and resolved to lowercase. Names are exact; no patterns or paths are
+interpreted. `value` is a bounded string of printable ASCII bytes (empty is allowed). `length` is
+an integer between zero and `MaxHeaderValueBytes`, inclusive. No other transform form is supported.
+The numeric limits are defined once by the constants in [processing.go](processing.go).
+
+For example, replacing `x-public` with `abcdef` and then truncating it to three bytes produces
+`abc`; reversing the steps produces `abcdef`. This order is the `Slots` order, including after
+replacement. `HeaderArguments` carries the typed values; the executor does not decode argument
+JSON or resolve packs. HTTP payload parsing belongs in the processing worker, outside intake and
+capture locks, before these operations run.
+
+A mandatory exclusion uses a policy requirement of this form:
+
+```json
+{"id":"exclude-auth","target":{"kind":"sink","name":"account"},
+ "operation":"transform_field",
+ "parameters":{"field":"message.headers.authorization","transformation":"remove"},
+ "failure_action":"drop_and_account"}
+```
+
+The field form is `message.headers.<exact HTTP name>` in lowercase; it includes trailer occurrences.
+The sink must be a configured, routed sink. `stop_pipeline` is the other permitted failure action.
+`arguments` may be absent or an empty object; there are no arguments to `remove`. Other parameters,
+transformations, fields and target kinds are refused. Claims and approvals are unsupported.
+Requirement IDs and policy documents also pass the general policy vocabulary checks.
+
+An exclusion is a session-wide obligation, even when its declaration names one sink. Every effective
+reconstruction-to-sink route must contain `remove-headers` selecting that field. Replacing or
+truncating a value does not satisfy removal. A pack-added route to a different sink is checked too.
+Every slot removing the excluded field must have `on_failure` equal to the requirement's
+`failure_action`. A matching slot later in the route does not excuse an earlier mismatch.
+The resolved `HeaderExclusion` carries that action, and the executor uses the validated slot action;
+it does not choose a precedence between conflicting actions. Conflicting requirements on the same
+header therefore cannot activate a route that removes it.
+Connection routes carry metadata only and cannot contain these fields. No sink callback, temporary
+file, diagnostic or raw spool may create another durable plaintext path; enumerating configured
+routes cannot itself establish that the runtime respects this boundary.
+
+The compiler bounds the aggregate bytes of configuration and all supplied manifests before JSON
+decoding, the number of supplied/enabled packs, effective pipelines, slots per pipeline, names per
+header operation and argument sizes. Fan-out is the sum of sink edges over *all* pipelines for one
+input type, not just the number of sinks on one pipeline. The `MaxProcessing*` and `MaxHeader*`
+constants define the inclusive maxima. These are static work limits, not a traffic or heap budget.
+
+Refusals carry document, subject, rule and detail. `configuration_too_large` and `fanout_too_large`
+name the static bounds; `unsupported_component`, `unsupported_role` and `unsupported_form` name
+unimplemented runtime forms; `invalid_builtin_arguments`, `unsupported_transform` and
+`invalid_transform_parameters` identify the argument/form checks; `exclusion_not_enforced` names
+the uncovered route and requirement. Existing structural and composition reasons retain their
+meaning. Independent findings at a reached stage are retained together. A refused earlier stage
+does not claim to have checked later stages that need its successful result.
 
 ### Subscribers
 
@@ -279,6 +393,19 @@ refusal. The observer's own subset and its refusals are `policy`'s (`Unimplement
 | `replacement_conflict` | composition | two replacements select one slot |
 | `export_not_permitted` | composition | a pipeline dispatches through a sink that leaves the host and is not an export sink |
 | `retention_not_permitted` | composition | a pipeline dispatches through a sink that keeps plaintext where `retain_plaintext` is false |
+| `configuration_too_large` | runtime profile | aggregate encoded bytes, supplied or enabled packs, effective pipelines or slots exceed the supported maximum |
+| `fanout_too_large` | runtime profile | the sum of durable sink edges across all pipelines for one input type exceeds the supported maximum |
+| `unsupported_component` | runtime profile | an enabled pack declares an external component |
+| `unsupported_role` | runtime profile | a subscriber is configured |
+| `unsupported_form` | runtime profile | a raw observation route, queue, narrowed traffic rule, claim, approval or unsupported policy operation is configured |
+| `invalid_builtin_arguments` | runtime profile | effective slot arguments violate their built-in's member, type, exact-name, range or size rules |
+| `unsupported_transform` | runtime profile | an exclusion has another target kind, transformation or field form |
+| `invalid_transform_parameters` | runtime profile | a header exclusion supplies an unknown parameter or nonempty/nonobject arguments |
+| `exclusion_not_enforced` | runtime profile | an effective durable reconstruction route does not remove a mandatory excluded header |
+| `exclusion_failure_action_mismatch` | runtime profile | a slot removing an excluded header uses a different failure action from the mandatory requirement on that route |
+| `policy_<reason>` | runtime profile | the policy vocabulary refuses a supported-form declaration for its named reason, including unresolved target, duplicate ID or invalid failure action |
+| `invalid_observation_approval` | activation configuration | the shared process-approval assembler refuses an observation selector or library approval; detail identifies its path and rule |
+
 
 **The three states a composition check exists to refuse are each structurally well formed**, and each is
 refused with a reason naming which it is: a manifest declaring a component whose input type no producer
@@ -304,7 +431,8 @@ stand for one entry of that list, written out in full wherever a row names a mem
     observer.log                            malformed        neither stdout nor an absolute path
     observer.directory                      malformed        absent
     observer.directory                      malformed        not an absolute path
-    observer.spool_bound_mib                malformed        present and below 1
+    observer.approved_output_bound_mib      malformed        present and below 1
+    observer.admitted_event_limit           malformed        present and below 1
     observer.state_every_seconds            malformed        present and below 1
     observation_scope.targets               malformed        absent or empty: a configuration selecting no instance
                                                              observes nothing
@@ -362,7 +490,7 @@ and may be absent in a manifest:
 
 **A component declaration in a manifest.** The runtime's built-ins are checked against the same rules
 by a test, `TestEveryBuiltinSatisfiesTheComponentRules`, which runs these rules over the built-in set -
-today the one in `examples/runtime.json`, the only built-in set in this tree - and fails on any
+the illustrative set in `examples/runtime.json` - and fails on any
 finding. Checking a configuration does not re-read them, because they are compiled in and cannot vary
 between starts:
 

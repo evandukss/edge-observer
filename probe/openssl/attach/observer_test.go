@@ -24,6 +24,7 @@ import (
 	"github.com/evandukss/edge-observer/internal/published"
 	"github.com/evandukss/edge-observer/privilege"
 	"github.com/evandukss/edge-observer/process"
+	"github.com/evandukss/edge-observer/processing"
 	"github.com/evandukss/edge-observer/spool"
 )
 
@@ -109,7 +110,7 @@ func (c configured) rewrite(t *testing.T, targets, exclusions []map[string]any) 
 	}
 	document := map[string]any{
 		"version":           "observer.config/draft",
-		"observer":          map[string]any{"log": c.log, "directory": c.directory, "spool_bound_mib": 1, "state_every_seconds": 1},
+		"observer":          map[string]any{"log": c.log, "directory": c.directory, "approved_output_bound_mib": 1, "state_every_seconds": 1},
 		"observation_scope": map[string]any{"targets": written, "exclude": excluded, "libraries": []any{}},
 		"traffic_scope": map[string]any{"rules": []any{map[string]any{
 			"targets": []any{}, "direction": "any", "local_ports": []any{}, "remote_ports": []any{}}}},
@@ -265,6 +266,7 @@ func TestADetachedStartThatCannotActivateExitsNonZeroAndLeavesNoProcessBehind(t 
 	c := configuring(t, map[string]any{"name": "not-running", "exe": absent, "descendants": "none"})
 
 	command := exec.Command(built(t), "start", c.path, "--daemonize")
+	intoEnvelope(t, command)
 	output, err := command.CombinedOutput()
 	if err == nil || command.ProcessState.ExitCode() == 0 {
 		t.Fatalf("a detached start over a configuration that selects nothing exited zero:\n%s", output)
@@ -289,6 +291,7 @@ func TestADetachedStartExitsZeroOnlyOnceActivatedAndItsChildGoesOnObserving(t *t
 	c := configuring(t, target("under-test", client.process))
 
 	parent := exec.Command(binary, "start", c.path, "--daemonize")
+	intoEnvelope(t, parent)
 	output, err := parent.CombinedOutput()
 	if err != nil {
 		t.Fatalf("the detached start failed: %v\n%s", err, output)
@@ -326,7 +329,9 @@ func TestARestartIsANewOutputSessionWhoseActivationSaysHowLongNothingWasObserved
 	client := speaking(t, serving(t))
 	c := configuring(t, target("under-test", client.process))
 
-	if out, err := exec.Command(binary, "start", c.path, "--daemonize").CombinedOutput(); err != nil {
+	detached := exec.Command(binary, "start", c.path, "--daemonize")
+	intoEnvelope(t, detached)
+	if out, err := detached.CombinedOutput(); err != nil {
 		t.Fatalf("start detached: %v\n%s", err, out)
 	}
 	_, first := sessionOf(t, c)
@@ -369,6 +374,47 @@ func (r running) directory(c configured) string { return filepath.Join(c.session
 // started runs the observer and returns it once its log (mirrored on standard
 // output in the foreground) carries its activation record, written after the
 // probes are placed and the capabilities are gone.
+// envelopeFor makes the bounded cgroup the observer is created into: a finite
+// memory cap and swap denied, which is what activation reads back. The name is
+// the test's, so a leftover directory names the test that left it.
+//
+// THIS IS SETUP AND IT IS EVIDENCE FOR NOTHING. Every test here stands up a
+// bounded envelope because the observer refuses to activate without one, so a
+// reader counting capped cgroups across this suite is counting a precondition
+// rather than a result. A resource control is TESTED by a cap that is reached
+// or a denial that refuses, deliberately, in a case written to do it - never by
+// one that exists under every case because nothing runs otherwise.
+func envelopeFor(t *testing.T) string {
+	t.Helper()
+	name := "observer-" + strings.NewReplacer("/", "-", " ", "-").Replace(t.Name())
+	directory := cgroupFor(t, name)
+	for setting, value := range map[string]string{"memory.max": "1073741824", "memory.swap.max": "0"} {
+		if err := os.WriteFile(filepath.Join(directory, setting), []byte(value), 0o644); err != nil {
+			t.Fatalf("set %s on the observer's envelope: %v. The gate runner enables the memory "+
+				"controller before this suite; without that preparation this file does not exist "+
+				"and the error is a permission one", setting, err)
+		}
+	}
+	return directory
+}
+
+// intoEnvelope makes cmd start inside a bounded no-swap cgroup, which is what
+// activation verifies before it will attach. Every route that launches the
+// observer goes through here, DETACHED ONES INCLUDED: a detached start's child
+// is the payload holder and it inherits the cgroup its parent was created
+// into, so putting the parent in the envelope puts the holder there with no
+// window in which the holder exists outside it.
+func intoEnvelope(t *testing.T, cmd *exec.Cmd) {
+	t.Helper()
+	envelope := envelopeFor(t)
+	held, err := os.Open(envelope)
+	if err != nil {
+		t.Fatalf("open the observer's envelope %s: %v", envelope, err)
+	}
+	t.Cleanup(func() { _ = held.Close() })
+	cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(held.Fd())}
+}
+
 func started(t *testing.T, binary string, c configured) running {
 	t.Helper()
 
@@ -378,6 +424,12 @@ func started(t *testing.T, binary string, c configured) running {
 		t.Fatalf("stdout pipe: %v", err)
 	}
 	command.Stderr = os.Stderr
+	// The observer is CREATED into its envelope rather than moved there after
+	// exec. A process created into a cgroup has no window in which it exists
+	// and has not yet entered; a moved one does, and no reading afterwards can
+	// say what it allocated during it. This is the launch precondition an
+	// operator satisfies on a host, and the suite has to satisfy it too.
+	intoEnvelope(t, command)
 	if err := command.Start(); err != nil {
 		t.Fatalf("start the observer: %v", err)
 	}
@@ -623,6 +675,21 @@ func settled(t *testing.T, directory string, want int) []fragment.Record {
 	return nil
 }
 
+// waitForSpool waits for the RAW SPOOL, which the observer stopped writing when
+// capture moved to a volatile intake. Every caller below is therefore waiting
+// for something that never arrives, and each is a test whose assertion has to
+// move rather than a call that can be pointed somewhere else.
+//
+// The approved artifact is not a substitute HERE, and the reason is timing
+// rather than content: it holds one record per approved route, written when a
+// batch finalises, which is when the connection retires. During a live
+// connection it is genuinely empty, so a mid-session wait for N records cannot
+// succeed against it however it is spelled. Measured: observedBy finds the
+// artifact's entries in the same tests where this wait finds nothing.
+//
+// So these callers do their traffic, END the session, and then count - which
+// moves the assertion across the stop boundary and changes what each
+// demonstrates. That is a judgement per test, not one decision applied to all.
 func waitForSpool(t *testing.T, directory string, want int) []fragment.Record {
 	t.Helper()
 	var records []fragment.Record
@@ -664,10 +731,22 @@ func TestTheObserverHoldsNothingListensOnNothingAndWritesOnlyItsOwnFiles(t *test
 		t.Errorf("the observer is listening on %v, and it takes nothing in", sockets)
 	}
 
-	// Each writable file is named, so a fifth is a failure.
+	// Each writable file is named, so one more is a failure.
+	//
+	// The approved artifact is here because it is the session's durable output:
+	// the worker writes authorized records to it while the session runs, so it
+	// is open for writing for as long as the observer is. It is named exactly
+	// rather than matched by a pattern, because a pattern over this directory
+	// would admit whatever a later change put beside it, and nothing anywhere
+	// reports a check that stopped refusing.
+	// The two spool files are NOT here, and their absence is deliberate: the
+	// write path was removed, so nothing opens either of them. A permission
+	// that admits nothing today is a pre-authorised future write - it would
+	// silently readmit the spool the moment anything reopened it, and this
+	// enumeration exists precisely so that a new writable file is a failure.
+	// Restoring the legacy read path does not restore them; only writing would.
 	allowed := map[string]bool{
-		filepath.Join(observer.directory(c), spool.Name):            true,
-		filepath.Join(observer.directory(c), spool.ConnectionsName): true,
+		filepath.Join(observer.directory(c), processing.ArtifactName): true,
 		c.log:       true,
 		c.pidFile(): true,
 	}
@@ -678,7 +757,7 @@ func TestTheObserverHoldsNothingListensOnNothingAndWritesOnlyItsOwnFiles(t *test
 			// The pipes this test gave it and the runtime's scheduling descriptors.
 		case path == "/dev/null":
 		default:
-			t.Errorf("the observer has %s open for writing, and it writes only its spool, its log and its pid file", path)
+			t.Errorf("the observer has %s open for writing, and it writes only its approved output, its log and its pid file", path)
 		}
 	}
 }

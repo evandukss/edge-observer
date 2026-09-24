@@ -143,7 +143,7 @@ func TestConfigCaseSensitiveMembers(t *testing.T) {
 	paths := []string{
 		"version", "observer", "observation_scope", "traffic_scope", "retention_and_export",
 		"packs", "sinks", "pipelines", "subscribers", "policy",
-		"observer/log", "observer/directory", "observer/spool_bound_mib", "observer/state_every_seconds",
+		"observer/log", "observer/directory", "observer/approved_output_bound_mib", "observer/state_every_seconds",
 		"observation_scope/targets", "observation_scope/exclude", "observation_scope/libraries",
 		"observation_scope/targets/0/name", "observation_scope/targets/0/match", "observation_scope/targets/0/descendants",
 		"observation_scope/targets/0/match/exe", "observation_scope/targets/0/match/args",
@@ -205,7 +205,7 @@ func TestConfigCaseAliasesBesideCanonicalMembers(t *testing.T) {
 	// stays present, and some aliases change its value.
 	cases := []struct{ canonical, alias string }{
 		{`"version":"observer.config/draft"`, `"VERSION":"observer.config/draft"`},
-		{`"spool_bound_mib":64`, `"SPOOL_BOUND_MIB":1`},
+		{`"approved_output_bound_mib":64`, `"APPROVED_OUTPUT_BOUND_MIB":1`},
 		{`"state_every_seconds":30`, `"State_every_seconds":90`},
 		{`"existing":true`, `"EXISTING":false`},
 		{`"retain_plaintext":true`, `"RETAIN_PLAINTEXT":false`},
@@ -436,7 +436,7 @@ func TestConfigContractRefusalPrecedesProgramRefusal(t *testing.T) {
 		{"root-exit", "observation_scope/targets/0/descendants/root_exit", "revoke_survivors", config.CompositionRefused, config.DescendantAnswerNotSupported},
 		{"replacement", "observation_scope/targets/0/descendants/replacement", "hot_reload", config.CompositionRefused, config.DescendantAnswerNotSupported},
 		{"unknown-version", "version", "observer.config/not-this-draft", config.StructurallyRefused, config.UnknownVersion},
-		{"malformed", "observer/spool_bound_mib", 0, config.StructurallyRefused, config.Malformed},
+		{"malformed", "observer/approved_output_bound_mib", 0, config.StructurallyRefused, config.Malformed},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

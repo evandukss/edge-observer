@@ -97,6 +97,13 @@ var represented = map[string]string{
 	".spool.connections_refused": "capture.spool.connections_refused",
 	".spool.bytes":               "capture.spool.bytes", ".spool.limit": "capture.spool.limit",
 
+	".processing.gate_reason":         "processing.aggregate.gate_reason",
+	".processing.processing_failures": "processing.aggregate.processing_failures",
+	".processing.output_failures":     "processing.aggregate.output_failures",
+	".processing.authorized":          "processing.aggregate.authorized",
+	".processing.written":             "processing.aggregate.written",
+	".processing.stopped_pipelines[]": "processing.aggregate.stopped_pipelines[]",
+
 	".seal.stopped": "seal.stopped.value", ".seal.sealed": "seal.sealed.value",
 	".seal.withdrawal.at": "seal.withdrawal.at.value", ".seal.withdrawal.instances": "seal.withdrawal.instances",
 	".seal.withdrawal.complete": "seal.withdrawal.complete", ".seal.withdrawal.because": "seal.withdrawal.because",

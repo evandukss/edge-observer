@@ -230,11 +230,11 @@ func (c *composer) checkTargets() {
 
 func (c *composer) checkSinks() {
 	for _, s := range c.configuration.Sinks {
+		c.sinks[s.Name] = s
 		if _, known := c.kinds[s.Kind]; !known {
 			c.add("configuration", "sink:"+s.Name, UnknownSinkKind, "the runtime has no sink kind %q", s.Kind)
 			continue
 		}
-		c.sinks[s.Name] = s
 	}
 	for _, name := range c.configuration.RetentionExport.ExportSinks {
 		if _, known := c.sinks[name]; !known {
@@ -251,7 +251,10 @@ func (c *composer) collectPipelines() {
 		}
 		effective := EffectivePipeline{Name: p.Name, Input: p.Input, Sinks: slices.Clone(p.Sinks), DeclaredBy: by}
 		for _, s := range p.Slots {
-			effective.Slots = append(effective.Slots, EffectiveSlot{Name: s.Name, Implementation: s.Implementation, SelectedBy: by})
+			effective.Slots = append(effective.Slots, EffectiveSlot{
+				Name: s.Name, Implementation: s.Implementation, SelectedBy: by,
+				Configuration: slices.Clone(s.Configuration), OnFailure: s.OnFailure,
+			})
 		}
 		if effective.Slots == nil {
 			effective.Slots = []EffectiveSlot{}
@@ -305,6 +308,7 @@ func (c *composer) applyReplacements() {
 		}
 		r.original = slot.Implementation
 		slot.Implementation = r.Implementation
+		slot.Configuration = slices.Clone(r.Configuration)
 		slot.SelectedBy = "pack:" + strings.TrimPrefix(r.document, "manifest:")
 		for _, pack := range c.packs {
 			if pack.document == r.document {
@@ -405,7 +409,12 @@ func (c *composer) checkPipeline(p EffectivePipeline) {
 			c.add(document, "sink:"+name, UnknownSink, "pipeline %q dispatches through a sink that is not configured", p.Name)
 			continue
 		}
-		kind := c.kinds[sink.Kind]
+		kind, knownKind := c.kinds[sink.Kind]
+		if !knownKind {
+			// The sink is declared. Its unknown kind already refused activation;
+			// no input or retention facts can be inferred from a missing kind.
+			continue
+		}
 		if known && len(flowing) == 0 {
 			c.add(document, "sink:"+name, InputTypeMismatch, "no record reaches it: pipeline %q passes nothing on", p.Name)
 		} else if known {
@@ -697,7 +706,8 @@ func (c *composer) resolve() *Resolved {
 	resolved := &Resolved{
 		Observer: ResolvedObserver{
 			Log: observer.Log, Directory: observer.Directory,
-			SpoolBoundMiB: DefaultSpoolBoundMiB, StateEverySeconds: DefaultStateEverySeconds,
+			ApprovedOutputBoundMiB: DefaultApprovedOutputBoundMiB, StateEverySeconds: DefaultStateEverySeconds,
+			AdmittedEventLimit: DefaultAdmittedEventLimit,
 		},
 		Pipelines:   c.pipelines,
 		Descendants: map[string]FullAnswers{},
@@ -711,11 +721,14 @@ func (c *composer) resolve() *Resolved {
 			Sinks:             map[string]policy.Sink{},
 		},
 	}
-	if observer.SpoolBoundMiB != nil {
-		resolved.Observer.SpoolBoundMiB = *observer.SpoolBoundMiB
+	if observer.ApprovedOutputBoundMiB != nil {
+		resolved.Observer.ApprovedOutputBoundMiB = *observer.ApprovedOutputBoundMiB
 	}
 	if observer.StateEverySeconds != nil {
 		resolved.Observer.StateEverySeconds = *observer.StateEverySeconds
+	}
+	if observer.AdmittedEventLimit != nil {
+		resolved.Observer.AdmittedEventLimit = *observer.AdmittedEventLimit
 	}
 	for name, sink := range c.sinks {
 		kind := c.kinds[sink.Kind]

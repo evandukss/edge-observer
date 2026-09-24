@@ -170,7 +170,7 @@ func independentComposition() (config.Configuration, config.Manifest, config.Ava
 		Version: config.ConfigurationVersion,
 		Observer: config.Observer{
 			Log: "stdout", Directory: "/var/lib/observer",
-			SpoolBoundMiB: &spool, StateEverySeconds: &interval,
+			ApprovedOutputBoundMiB: &spool, StateEverySeconds: &interval,
 		},
 		ObservationScope: config.ObservationScope{
 			Targets: []config.Target{{

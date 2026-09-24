@@ -73,7 +73,7 @@ func whole(t *testing.T) map[string]any {
 	document := example(t)
 	observer := member(document, "observer")
 	observer["log"], observer["directory"] = "/var/log/observer/observer.log", "/var/lib/observer"
-	observer["spool_bound_mib"], observer["state_every_seconds"] = 32, 10
+	observer["approved_output_bound_mib"], observer["state_every_seconds"] = 32, 10
 	scope := member(document, "observation_scope")
 	scope["targets"] = []any{
 		target("gateway", map[string]any{"exe": "/usr/bin/php", "args": []any{"/srv/gateway/main.php"}}, true, true),
@@ -104,7 +104,7 @@ func TestTheNoExtensionExampleIsRead(t *testing.T) {
 		t.Errorf("its target read as %+v", read.Approval.Rules)
 	}
 	if read.Settings.Log != policy.Stdout || read.Settings.Directory != "/var/lib/observer" ||
-		read.Settings.BoundMiB != 64 || read.Settings.StateEvery != 30*time.Second {
+		read.Settings.ApprovedOutputBoundMiB != 64 || read.Settings.StateEvery != 30*time.Second {
 		t.Errorf("its settings read as %+v", read.Settings)
 	}
 }
@@ -119,7 +119,7 @@ func TestTheFileIsReadWhole(t *testing.T) {
 
 	settings := read.Settings
 	if settings.Log != "/var/log/observer/observer.log" || settings.Directory != "/var/lib/observer" ||
-		settings.BoundMiB != 32 || settings.StateEvery != 10*time.Second {
+		settings.ApprovedOutputBoundMiB != 32 || settings.StateEvery != 10*time.Second {
 		t.Errorf("settings read as %+v", settings)
 	}
 
@@ -182,7 +182,7 @@ func TestTheRevisionNamesTheContent(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	changed := whole(t)
-	member(changed, "observer")["spool_bound_mib"] = 33
+	member(changed, "observer")["approved_output_bound_mib"] = 33
 	other, err := policy.Load(written(t, encoded(t, changed)))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -392,7 +392,7 @@ func TestAMemberNameInAnotherCaseIsRefused(t *testing.T) {
 	for name, content := range map[string]string{
 		"the version in capitals":    strings.Replace(base, `"version"`, `"VERSION"`, 1),
 		"a second spelling of packs": strings.Replace(base, `"packs":[]`, `"packs":[],"Packs":["swap-redactor"]`, 1),
-		"a nested member":            strings.Replace(base, `"spool_bound_mib"`, `"Spool_Bound_MiB"`, 1),
+		"a nested member":            strings.Replace(base, `"approved_output_bound_mib"`, `"Approved_Output_Bound_MiB"`, 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if content == base {
@@ -436,7 +436,7 @@ func TestLoadRefuses(t *testing.T) {
 			return encoded(t, d)
 		},
 		"a spool bound of zero": func(d map[string]any) string {
-			member(d, "observer")["spool_bound_mib"] = 0
+			member(d, "observer")["approved_output_bound_mib"] = 0
 			return encoded(t, d)
 		},
 		"a pipeline input the core does not emit": func(d map[string]any) string {

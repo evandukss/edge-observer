@@ -468,7 +468,9 @@ type placed struct {
 	refusal string
 }
 
-const chunk = 4096
+// MaxEventPayloadBytes is the enforced ceiling on a decoded event's payload.
+// It bounds accepted raw payload per event, not metadata or process memory.
+const MaxEventPayloadBytes = 4096
 
 // rawHeader is the fixed part of struct event before its data array: seven
 // eight-byte fields, six four-byte and six one-byte fields (86 bytes), then
@@ -491,6 +493,9 @@ func Attach(options Options) (*Session, error) {
 		return nil, err
 	}
 
+	// The events channel's capacity is staging depth, while MaxEventPayloadBytes
+	// is a per-event payload maximum. Their values are equal by coincidence;
+	// unifying them would make changing either silently change the other.
 	session := &Session{
 		monotonicBase: pairClocks(),
 		collection:    collection,
@@ -2370,8 +2375,8 @@ func (s *Session) decode(sample []byte) (Event, bool) {
 		event.Direction = fragment.Received
 	}
 
-	if kept > chunk {
-		kept = chunk
+	if kept > MaxEventPayloadBytes {
+		kept = MaxEventPayloadBytes
 	}
 	if int(rawHeader+kept) <= len(sample) && kept > 0 {
 		event.Payload = append([]byte(nil), sample[rawHeader:rawHeader+kept]...)

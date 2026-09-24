@@ -5,8 +5,8 @@ import (
 	"github.com/evandukss/edge-observer/contract/config"
 )
 
-// LocalAccount is the one sink kind this program has: the session's spool and
-// the account sealed beside it, on this host.
+// LocalAccount names the session's local output and sealed account. Raw capture
+// records are held separately in volatile intake.
 const LocalAccount = "local_account"
 
 // The record types the core produces into pipelines.
@@ -17,7 +17,7 @@ const (
 )
 
 // Inventory is what this program has, as the contract's check sees it: no
-// built-in component, one sink kind that keeps plaintext on the host, and the
+// built-in component, one local sink kind declared capable of retaining plaintext, and the
 // descendant answers admission gives. It is never read from a file.
 func Inventory() config.Available {
 	emits := []string{Observation, Connection, Reconstruction}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/evandukss/edge-observer/account"
+	protected "github.com/evandukss/edge-observer/activation"
 	"github.com/evandukss/edge-observer/admission"
 	"github.com/evandukss/edge-observer/policy"
 	"github.com/evandukss/edge-observer/probe"
@@ -62,7 +63,7 @@ func loaded(t *testing.T, content string) policy.Policy {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
-	read, err := policy.Load(path)
+	read, err := loadProcessing(path)
 	if err != nil {
 		t.Fatalf("load the policy: %v", err)
 	}
@@ -356,14 +357,36 @@ func reloading(t *testing.T, pid int32) (*daemon, *admitting, reloadRequest) {
 	if err := os.WriteFile(path, []byte(document(kept, added)), 0o600); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
-	candidate, err := policy.Load(path)
+	candidate, err := loadProcessing(path)
 	if err != nil {
 		t.Fatalf("load the candidate: %v", err)
+	}
+	// The reload must retain the active object even though compiling the
+	// observation-only candidate creates a different object for the same
+	// processing generation. Prove both facts before testing retention.
+	if current.Processing == nil || candidate.Processing == nil || candidate.Processing == current.Processing {
+		t.Fatal("reload fixture did not produce distinct non-nil active and candidate plans")
+	}
+	if current.ProcessingRevision == "" || candidate.ProcessingRevision != current.ProcessingRevision {
+		t.Fatal("reload fixture changed the processing generation instead of observation alone")
 	}
 
 	attached := &admitting{}
 	d := &daemon{policy: current, session: "0123456789abcdef", path: path, attached: attached,
 		plan: account.Account{Policy: account.Policy{Revision: current.Revision, Generation: 1}}}
+	d.gate, err = probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: uint64(current.Settings.AdmittedEventLimit)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// These cases test exec identity around grant writes, using a stand-in
+	// attachment. Isolate that subject from the separately tested kernel
+	// posture boundary; production begin installs protected.VerifyActive.
+	d.verifyParticipants = func(gate *probe.DeliveryGate, participants []process.Process) (protected.Posture, error) {
+		if gate != d.gate || len(participants) == 0 {
+			t.Fatal("reload did not pass its live gate and added participant set")
+		}
+		return protected.Posture{}, nil
+	}
 	request := reloadRequest{
 		Revision:   candidate.Revision,
 		Resolution: candidate.Approval.Resolve(process.Host{Table: process.TableOf(child)}),
@@ -412,11 +435,15 @@ func TestAReloadWritesAGrantOnlyForAProcessStillRunningWhatTheCommandRead(t *tes
 	t.Run("a process that did nothing is admitted and nothing is taken back", func(t *testing.T) {
 		pid, _ := execing(t)
 		d, attached, request := reloading(t, pid)
+		activePlan := d.policy.Processing
 		record := d.reload(time.Now(), encode(t, request))
 		if record.Outcome != "activated" || record.Admitted != 1 || len(attached.admitted) != 1 ||
 			len(attached.retracted) != 0 {
 			t.Errorf("the reload answered %+v, wrote %v and took back %v, want pid %d admitted once and "+
 				"nothing taken back", record, attached.admitted, attached.retracted, pid)
+		}
+		if d.policy.Processing != activePlan {
+			t.Fatal("additive reload replaced the active immutable processing plan")
 		}
 		bounded(t, record)
 	})

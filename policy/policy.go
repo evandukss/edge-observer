@@ -32,8 +32,12 @@ type Settings struct {
 	// Directory holds the pid file and one subdirectory per session.
 	Directory string
 
-	// BoundMiB bounds one session's spool.
-	BoundMiB int64
+	// ApprovedOutputBoundMiB bounds the aggregate approved durable output per session.
+	ApprovedOutputBoundMiB int64
+
+	// AdmittedEventLimit bounds decoded-event admission for this session.
+	// It is independent of approved output and is not a process-memory bound.
+	AdmittedEventLimit int64
 
 	// StateEvery is how often the log restates the observer's state after
 	// activation.
@@ -42,8 +46,16 @@ type Settings struct {
 
 // Policy is one configuration file as the observer reads it.
 type Policy struct {
-	Settings Settings
-	Approval process.Approval
+	// Processing is present only on a successfully compiled processing configuration.
+	Processing *config.ProcessingPlan
+	// ProcessingRevision binds the processing and retention declarations and
+	// supplied manifests, excluding observation scope and observer settings.
+	// CompileProcessing supplies it alongside Processing. Reload requires the
+	// same nonempty value and retains the active plan; restart changes it.
+	// A legacy policy has no processing revision and cannot replace a compiled one.
+	ProcessingRevision string
+	Settings           Settings
+	Approval           process.Approval
 
 	// Revision names the file's content, so an account can say which policy
 	// was in force.
@@ -82,7 +94,12 @@ func against(content []byte, has config.Available) (Policy, error) {
 	if result.Outcome != config.Accepted {
 		return Policy{}, &Refused{Outcome: result.Outcome, Findings: append(result.Structural, result.Composition...)}
 	}
+	return assemble(content, written, result.Resolved.Observer)
+}
 
+// assemble is shared by both configuration profiles so enabling processing
+// cannot bypass the process selector and descendant-mode validation.
+func assemble(content []byte, written config.Configuration, resolved config.ResolvedObserver) (Policy, error) {
 	approval := process.Approval{}
 	for i, t := range written.ObservationScope.Targets {
 		mode, answerable := modeOf(t.Descendants)
@@ -111,12 +128,12 @@ func against(content []byte, has config.Available) (Policy, error) {
 		approval.Libraries = append(approval.Libraries, library)
 	}
 
-	resolved := result.Resolved.Observer
 	settings := Settings{
-		Log:        resolved.Log,
-		Directory:  resolved.Directory,
-		BoundMiB:   resolved.SpoolBoundMiB,
-		StateEvery: time.Duration(resolved.StateEverySeconds) * time.Second,
+		Log:                    resolved.Log,
+		Directory:              resolved.Directory,
+		ApprovedOutputBoundMiB: resolved.ApprovedOutputBoundMiB,
+		AdmittedEventLimit:     resolved.AdmittedEventLimit,
+		StateEvery:             time.Duration(resolved.StateEverySeconds) * time.Second,
 	}
 	sum := sha256.Sum256(content)
 	return Policy{Settings: settings, Approval: approval, Revision: "sha256:" + hex.EncodeToString(sum[:])}, nil
@@ -155,9 +172,9 @@ func ruleOf(m config.Match) (process.Rule, error) {
 }
 
 // unimplemented is every section of a well-formed configuration that asks for
-// something this program does not do. The program captures every connection
-// of an approved instance and keeps all of it, plaintext included, in the
-// session's spool and sealed account on this host.
+// something this program does not do. These checks run before attachment;
+// volatile intake accepting a record does not implement a configured pipeline
+// or authorize its output.
 //
 // Where the inventory holds a kind, the count decides: NONE of it means the
 // kind is unimplemented; SOME of it without the one named is left to the

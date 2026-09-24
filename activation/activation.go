@@ -1,0 +1,224 @@
+// Package activation verifies the payload holder before protected capture begins.
+package activation
+
+import (
+	"fmt"
+	"math"
+	"os"
+	"path"
+	"strings"
+
+	"github.com/evandukss/edge-observer/capture"
+	"github.com/evandukss/edge-observer/intake"
+	"github.com/evandukss/edge-observer/policy"
+	"github.com/evandukss/edge-observer/probe"
+	"github.com/evandukss/edge-observer/process"
+)
+
+// Check identifies the condition that refused setup before attach.
+type Check string
+
+const (
+	DeliveryGate               Check = "delivery_gate"
+	ProcessingPlan             Check = "processing_plan"
+	ExecutionMemory            Check = "execution_memory"
+	AnonymousSwap              Check = "anonymous_swap"
+	CoreDumps                  Check = "core_dumps"
+	PayloadMembership          Check = "payload_membership"
+	ParticipantOutsideEnvelope Check = "participant_outside_envelope"
+	// PostureUnreadable labels unavailable evidence in Refusal.Error; the
+	// refusal's Check retains the particular condition that could not be read.
+	PostureUnreadable Check = "posture_unreadable"
+)
+
+// Refusal names the deciding check and the payload-holding process.
+// PID is zero only when the current process could not be identified.
+type Refusal struct {
+	Check  Check
+	PID    int
+	Detail string
+	// Unreadable distinguishes unavailable or uninterpretable posture evidence
+	// from an observed condition that fails Check. Check still names the field.
+	Unreadable bool
+}
+
+func (r *Refusal) Error() string {
+	if r.Unreadable {
+		return fmt.Sprintf("activation refused: %s: %s (payload pid %d): %s", PostureUnreadable, r.Check, r.PID, r.Detail)
+	}
+	return fmt.Sprintf("activation refused: %s (payload pid %d): %s", r.Check, r.PID, r.Detail)
+}
+
+type ParticipantState struct {
+	PID       int32  `json:"pid"`
+	StartTime uint64 `json:"start_time"`
+	Cgroup    string `json:"cgroup"`
+}
+
+// Posture records the kernel readings made in the payload holder,
+// not in its launcher. The supported envelope is that process's own cgroup v2
+// domain: a positive finite memory.max and zero memory.swap.max/current.
+// Cgroup paths use the observer's namespace and must be absolute and clean.
+// Participants must be identified by pid AND start time and lie outside the
+// envelope and all its descendants. An unreadable member is not an absence.
+// Dumpable must be zero. Core limits and core_pattern are not alternatives to
+// non-dumpability and impose no additional acceptance condition.
+//
+// The memory assurance requires entry into the isolated bounded no-swap cgroup
+// BEFORE exec, with membership and limits fixed throughout capture. These
+// readings cannot establish that no allocation predates entry: migrating an
+// existing process does not move the charges for pages it already holds.
+// They establish current posture, not historical page ownership or immunity
+// to subsequent changes by the administrator of the execution environment.
+type Posture struct {
+	PID         int    `json:"pid"`
+	StartTime   uint64 `json:"start_time"`
+	Cgroup      string `json:"cgroup"`
+	Domain      string `json:"domain"`
+	Member      bool   `json:"member"`
+	MemoryMax   uint64 `json:"memory_max"`
+	SwapMax     uint64 `json:"swap_max"`
+	SwapCurrent uint64 `json:"swap_current"`
+	Dumpable    int    `json:"dumpable"`
+	// CoreSoft, CoreHard and CorePattern are optional diagnostics, never
+	// acceptance evidence. Their zero values do not prove a successful reading.
+	CoreSoft     uint64             `json:"core_soft,omitempty"`
+	CoreHard     uint64             `json:"core_hard,omitempty"`
+	CorePattern  string             `json:"core_pattern,omitempty"`
+	Participants []ParticipantState `json:"participants"`
+}
+
+// Capture is shared with the serial processing worker. Both capture
+// sinks write only to Intake. Gate is the one shared delivery and release gate,
+// used by every placement. Intake exhaustion stops input; it does not make
+// already-admitted work unreleasable and is not the gate's storage reason.
+// Closing Intake discards raw records; it never spills. The worker alone owns
+// approved durable output and its permanent refusal is the storage reason.
+type Capture struct {
+	Recording *capture.Session
+	Intake    *intake.Store
+	Gate      *probe.DeliveryGate
+	Posture   Posture
+}
+
+// Prepare requires a policy from policy.CompileProcessing and a positive
+// admitted-event allowance whose product with ebpf.MaxEventPayloadBytes fits
+// int64. The product bounds accepted raw payload, not process memory. It builds
+// both volatile sinks and the shared gate, then verifies posture before returning
+// anything an attachment can use. It opens no durable file and attaches nothing.
+// writerExhausted must be the approved-output writer's non-nil sticky signal,
+// created before this call. A nil signal refuses as delivery_gate; an already
+// closed signal invalidates the new gate and refuses verification. The same
+// signal must be selected by the session controller. Intake.Exhausted is not
+// interchangeable: its refusal stops input while admitted work stays drainable.
+func Prepare(read policy.Policy, participants []process.Process, maxEvents uint64, writerExhausted <-chan struct{}) (*Capture, error) {
+	if read.Processing == nil || read.ProcessingRevision == "" {
+		return nil, &Refusal{Check: ProcessingPlan, PID: os.Getpid(), Detail: "a compiler-produced processing plan and revision are required"}
+	}
+	if writerExhausted == nil {
+		return nil, &Refusal{Check: DeliveryGate, PID: os.Getpid(), Detail: "the approved-output writer's exhaustion signal is required"}
+	}
+	recording, store, err := RecordingIntake(maxEvents)
+	if err != nil {
+		return nil, &Refusal{Check: DeliveryGate, PID: os.Getpid(), Detail: err.Error()}
+	}
+	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: maxEvents, StorageExhausted: writerExhausted})
+	if err != nil {
+		_ = store.Close()
+		return nil, &Refusal{Check: DeliveryGate, PID: os.Getpid(), Detail: err.Error()}
+	}
+	posture, err := Verify(gate, participants)
+	if err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	return &Capture{Recording: recording, Intake: store, Gate: gate, Posture: posture}, nil
+}
+
+// Verify reads the current process and the exact participant set,
+// then checks the readings. It consumes no event slot. Nil, zero-value,
+// invalidated, and already-used gates are refused as delivery_gate; a fresh
+// gate is required. The caller must pass this same gate to every placement.
+func Verify(gate *probe.DeliveryGate, participants []process.Process) (Posture, error) {
+	return verify(gate, participants, true)
+}
+
+// VerifyActive verifies a gate already in force during additive reload.
+// It performs the same current-process posture and participant isolation checks
+// as Verify. Charged slots are allowed; invalidated and unconstructed gates are
+// refused as delivery_gate. It consumes no event slot and replaces no gate.
+// Verify is for initial activation before any event has been admitted;
+// VerifyActive is for the running session's existing gate and is not an
+// initial-activation entry point.
+func VerifyActive(gate *probe.DeliveryGate, participants []process.Process) (Posture, error) {
+	return verify(gate, participants, false)
+}
+
+// CheckPosture judges complete readings, in gate, membership, memory, swap,
+// core, participant order. MemoryMax zero or MaxUint64 denotes no finite cap.
+// SwapMax MaxUint64 denotes max. Empty participant evidence refuses activation.
+// This is an initial-activation check and requires a fresh gate.
+// Reading failures are returned before this function with Unreadable set and
+// Check naming the attempted condition. Refusals from these complete readings
+// leave Unreadable false: the condition was evaluated and failed.
+func CheckPosture(gate *probe.DeliveryGate, posture Posture) error {
+	return checkPosture(gate, posture, true)
+}
+
+func verify(gate *probe.DeliveryGate, participants []process.Process, fresh bool) (Posture, error) {
+	posture := Posture{PID: os.Getpid()}
+	if err := checkGate(gate, posture.PID, fresh); err != nil {
+		return posture, err
+	}
+	posture, err := readPosture(participants)
+	if err != nil {
+		return posture, err
+	}
+	return posture, checkPosture(gate, posture, fresh)
+}
+
+func checkGate(gate *probe.DeliveryGate, pid int, fresh bool) error {
+	state := gate.Snapshot()
+	if state.MaxEvents == 0 || state.Reason != "" || (fresh && state.Charged != 0) {
+		return &Refusal{Check: DeliveryGate, PID: pid, Detail: fmt.Sprintf("gate must be constructed and valid (fresh=%t): allowance=%d charged=%d reason=%q", fresh, state.MaxEvents, state.Charged, state.Reason)}
+	}
+	return nil
+}
+
+func cleanCgroup(group string) bool {
+	return strings.HasPrefix(group, "/") && path.Clean(group) == group
+}
+
+func withinCgroup(group, envelope string) bool {
+	return envelope == "/" || group == envelope || strings.HasPrefix(group, envelope+"/")
+}
+
+func checkPosture(gate *probe.DeliveryGate, posture Posture, fresh bool) error {
+	refuse := func(check Check, detail string) error {
+		return &Refusal{Check: check, PID: posture.PID, Detail: detail}
+	}
+	if err := checkGate(gate, posture.PID, fresh); err != nil {
+		return err
+	}
+	if posture.PID <= 0 || posture.StartTime == 0 || !posture.Member || !cleanCgroup(posture.Cgroup) {
+		return refuse(PayloadMembership, "payload process identity and membership in a clean absolute cgroup must be established")
+	}
+	if (posture.Domain != "domain" && posture.Domain != "domain threaded") || posture.MemoryMax == 0 || posture.MemoryMax == math.MaxUint64 {
+		return refuse(ExecutionMemory, "the payload holder's cgroup must be a memory domain with a positive finite memory.max")
+	}
+	if posture.SwapMax != 0 || posture.SwapCurrent != 0 {
+		return refuse(AnonymousSwap, fmt.Sprintf("memory.swap.max and memory.swap.current must both be zero: max=%d current=%d", posture.SwapMax, posture.SwapCurrent))
+	}
+	if posture.Dumpable != 0 {
+		return refuse(CoreDumps, fmt.Sprintf("payload process dumpability must be zero, read %d", posture.Dumpable))
+	}
+	if len(posture.Participants) == 0 {
+		return refuse(ParticipantOutsideEnvelope, "no participant identities were verified outside the envelope")
+	}
+	for _, participant := range posture.Participants {
+		if participant.PID <= 0 || participant.StartTime == 0 || int(participant.PID) == posture.PID || !cleanCgroup(participant.Cgroup) || withinCgroup(participant.Cgroup, posture.Cgroup) {
+			return refuse(ParticipantOutsideEnvelope, fmt.Sprintf("participant pid %d start %d cgroup %q is not an identified process outside payload envelope %q", participant.PID, participant.StartTime, participant.Cgroup, posture.Cgroup))
+		}
+	}
+	return nil
+}

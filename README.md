@@ -54,7 +54,8 @@ proven, and what does not work. Read it before relying on anything here.
   the adapter.
 - **One protocol**: HTTP/1.1, with JSON bodies described by their shape. Other traffic is captured and
   not reconstructed. Reconstruction runs when a finished session is read back, never while capturing.
-- **One output**: the spool and the account, on the host. Nothing is exported.
+- **Local output**: the session account, on the host. Raw capture records stay in bounded volatile
+  storage. Durable payload output requires processing and release authorization. Nothing is exported.
 - **Most of the configuration contract.** [contract/config/CONFIG.md](contract/config/CONFIG.md)
   specifies packs, processing pipelines, subscribers, policy documents, traffic filtering, turning
   plaintext retention off, export, and other kinds of sink. The program implements none of them, and
@@ -198,19 +199,28 @@ before believing anything else in it**: a run that lost events is not evidence a
 host. And a run that saw nothing is only evidence of a quiet process if the account also says the
 probes were attached.
 
-After the account, `--text` prints the exchanges reconstructed from the spool beside it: each connection
-under its process, with whether that process was the server or the client, and under it each request's
-method and path and the status of the response to it, every header by name, and each body by its size
-and JSON shape. It prints no header value and no body byte. Reconstruction runs here, as the directory
-is read, on the machine running `inspect`, and it reads the session's whole spool, every value
-included, into memory to find that structure. Leaving the values out of what it prints removes nothing:
-they were read to build the view, and the spool still holds them. A directory holding the account alone
-says that nothing was reconstructed, rather than showing a session in which nothing crossed.
+`--text` prints the sealed account and the approved records from `approved.jsonl`, including
+permitted header and trailer values, decoded body bytes, and their capture-time policy revision,
+route, connection metadata and message positions. Inspection uses the persisted result; changing
+local policy does not reinterpret it. Copying just `account.json` and `approved.jsonl` is sufficient.
 
-**The header values and body bytes are in the spool files beside the account, in full**: `.jsonl` files
-of one JSON record per line, where each record of what crossed carries those bytes base64-encoded. That
-is plaintext in all but spelling - whatever credentials and personal data the observed traffic carried
-are in it, one decode away - and it stays on this host until you delete it.
+Named policy exclusions distinguish fields that were removed from fields absent in the retained
+messages. An empty exclusion array means none were excluded there; an absent or null array in an
+older artifact means that evidence is unavailable. Truncation evidence identifies an indeterminate
+suffix independently of the connection's actual ending. Missing, empty or unreadable approved
+output fails text inspection, even if the account was printed. A legacy raw spool is not used as a
+fallback. See [approved inspection](docs/approved-inspection.md) for the reader contract.
+
+**New capture sessions do not create raw spool files.** Both capture callbacks copy records into a
+bounded volatile intake. Reaching its limit refuses the next record whole and signals exhaustion;
+releasing held records does not reopen an exhausted intake. Intake records are not approved output.
+The processing worker writes authorized, processed route records to `approved.jsonl`; it does not
+write raw fragments or connection records to the legacy spool. The sealed account sits beside that
+approved output.
+
+Legacy `fragments.jsonl` files contain header values and body bytes base64-encoded, including any
+credentials and personal data the traffic carried. Reading such a file does not sanitize it or remove
+it from disk.
 
 ## Documentation
 

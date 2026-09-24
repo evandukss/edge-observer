@@ -211,7 +211,11 @@ func readConfiguration(content []byte) (Configuration, []Finding) {
 	for _, member := range []struct {
 		path  string
 		value *int64
-	}{{"observer.spool_bound_mib", c.Observer.SpoolBoundMiB}, {"observer.state_every_seconds", c.Observer.StateEverySeconds}} {
+	}{
+		{"observer.approved_output_bound_mib", c.Observer.ApprovedOutputBoundMiB},
+		{"observer.state_every_seconds", c.Observer.StateEverySeconds},
+		{"observer.admitted_event_limit", c.Observer.AdmittedEventLimit},
+	} {
 		if member.value != nil && *member.value < 1 {
 			f.add(member.path, Malformed, "%d is not above zero", *member.value)
 		}

@@ -3,7 +3,8 @@
   "observer": {
     "log": "stdout",
     "directory": "/var/lib/observer",
-    "spool_bound_mib": 64,
+    "approved_output_bound_mib": 64,
+    "admitted_event_limit": 16384,
     "state_every_seconds": 30
   },
   "observation_scope": {

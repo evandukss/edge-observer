@@ -221,6 +221,15 @@ func Project(source observed.Account, supply Supply) (Account, error) {
 		}
 	}
 	a.Processing = Processing{Block: Block{State: NotCarried}}
+	if p := source.Processing; p != nil {
+		a.Processing = Processing{Block: Block{State: Carried}, Pipelines: []Processed{},
+			Aggregate: &ProcessingAggregate{
+				GateReason: string(p.GateReason), ProcessingFailures: decimalOf(p.ProcessingFailures),
+				OutputFailures: decimalOf(p.OutputFailures), Authorized: decimalOf(p.Authorized),
+				Written: decimalOf(p.Written), StoppedPipelines: append([]string{}, p.StoppedPipelines...),
+			},
+		}
+	}
 	a.Requirements = Requirements{Block: Block{State: NotCarried}}
 	return a, nil
 }
@@ -531,6 +540,8 @@ func captureOf(source observed.Account) (Capture, error) {
 			Refused: decimalOf(spool.Refused), Connections: decimalOf(spool.Connections),
 			ConnectionsDropped: decimalOf(spool.ConnectionsDropped), ConnectionsRefused: decimalOf(spool.ConnectionsRefused),
 			Bytes: decimalOf(spool.Bytes), Limit: decimalOf(spool.Limit)}
+	} else if source.Processing != nil {
+		capture.Spool = Spool{Block: Block{State: NotCarried, Why: "this session stores approved route records and does not create a raw spool"}}
 	} else {
 		capture.Spool = Spool{Block: Block{State: Unavailable, Why: "the operational account carries no spool block"}}
 	}

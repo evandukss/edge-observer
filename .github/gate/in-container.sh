@@ -19,6 +19,52 @@ refuse() {
 	exit 1
 }
 
+# The attach suite starts the observer, and the observer refuses to activate
+# unless its payload holder is in a bounded cgroup with participants outside it.
+# That is the contract's launch precondition: on a host an operator provides the
+# envelope. A container cannot, out of the box - cgroup v2 refuses to enable a
+# controller in a cgroup that holds processes directly, and a container's root
+# holds its own, so nothing beneath it can carry memory.max until the root is
+# emptied.
+#
+# This empties it. The side effect is durable and it is on shared state: every
+# process in this container moves. That is acceptable HERE and only here because
+# run.sh starts one container per obligation, so this root is the attach run's
+# own scratch and nothing else is in it. It would not be acceptable in a
+# container shared with another suite.
+prepare_cgroups() {
+	local root=/sys/fs/cgroup leaf=/sys/fs/cgroup/gate-runner before after pass
+	[ -d "$root" ] || refuse "cgroup preparation: $root is not a directory"
+	mkdir -p "$leaf" || refuse "cgroup preparation: cannot create $leaf"
+	before="$(grep -c . "$root/cgroup.procs" || true)"
+	# One pass is not enough and the shortfall is silent. Reading the list and
+	# moving from it races the commands the move itself runs: each substitution
+	# forks a process, and one forked before its parent left lands back in the
+	# root. Measured here at two passes from a two-process root under one
+	# invocation and one pass under another, so a single pass is correct by
+	# luck rather than by construction. The bound stops a process nothing can
+	# move from spinning this forever.
+	local pass=0
+	after="$before"
+	while [ "$pass" -lt 20 ] && [ "$after" -ne 0 ]; do
+		pass=$((pass + 1))
+		while read -r pid; do
+			[ -n "$pid" ] && echo "$pid" >"$leaf/cgroup.procs" 2>/dev/null
+		done <"$root/cgroup.procs"
+		after="$(grep -c . "$root/cgroup.procs" || true)"
+	done
+	[ "$after" -eq 0 ] || refuse "cgroup preparation: root still holds $after processes after $pass passes, so no controller can be enabled beneath it"
+	echo "+memory +io" >"$root/cgroup.subtree_control" ||
+		refuse "cgroup preparation: could not enable controllers in $root/cgroup.subtree_control"
+	local enabled
+	enabled="$(cat "$root/cgroup.subtree_control")"
+	case "$enabled" in *memory*) ;; *) refuse "cgroup preparation: memory is not enabled, subtree_control is [$enabled]" ;; esac
+	# Said out loud because the next person to meet an odd cgroup layout in this
+	# container should find the answer here rather than in somebody's notes.
+	echo "cgroup preparation: moved $before processes from $root into $leaf in $pass pass(es); subtree_control is now [$enabled]"
+}
+
+
 case "${1:?usage: in-container.sh <list-unit|unit|list-attach|attach|static|bpf|archive COMMIT>}" in
 
 list-unit)
@@ -34,6 +80,7 @@ list-attach)
 	;;
 
 attach)
+	prepare_cgroups
 	# One package at a time: both attach probes to real processes on one kernel,
 	# and side by side a short-lived child's traffic goes unreported.
 	go test -count=1 -p 1 -tags attach -timeout 10m -v "${attach_packages[@]}"

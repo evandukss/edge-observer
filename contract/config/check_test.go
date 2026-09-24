@@ -385,20 +385,20 @@ func TestTheObserverSettingsResolve(t *testing.T) {
 	if defaulted.Resolved == nil {
 		t.Fatalf("outcome %q, want accepted", defaulted.Outcome)
 	}
-	if got := defaulted.Resolved.Observer; got.SpoolBoundMiB != config.DefaultSpoolBoundMiB || got.StateEverySeconds != config.DefaultStateEverySeconds {
-		t.Errorf("absent settings resolve to %+v, expected %d and %d", got, config.DefaultSpoolBoundMiB, config.DefaultStateEverySeconds)
+	if got := defaulted.Resolved.Observer; got.ApprovedOutputBoundMiB != config.DefaultApprovedOutputBoundMiB || got.StateEverySeconds != config.DefaultStateEverySeconds {
+		t.Errorf("absent settings resolve to %+v, expected %d and %d", got, config.DefaultApprovedOutputBoundMiB, config.DefaultStateEverySeconds)
 	}
 	written := all["accept-no-extension"]
 	wrote := map[string]any{}
 	strict(t, written.Configuration, &wrote)
-	wrote["observer"].(map[string]any)["spool_bound_mib"] = 128
+	wrote["observer"].(map[string]any)["approved_output_bound_mib"] = 128
 	wrote["observer"].(map[string]any)["state_every_seconds"] = 5
 	written.Configuration, _ = json.Marshal(wrote)
 	given := config.Check(input(written, available))
 	if given.Resolved == nil {
 		t.Fatalf("wiring, not the property: outcome %q", given.Outcome)
 	}
-	if got := given.Resolved.Observer; got.SpoolBoundMiB != 128 || got.StateEverySeconds != 5 {
+	if got := given.Resolved.Observer; got.ApprovedOutputBoundMiB != 128 || got.StateEverySeconds != 5 {
 		t.Errorf("written settings resolve to %+v, expected 128 and 5", got)
 	}
 }
@@ -417,7 +417,7 @@ func TestTheObserverDefaultsAgreeWithTheObserver(t *testing.T) {
 		t.Fatalf("decode the no-extension example: %v", err)
 	}
 	observer := document["observer"].(map[string]any)
-	delete(observer, "spool_bound_mib")
+	delete(observer, "approved_output_bound_mib")
 	delete(observer, "state_every_seconds")
 	file, err := json.Marshal(document)
 	if err != nil {
@@ -431,8 +431,8 @@ func TestTheObserverDefaultsAgreeWithTheObserver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wiring, not the property: the observer refused a configuration stating neither setting: %v", err)
 	}
-	if loaded.Settings.BoundMiB != config.DefaultSpoolBoundMiB {
-		t.Errorf("the observer defaults the spool bound to %d MiB and the contract to %d", loaded.Settings.BoundMiB, config.DefaultSpoolBoundMiB)
+	if loaded.Settings.ApprovedOutputBoundMiB != config.DefaultApprovedOutputBoundMiB {
+		t.Errorf("the observer defaults the approved output bound to %d MiB and the contract to %d", loaded.Settings.ApprovedOutputBoundMiB, config.DefaultApprovedOutputBoundMiB)
 	}
 	if loaded.Settings.StateEvery != time.Duration(config.DefaultStateEverySeconds)*time.Second {
 		t.Errorf("the observer defaults the state interval to %s and the contract to %ds", loaded.Settings.StateEvery, config.DefaultStateEverySeconds)

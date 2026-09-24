@@ -5,8 +5,10 @@ package attach_test
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +21,7 @@ import (
 	"github.com/evandukss/edge-observer/account"
 	"github.com/evandukss/edge-observer/ebpf"
 	"github.com/evandukss/edge-observer/process"
+	"github.com/evandukss/edge-observer/processing"
 	"github.com/evandukss/edge-observer/spool"
 )
 
@@ -171,13 +174,46 @@ func exactly(name string, p process.Process, boot, mode string) map[string]any {
 		"descendants": mode}
 }
 
-// observedBy is how many records the session's spool holds for each pid.
+// observedBy counts what the session APPROVED, per holding process. It reads
+// the approved artifact rather than the raw spool, which the observer stopped
+// writing when capture moved to a volatile intake.
+//
+// The counts are not comparable with the spool's: that held one record per
+// fragment and this holds one per approved route. Every caller asks only
+// whether a process appears at all, so the magnitude is reported in failure
+// text and asserted nowhere - keep it that way, because the two numbers answer
+// different questions.
 func observedBy(t *testing.T, directory string) map[int32]int {
 	t.Helper()
 	counts := make(map[int32]int)
-	for _, record := range spooledRecords(t, filepath.Join(directory, spool.Name)) {
-		counts[record.Process.PID]++
+	file, err := os.Open(filepath.Join(directory, processing.ArtifactName))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return counts
+		}
+		t.Fatalf("read the approved output: %v", err)
 	}
+	defer func() { _ = file.Close() }()
+	lines := bufio.NewScanner(file)
+	lines.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	for lines.Scan() {
+		var artifact processing.Artifact
+		if err := json.Unmarshal(lines.Bytes(), &artifact); err != nil {
+			// A line still being written.
+			continue
+		}
+		counts[artifact.Connection.Process.PID]++
+	}
+	// Which KIND of empty this is. A caller that finds its pid absent cannot
+	// otherwise tell "the artifact carries entries, none of them this one" -
+	// its own question, answered no - from "the artifact carries nothing at
+	// all", which is a different failure and not about the pid it asked for.
+	pids := make([]int32, 0, len(counts))
+	for pid := range counts {
+		pids = append(pids, pid)
+	}
+	slices.Sort(pids)
+	t.Logf("approved output holds %d entries across pids %v", len(pids), pids)
 	return counts
 }
 
@@ -360,6 +396,16 @@ func TestAnExcludedProcessAndItsDescendantProduceNothingWhileAControlOutsideItDo
 // cgroupFor makes a cgroup under this container's hierarchy. Its removal is
 // registered before anything moves in and moves out whatever remains, so
 // nothing is left on the host whatever order the clean-ups run in.
+//
+// AT THE MOUNT ROOT, and a bounded cgroup cannot go anywhere else. The gate
+// runner empties the root into gate-runner and enables the controllers THERE,
+// on the root, because a cgroup holding processes may enable none in its own
+// subtree - and gate-runner is where every process in this container then
+// lives. So gate-runner can never carry controllers, nothing created beneath
+// it has a memory.max to write, and a cgroup that needs a limit is a sibling
+// of gate-runner rather than a child of it. Measured: creating the observer's
+// envelope under gate-runner fails with permission denied on memory.max,
+// which reads as a privilege problem and is the no-internal-process rule.
 func cgroupFor(t *testing.T, name string) string {
 	t.Helper()
 	directory := filepath.Join(ebpf.DefaultCgroupMount, name)
@@ -368,12 +414,37 @@ func cgroupFor(t *testing.T, name string) string {
 	}
 	t.Cleanup(func() {
 		content, _ := os.ReadFile(filepath.Join(directory, "cgroup.procs"))
+		home := ownCgroup(t)
 		for _, pid := range strings.Fields(string(content)) {
-			_ = os.WriteFile(filepath.Join(ebpf.DefaultCgroupMount, "cgroup.procs"), []byte(pid), 0o644)
+			_ = os.WriteFile(filepath.Join(home, "cgroup.procs"), []byte(pid), 0o644)
 		}
 		_ = os.Remove(directory)
 	})
 	return directory
+}
+
+// ownCgroup is the cgroup this test process is in, which is where a process is
+// returned to when the group holding it goes away.
+//
+// NOT the mount root. A cgroup with a controller enabled in its subtree_control
+// may hold no processes of its own, so writing a pid to the root fails with
+// "device or resource busy" the moment anything beneath it is capped - which is
+// every run of this suite, because the observer needs a bounded envelope. The
+// root accepts processes only while nothing is bounded, so a helper that
+// returns them there models a system in which the resource controls are off.
+func ownCgroup(t *testing.T) string {
+	t.Helper()
+	content, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		t.Fatalf("read this process's own cgroup: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(content)), "\n") {
+		if path, ok := strings.CutPrefix(line, "0::"); ok {
+			return filepath.Join(ebpf.DefaultCgroupMount, path)
+		}
+	}
+	t.Fatalf("no unified cgroup line in /proc/self/cgroup:\n%s", content)
+	return ""
 }
 
 func moveInto(t *testing.T, directory string, pid int32) {
@@ -411,7 +482,10 @@ func TestACgroupTargetIsASnapshotAndTheObjectItResolvedToDecides(t *testing.T) {
 		t.Fatalf("the account records no object for the cgroup it resolved: %+v", first.Cgroup)
 	}
 
-	moveInto(t, ebpf.DefaultCgroupMount, leaver.PID)
+	// Out of the target and into the cgroup this test is in, NOT the mount root:
+	// the root holds no processes once anything beneath it is bounded, which is
+	// every run of this suite. See ownCgroup.
+	moveInto(t, ownCgroup(t), leaver.PID)
 	_, entrant := looping(t, port, "entrant", witness, "loop")
 	moveInto(t, group, entrant.PID)
 	nested := cgroupFor(t, name+"/inner")
@@ -443,7 +517,7 @@ func TestACgroupTargetIsASnapshotAndTheObjectItResolvedToDecides(t *testing.T) {
 	// The path made again: everything moved out, the object removed, a new one made
 	// under the same path, a newcomer put in it.
 	for _, pid := range []int32{stayer.PID, entrant.PID, nester.PID} {
-		moveInto(t, ebpf.DefaultCgroupMount, pid)
+		moveInto(t, ownCgroup(t), pid)
 	}
 	if err := os.Remove(nested); err != nil {
 		t.Fatalf("remove %s: %v", nested, err)

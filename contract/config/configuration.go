@@ -23,8 +23,13 @@ const (
 // The observer settings an operator may omit, as values: the observer's own
 // defaults, which a test holds equal.
 const (
-	DefaultSpoolBoundMiB     int64 = 64
-	DefaultStateEverySeconds int64 = 30
+	DefaultApprovedOutputBoundMiB int64 = 64
+	DefaultStateEverySeconds      int64 = 30
+	// DefaultAdmittedEventLimit chooses a finite diagnostic population with a
+	// nominal 64 MiB intake allowance at the decoder's current payload ceiling.
+	// It is not measured headroom or an execution-memory budget, and remains
+	// independent of the approved durable-output allowance.
+	DefaultAdmittedEventLimit int64 = 16384
 )
 
 // Configuration is the operator's document. Its three scopes are separate
@@ -52,17 +57,22 @@ type Configuration struct {
 	Policy []json.RawMessage `json:"policy"`
 }
 
-// Observer is where the observer writes, the spool bound per session, and how
-// often the log restates state. Log and Directory are required;
-// SpoolBoundMiB and StateEverySeconds default to DefaultSpoolBoundMiB and
-// DefaultStateEverySeconds and are refused below 1. Log is "stdout" or an
-// absolute path; Directory is absolute, since a relative path would depend on
-// how the process was started.
+// Observer holds output settings, the event admission count, and how often the
+// log restates state. Log and Directory are required. The other settings default
+// to their corresponding Default constants and are refused below 1.
+// Log is "stdout" or an absolute path; Directory is absolute, since a relative
+// path would depend on how the process was started.
 type Observer struct {
-	Log               string `json:"log"`
-	Directory         string `json:"directory"`
-	SpoolBoundMiB     *int64 `json:"spool_bound_mib"`
-	StateEverySeconds *int64 `json:"state_every_seconds"`
+	Log       string `json:"log"`
+	Directory string `json:"directory"`
+	// spool_bound_mib is retired and refused as an unknown member; it is not an alias.
+	// This allowance does not bound admitted events or process memory.
+	ApprovedOutputBoundMiB *int64 `json:"approved_output_bound_mib"`
+	StateEverySeconds      *int64 `json:"state_every_seconds"`
+	// AdmittedEventLimit counts decoded events reaching the shared delivery gate.
+	// Absent, it resolves to DefaultAdmittedEventLimit; it is not a byte limit.
+	// A supplied value below 1 is refused before composition.
+	AdmittedEventLimit *int64 `json:"admitted_event_limit"`
 }
 
 // ObservationScope is which instances may be inspected. Approval against it is

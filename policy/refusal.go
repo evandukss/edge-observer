@@ -79,9 +79,8 @@ type Section struct {
 //	                            plaintext                           processing
 //	pipelines                   no pipeline carrying reconstruction,
 //	                            or none carrying connection, to a
-//	                            local_account sink: the spool keeps
-//	                            both, so routing neither is
-//	                            filtering                           processing
+//	                            local_account sink: omitting either
+//	                            record kind is unsupported           processing
 //	sinks[i].kind               any kind but local_account, while
 //	                            Inventory holds no other kind       none
 //	retention_and_export.export_sinks

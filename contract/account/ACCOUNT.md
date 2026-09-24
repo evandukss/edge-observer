@@ -18,7 +18,7 @@ It is domain-neutral. Nothing here names a business operation or a privacy rule.
 
 | Name here | What it is | Where | Version |
 |---|---|---|---|
-| **operational account** | the observer's own account of a session at three moments - planned, live, sealed - built by one set of functions and sealed beside the session's spool | `account`, `Account` | `Version` = 1 |
+| **operational account** | the observer's own account of a session at three moments - planned, live, sealed - built by one set of functions and sealed beside approved output for new sessions or a raw spool for legacy sessions | `account`, `Account` | `Version` = 1 |
 | **account** | this contract: the published form of a SEALED operational account, with the records it describes carried beside it in a bundle | `contract/account` | `observer.account/1-draft` |
 
 **The relation is one-way and versioned on the operational account's number.** An account at
@@ -105,6 +105,8 @@ permits at `live` and `sealed`. Nothing further is owed for that direction.
     extensions      object, possibly empty
 
 ### Required blocks
+
+Tests parse this section: preserve this heading and list order, with one block name per line indented four spaces, using only lowercase letters, underscores and dots; keep prose outside the list.
 
 The dotted path of every block, and each is required wherever its parent block is `carried`:
 
@@ -247,6 +249,23 @@ are to find.
 `refused`; an output `disposition` is `dispatched`, `refused` or `dropped`. **A suppression is
 accounted, not silent**: a record a predicate removed is counted under the component and reason that removed
 it.
+
+An optional `aggregate` carries session totals when per-pipeline attribution was not measured:
+`{gate_reason, processing_failures, output_failures, authorized, written, stopped_pipelines[]}`.
+The four counts are decimal strings. `authorized` and `written` count route records separately;
+permission does not assert write completion or durable flush. For each batch's processing refusals,
+`processing_failures` counts each affected active durable route once: every active route for a
+batch refusal, or the affected pipeline's routes for a pipeline refusal. Already-stopped routes
+are excluded. This is not a count of unique routes, batches or exchanges; a route can write a useful
+prefix and also count a refused suffix. `output_failures` counts failed approved writes. An internal
+artifact-serialization defect instead terminates processing and names the binary defect in the seal
+reason; it does not increment either counter. Neither counter is policy suppression or capture loss,
+which retain their own dispositions and readings. `gate_reason` is empty when the gate has no
+invalidation reason; `unknown_length`, `input_limit` and `storage_exhausted` remain distinguishable.
+`stopped_pipelines` names pipelines stopped by their failure action, not a session terminal state.
+When only this aggregate is supplied, `pipelines` is empty because attribution was not supplied;
+that is not a per-pipeline zero. Aggregate counts must never be copied onto a synthetic pipeline
+or onto every pipeline. The aggregate adds no intake, writer-capacity or cleanup diagnostics.
 
 ### requirements
 

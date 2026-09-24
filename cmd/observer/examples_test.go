@@ -45,6 +45,11 @@ func contractConfiguration(t *testing.T, change func(document map[string]any)) s
 	if err := json.Unmarshal(content, &document); err != nil {
 		t.Fatalf("decode the no-extension example: %v", err)
 	}
+	// Runtime fixtures use the bounded processing profile, which has no
+	// configurable queues. The general contract example still exercises them.
+	for _, pipeline := range document["pipelines"].([]any) {
+		pipeline.(map[string]any)["queues"] = []any{}
+	}
 	change(document)
 	written, err := json.Marshal(document)
 	if err != nil {
@@ -71,20 +76,25 @@ func target(document map[string]any, name, exe string, args ...string) {
 	descendants["future"] = false
 }
 
-// Every example configuration is run through this program's dry run, with the
-// outcome stated per file: the no-extension example is planned, each other is
-// refused naming every section this program does not do.
+// Every general-contract example is run through the bounded runtime profile.
+// Refusals name the deciding subject and reason; a supported neighbour proves
+// the command can still produce a plan.
 func TestEveryExampleConfigurationIsRunByTheProgram(t *testing.T) {
+	var control bytes.Buffer
+	if err := run([]string{"dry-run", contractConfiguration(t, func(map[string]any) {})}, &control); err != nil {
+		t.Fatalf("supported processing control refused: %v", err)
+	}
+	var planned account.Account
+	if err := json.Unmarshal(control.Bytes(), &planned); err != nil || len(planned.Targets) != 1 {
+		t.Fatalf("supported control produced no usable plan: error=%v output=%s", err, control.Bytes())
+	}
 	outcomes := map[string][]string{
-		"no-extension.config.json":            nil,
-		"scopes-inbound-retained.config.json": {"pipelines", "pipelines[0].slots", "traffic_scope.rules[0]"},
-		"scopes-outbound-exported.config.json": {"pipelines", "pipelines[0].slots",
-			"retention_and_export.export_sinks", "retention_and_export.retain_plaintext",
-			"sinks[0].kind", "sinks[1].kind", "traffic_scope.rules[0]"},
-		"content-filter-is-not-approval.config.json": {"pipelines", "pipelines[0].slots", "policy"},
-		"configuration-only-pack.config.json":        {"packs", "pipelines", "pipelines[0].slots"},
-		"external-component.config.json": {"packs", "pipelines", "pipelines[0].slots", "policy",
-			"retention_and_export.export_sinks", "sinks[1].kind", "subscribers"},
+		"no-extension.config.json":                   {"pipeline:exchanges/unsupported_form"},
+		"scopes-inbound-retained.config.json":        {"traffic_scope.rules[0]/unsupported_form"},
+		"scopes-outbound-exported.config.json":       {"traffic_scope.rules[0]/unsupported_form"},
+		"content-filter-is-not-approval.config.json": {"slot:exchanges.redact/unknown_component"},
+		"configuration-only-pack.config.json":        {"pack:swap-redactor/unknown_pack", "slot:exchanges.redact/unknown_component"},
+		"external-component.config.json":             {"pipeline:exchanges/unsupported_form", "subscriber:notes/unsupported_role"},
 	}
 	// The other files are not configurations: pack manifests are read only for an
 	// enabled pack (all refused), the runtime inventory is the contract's example
@@ -124,26 +134,13 @@ func TestEveryExampleConfigurationIsRunByTheProgram(t *testing.T) {
 			}
 			var out bytes.Buffer
 			err := run([]string{"dry-run", example(t, name)}, &out)
-			if refused == nil {
-				if err != nil {
-					t.Fatalf("the program refuses it: %v", err)
-				}
-				var planned account.Account
-				if err := json.Unmarshal(out.Bytes(), &planned); err != nil {
-					t.Fatalf("the dry run printed no account: %v\n%s", err, out.String())
-				}
-				if len(planned.Targets) != 1 {
-					t.Errorf("the plan carries %d targets where the example names one", len(planned.Targets))
-				}
-				return
-			}
-			var unimplemented *policy.Unimplemented
-			if !errors.As(err, &unimplemented) {
-				t.Fatalf("answered %v, want every section this program does not do named", err)
+			var rejected *policy.Refused
+			if !errors.As(err, &rejected) || rejected.Outcome != policy.ProcessingRefused {
+				t.Fatalf("answered %v, want a named processing-profile refusal", err)
 			}
 			var paths []string
-			for _, section := range unimplemented.Sections {
-				paths = append(paths, section.Path)
+			for _, finding := range rejected.Findings {
+				paths = append(paths, finding.Subject+"/"+string(finding.Reason))
 			}
 			slices.Sort(paths)
 			if !slices.Equal(paths, refused) {
@@ -193,12 +190,14 @@ func TestEveryCommandRefusesWhatTheProgramDoesNotDo(t *testing.T) {
 		t.Run(strings.Join(append([]string{arguments[0]}, arguments[2:]...), " "), func(t *testing.T) {
 			var out bytes.Buffer
 			err := run(arguments, &out)
-			var unimplemented *policy.Unimplemented
-			if !errors.As(err, &unimplemented) {
+			var rejected *policy.Refused
+			if !errors.As(err, &rejected) || rejected.Outcome != policy.ProcessingRefused {
 				t.Fatalf("%v answered %v, want the pack refused by name", arguments, err)
 			}
-			if !slices.ContainsFunc(unimplemented.Sections, func(s policy.Section) bool { return s.Path == "packs" }) {
-				t.Errorf("%v refused naming %+v, without the pack", arguments, unimplemented.Sections)
+			if !slices.ContainsFunc(rejected.Findings, func(f config.Finding) bool {
+				return f.Subject == "pack:swap-redactor" && f.Reason == config.UnknownPack
+			}) {
+				t.Errorf("%v refused naming %+v, without the unavailable pack", arguments, rejected.Findings)
 			}
 		})
 	}

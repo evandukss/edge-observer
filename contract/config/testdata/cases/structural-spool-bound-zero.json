@@ -1,11 +1,11 @@
 {
-  "purpose": "a spool bound written as zero is not a bound",
+  "purpose": "an approved output bound written as zero is not a bound",
   "configuration": {
     "version": "observer.config/draft",
     "observer": {
       "log": "stdout",
       "directory": "/var/lib/observer",
-      "spool_bound_mib": 0,
+      "approved_output_bound_mib": 0,
       "state_every_seconds": 30
     },
     "observation_scope": {
@@ -81,7 +81,7 @@
     "structural": [
       {
         "document": "configuration",
-        "subject": "observer.spool_bound_mib",
+        "subject": "observer.approved_output_bound_mib",
         "reason": "malformed"
       }
     ],

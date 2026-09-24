@@ -8,7 +8,7 @@ import (
 	"github.com/evandukss/edge-observer/fragment"
 )
 
-// Record is one captured connection, persisted beside the fragments and joined
+// Record is one captured connection, held with the fragments and joined
 // to them by ConnectionID. It carries what comparing a stream with an outside
 // record needs: which connection this is, how long, and where its bytes stop
 // being placeable.
