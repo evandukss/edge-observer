@@ -32,14 +32,14 @@ static)
 	target=go memory=2304m result=steps steps=7
 	;;
 unit)
-	target=go memory=1472m result=tests floor=522 list=list-unit
+	target=go memory=1472m result=tests floor=623 list=list-unit
 	;;
 attach)
 	# Loading BPF programs and placing uprobes needs a privileged container. Some
 	# of these tests approve a process by the pid they see and match it against
 	# the pid the kernel reports, which is the host's, so the container shares the
 	# host's pid namespace.
-	target=go memory=1280m result=tests floor=182 list=list-attach
+	target=go memory=1280m result=tests floor=195 list=list-attach
 	privileged=(--privileged --pid=host)
 	;;
 bpf)
