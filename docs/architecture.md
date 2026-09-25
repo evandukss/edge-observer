@@ -6,8 +6,8 @@ one Go module.
 
 ## The flow
 
-    configuration file
-      -> policy            read it, check it against what this program has, refuse what it does not do
+    configuration file, and the packs it enables (packs/<name>.json beside it)
+      -> policy            compile them, check them against what this program has, refuse what it does not do
       -> process           read /proc, select the approved processes and their descendants
       -> probe             ask each adapter whether it can observe each process (the catalogue)
       -> probe/openssl/attach, ebpf, bpf
@@ -26,10 +26,11 @@ with no kernel and no privilege. The only thing they share is the fragment recor
 
 ## Selecting what to observe
 
-**`policy`** reads the configuration file. The file is the operator configuration of
+**`cmd/observer`** reads the configuration file and every pack it enables, from `packs/<name>.json`
+beside it, and **`policy`** compiles them together. The file is the operator configuration of
 `contract/config/CONFIG.md`, checked by that contract's own code (`contract/config`) against what this
 program has. Every section the contract accepts and this program does not implement is refused by
-name, never read and ignored.
+name, never read and ignored. `stop` and a running session's `inspect` read only where the session is.
 
 **`process`** reads the processes on the host and decides which of them the configuration approves.
 Nothing no rule names is observed, and an approval with no rules approves nothing. **`admission`**

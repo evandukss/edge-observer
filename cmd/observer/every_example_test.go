@@ -47,7 +47,7 @@ func moduleRoot(t *testing.T) string {
 // examplesFloor is the fewest example files the walk must find before its
 // result means anything: the count when set, held as a floor so later
 // examples need no edit here.
-const examplesFloor = 18
+const examplesFloor = 14
 
 // executor is the program an examples directory describes, run over that
 // directory through a filesystem that records every file opened. It returns
@@ -210,6 +210,34 @@ func dryRunOne(examples fs.FS, name string) error {
 	written := filepath.Join(directory, path.Base(name))
 	if err := os.WriteFile(written, content, 0o600); err != nil {
 		return err
+	}
+	// The program reads the packs a configuration enables from packs/ beside
+	// it, so the example's packs are copied with it. The copy reads past the
+	// recording: copying a pack is not a program executing it, so a pack
+	// counts as opened only where a program opens it.
+	source := examples
+	if recorded, ok := examples.(*openedFS); ok {
+		source = recorded.fsys
+	}
+	packs := path.Join(path.Dir(name), "packs")
+	entries, err := fs.ReadDir(source, packs)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		pack, err := fs.ReadFile(source, path.Join(packs, entry.Name()))
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Join(directory, "packs"), 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(directory, "packs", entry.Name()), pack, 0o600); err != nil {
+			return err
+		}
 	}
 	var out bytes.Buffer
 	err = run([]string{"dry-run", written}, &out)

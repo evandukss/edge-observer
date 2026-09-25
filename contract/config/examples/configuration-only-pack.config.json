@@ -44,7 +44,7 @@
     "export_sinks": []
   },
   "packs": [
-    "swap-redactor"
+    "reversed-masking"
   ],
   "sinks": [
     {
@@ -58,8 +58,25 @@
       "input": "reconstruction",
       "slots": [
         {
-          "name": "redact",
-          "implementation": "http-redactor",
+          "name": "mark",
+          "implementation": "replace-header-values",
+          "configuration": {
+            "headers": [
+              "authorization"
+            ],
+            "value": "withheld-by-operator"
+          },
+          "on_failure": "drop_and_account"
+        },
+        {
+          "name": "limit",
+          "implementation": "truncate-header-values",
+          "configuration": {
+            "headers": [
+              "authorization"
+            ],
+            "length": 8
+          },
           "on_failure": "drop_and_account"
         }
       ],

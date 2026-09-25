@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/evandukss/edge-observer/account"
 	"github.com/evandukss/edge-observer/attachment"
@@ -196,6 +197,24 @@ func (r logRecord) covered(name string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// sessionOf is the process and session the pid file names, written by a
+// detached session before it records its activation.
+func sessionOf(t *testing.T, c configured) (int, string) {
+	t.Helper()
+	for range 100 {
+		content, err := os.ReadFile(c.pidFile())
+		if fields := strings.Fields(string(content)); err == nil && len(fields) == 2 {
+			pid, err := strconv.Atoi(fields[0])
+			if err == nil {
+				return pid, fields[1]
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("the pid file %s names no running session", c.pidFile())
+	return 0, ""
 }
 
 // runningWith is every process whose command line names this configuration.

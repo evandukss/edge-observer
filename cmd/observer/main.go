@@ -91,7 +91,9 @@ func usage() string {
 The configuration is one JSON file, the operator configuration of
 contract/config/CONFIG.md: where the log and approved output go, what to
 attach to, what never to attach to, and which library builds a probe may be
-placed on. A section this program does not implement is refused by name. The
+placed on. A section this program does not implement is refused by name. Each
+pack it enables is read from packs/<name>.json beside it; stop, and inspect of
+a running session, read only where the session is and never a pack. The
 account is JSON unless --text asks for the one a
 person reads; --local adds each target's conditions, arguments included, for a
 view that stays on this host.`
@@ -110,6 +112,12 @@ func run(arguments []string, stdout io.Writer) error {
 			len(arguments), usage())
 	}
 	command, configuration, options := arguments[0], arguments[1], arguments[2:]
+	// Made absolute once, here: packs are read beside the configuration, and a
+	// detached session and a reload read it again from elsewhere.
+	configuration, err := filepath.Abs(configuration)
+	if err != nil {
+		return fmt.Errorf("resolve the configuration's path: %w", err)
+	}
 
 	allowed := map[string][]string{
 		"preflight": {"--text"},
@@ -233,11 +241,11 @@ func inspect(path string, text bool, stdout io.Writer) error {
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
 		return inspectFinished(os.DirFS(path), text, stdout)
 	}
-	read, err := loadProcessing(path)
+	directory, err := sessionDirectory(path)
 	if err != nil {
 		return err
 	}
-	answer, err := ask(read.Settings.Directory, "inspect", nil, askWithin)
+	answer, err := ask(directory, "inspect", nil, askWithin)
 	if err != nil {
 		return err
 	}
@@ -334,11 +342,10 @@ func lastSealed(directory string) (sealedSession, error) {
 
 // stop ends the running session and waits for it to seal.
 func stop(path string, stdout io.Writer) error {
-	read, err := loadProcessing(path)
+	directory, err := sessionDirectory(path)
 	if err != nil {
 		return err
 	}
-	directory := read.Settings.Directory
 	pid, session, err := holder(directory)
 	if err != nil {
 		return err

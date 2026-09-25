@@ -1,0 +1,204 @@
+{
+  "purpose": "an independently implementable external component declared with its input and output, state, ordering, lifecycle, version and failure results, placed after the built-in redactor, with the pack's claim approved by the operator and an enforceable ordering required",
+  "configuration": {
+    "version": "observer.config/draft",
+    "observer": {
+      "log": "stdout",
+      "directory": "/var/lib/observer",
+      "approved_output_bound_mib": 64,
+      "admitted_event_limit": 16384,
+      "state_every_seconds": 30
+    },
+    "observation_scope": {
+      "targets": [
+        {
+          "name": "api-server",
+          "match": {
+            "exe": "/usr/bin/php",
+            "args": [
+              "/srv/api/main.php"
+            ]
+          },
+          "descendants": {
+            "existing": true,
+            "future": true,
+            "boundary": "exec_ends_the_grant",
+            "root_exit": "survivors_keep_their_grants",
+            "replacement": "needs_restart"
+          }
+        }
+      ],
+      "exclude": [],
+      "libraries": []
+    },
+    "traffic_scope": {
+      "rules": [
+        {
+          "targets": [],
+          "direction": "any",
+          "local_ports": [],
+          "remote_ports": []
+        }
+      ]
+    },
+    "retention_and_export": {
+      "retain_plaintext": true,
+      "export_sinks": [
+        "export"
+      ]
+    },
+    "packs": [
+      "acme-classifier"
+    ],
+    "sinks": [
+      {
+        "name": "account",
+        "kind": "local_account"
+      },
+      {
+        "name": "export",
+        "kind": "remote_export"
+      }
+    ],
+    "pipelines": [
+      {
+        "name": "exchanges",
+        "input": "reconstruction",
+        "slots": [
+          {
+            "name": "redact",
+            "implementation": "http-redactor",
+            "on_failure": "drop_and_account"
+          },
+          {
+            "name": "classify",
+            "implementation": "acme-classifier",
+            "configuration": {
+              "labels": "operations"
+            },
+            "on_failure": "stop_pipeline"
+          }
+        ],
+        "sinks": [
+          "account"
+        ],
+        "queues": [
+          {
+            "name": "classify-in"
+          }
+        ]
+      }
+    ],
+    "subscribers": [
+      {
+        "name": "notes",
+        "stream": "exchanges",
+        "implementation": "annotation-subscriber"
+      }
+    ],
+    "policy": [
+      {
+        "vocabulary": "observer.policy/draft",
+        "requirements": [
+          {
+            "id": "classify-before-account",
+            "target": {
+              "kind": "sink",
+              "name": "account"
+            },
+            "operation": "order_before",
+            "parameters": {
+              "processor": "acme-classifier"
+            },
+            "failure_action": "stop_pipeline"
+          }
+        ],
+        "claims": [],
+        "approvals": [
+          {
+            "claim": "acme-labels"
+          }
+        ]
+      }
+    ]
+  },
+  "manifests": [
+    {
+      "name": "acme-classifier",
+      "content": {
+        "version": "observer.pack/draft",
+        "name": "acme-classifier",
+        "pack_version": "2.3.0",
+        "components": [
+          {
+            "interface": "observer.component/draft",
+            "name": "acme-classifier",
+            "version": "2.3.0",
+            "role": "processor",
+            "execution": "external",
+            "input": {
+              "types": [
+                "reconstruction"
+              ],
+              "delivery": "batch"
+            },
+            "output": {
+              "records": [
+                "reconstruction"
+              ],
+              "derived": [
+                "annotation"
+              ],
+              "suppression": true,
+              "findings": false
+            },
+            "state": "per_connection",
+            "ordering": {
+              "records": "in_order_per_connection",
+              "after": [
+                "http-redactor"
+              ],
+              "before": []
+            },
+            "lifecycle": {
+              "startup": "handled",
+              "configuration_change": "handled",
+              "stream_closure": "handled",
+              "flush": "handled",
+              "shutdown": "handled"
+            },
+            "failures": [
+              "record_error",
+              "fatal",
+              "configuration_refused"
+            ],
+            "configuration_schema": {
+              "carried": "as supplied; its notation is not interpreted by this draft"
+            }
+          }
+        ],
+        "pipelines": [],
+        "replacements": [],
+        "policy": [
+          {
+            "vocabulary": "observer.policy/draft",
+            "requirements": [],
+            "claims": [
+              {
+                "id": "acme-labels",
+                "component": "acme-classifier",
+                "statement": "labels each exchange with the operation it carries"
+              }
+            ],
+            "approvals": []
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "outcome": "accepted",
+    "structural": [],
+    "composition": []
+  }
+}

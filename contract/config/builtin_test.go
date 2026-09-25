@@ -24,8 +24,8 @@ func TestEveryBuiltinSatisfiesTheComponentRules(t *testing.T) {
 	if err := decoder.Decode(&available); err != nil {
 		t.Fatalf("decode the runtime inventory: %v", err)
 	}
-	if len(available.Builtins) != 5 {
-		t.Fatalf("wiring, not the rules: %d built-ins where 5 are written, so nothing below measures the set", len(available.Builtins))
+	if len(available.Builtins) != 8 {
+		t.Fatalf("wiring, not the rules: %d built-ins where 8 are written, so nothing below measures the set", len(available.Builtins))
 	}
 	for index, builtin := range available.Builtins {
 		f := &findings{document: "builtin"}

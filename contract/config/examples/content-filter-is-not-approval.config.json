@@ -61,7 +61,13 @@
       "slots": [
         {
           "name": "redact",
-          "implementation": "http-redactor",
+          "implementation": "remove-headers",
+          "configuration": {
+            "headers": [
+              "authorization",
+              "cookie"
+            ]
+          },
           "on_failure": "drop_and_account"
         }
       ],
@@ -77,22 +83,17 @@
       "vocabulary": "observer.policy/draft",
       "requirements": [
         {
-          "id": "drop-health-checks",
+          "id": "never-keep-credentials",
           "target": {
-            "kind": "pipeline",
-            "name": "exchanges"
+            "kind": "sink",
+            "name": "account"
           },
-          "operation": "suppress_matching",
+          "operation": "transform_field",
           "parameters": {
-            "all": [
-              {
-                "field": "message.start_line",
-                "test": "has_prefix",
-                "value": "GET /health"
-              }
-            ]
+            "field": "message.headers.authorization",
+            "transformation": "remove"
           },
-          "failure_action": "none"
+          "failure_action": "drop_and_account"
         }
       ],
       "claims": [],

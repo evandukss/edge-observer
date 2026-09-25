@@ -176,6 +176,7 @@ func TestConfigCaseSensitiveMembers(t *testing.T) {
 				independentSet(t, d, "observation_scope/exclude", []any{map[string]any{"exe": "/bin/curl"}})
 				independentSet(t, d, "observation_scope/libraries", []any{map[string]any{"build_id": "abc123", "symbols": map[string]any{"SSL_read": 123}}})
 				independentSet(t, d, "pipelines/0/slots", []any{map[string]any{"name": "redact", "implementation": "redactor", "on_failure": "drop_and_account", "configuration": map[string]any{}}})
+				independentSet(t, d, "pipelines/0/queues", []any{map[string]any{"name": "exchanges-out"}})
 				d["subscribers"] = []any{map[string]any{"name": "notes", "stream": "exchanges", "implementation": "annotator"}}
 				d["policy"] = []any{independentPolicyDocument()}
 				before := config.Check(config.Input{Configuration: independentBytes(t, d), Available: policy.Inventory()})

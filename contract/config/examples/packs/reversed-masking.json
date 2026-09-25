@@ -1,0 +1,32 @@
+{
+  "version": "observer.pack/draft",
+  "name": "reversed-masking",
+  "pack_version": "0.1.0",
+  "components": [],
+  "pipelines": [],
+  "replacements": [
+    {
+      "pipeline": "exchanges",
+      "slot": "mark",
+      "implementation": "truncate-header-values",
+      "configuration": {
+        "headers": [
+          "authorization"
+        ],
+        "length": 8
+      }
+    },
+    {
+      "pipeline": "exchanges",
+      "slot": "limit",
+      "implementation": "replace-header-values",
+      "configuration": {
+        "headers": [
+          "authorization"
+        ],
+        "value": "withheld-by-pack"
+      }
+    }
+  ],
+  "policy": []
+}
