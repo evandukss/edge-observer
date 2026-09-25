@@ -19,7 +19,7 @@ import (
 
 // caseCount is how many worked cases testdata/cases holds, asserted before any
 // case is read so a glob that matched nothing cannot pass.
-const caseCount = 49
+const caseCount = 52
 
 type workedCase struct {
 	Purpose       string          `json:"purpose"`
@@ -58,9 +58,9 @@ func runtime(t *testing.T) config.Available {
 	}
 	var available config.Available
 	strict(t, content, &available)
-	if len(available.Types) != 6 || len(available.Builtins) != 5 || len(available.SinkKinds) != 3 {
+	if len(available.Types) != 6 || len(available.Builtins) != 8 || len(available.SinkKinds) != 3 {
 		t.Fatalf("wiring, not the contract: the runtime inventory holds %d types, %d built-ins and %d sink kinds "+
-			"where 6, 5 and 3 are written, so no case below measures what it says",
+			"where 6, 8 and 3 are written, so no case below measures what it says",
 			len(available.Types), len(available.Builtins), len(available.SinkKinds))
 	}
 	return available
@@ -500,8 +500,8 @@ func TestTheExamplesCheckAsIndexed(t *testing.T) {
 	}
 	var index []example
 	strict(t, content, &index)
-	if len(index) != 6 {
-		t.Fatalf("wiring, not the contract: %d examples indexed where 6 are written", len(index))
+	if len(index) != 3 {
+		t.Fatalf("wiring, not the contract: %d examples indexed where 3 are written", len(index))
 	}
 	runtimeContent, err := os.ReadFile(filepath.Join("examples", "runtime.json"))
 	if err != nil {

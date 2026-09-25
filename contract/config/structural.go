@@ -145,6 +145,13 @@ func ReadConfiguration(content []byte) (Configuration, []Finding) {
 	return readConfiguration(content)
 }
 
+// ReadManifest reads one supplied manifest structurally, with the reader the
+// check and the compiler use, so a loader that must know a manifest's declared
+// name before supplying it reads the same document they will.
+func ReadManifest(supplied Supplied) (Manifest, []Finding) {
+	return readManifest(supplied)
+}
+
 // findings collects structural findings for one document.
 type findings struct {
 	document string

@@ -3,6 +3,8 @@ package policy
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -13,13 +15,26 @@ import (
 // SOME of it is left to composition. The inventory's count decides, not the
 // section's name.
 func TestNoneOfAKindIsUnimplementedAndSomeOfItIsLeftToComposition(t *testing.T) {
-	content, err := config.Examples.ReadFile("examples/external-component.config.json")
+	// A worked case of the contract's, which this program does not run. This
+	// package's directory is the module root's policy directory.
+	here, err := os.Getwd()
 	if err != nil {
-		t.Fatalf("read the example: %v", err)
+		t.Fatal(err)
 	}
-	written, structural := config.ReadConfiguration(content)
+	worked, err := os.ReadFile(filepath.Join(filepath.Dir(here), "contract", "config", "testdata", "cases",
+		"accept-external-component-claim-approved.json"))
+	if err != nil {
+		t.Fatalf("read the worked case: %v", err)
+	}
+	var one struct {
+		Configuration json.RawMessage `json:"configuration"`
+	}
+	if err := json.Unmarshal(worked, &one); err != nil {
+		t.Fatalf("decode the worked case: %v", err)
+	}
+	written, structural := config.ReadConfiguration(one.Configuration)
 	if len(structural) > 0 {
-		t.Fatalf("wiring, not the property: the example is structurally refused: %+v", structural)
+		t.Fatalf("wiring, not the property: the configuration is structurally refused: %+v", structural)
 	}
 	runtime, err := config.Examples.ReadFile("examples/runtime.json")
 	if err != nil {

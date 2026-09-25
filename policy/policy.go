@@ -210,7 +210,8 @@ func unimplemented(c config.Configuration, has config.Available) []Section {
 			c.RetentionExport.ExportSinks)
 	}
 	if len(c.Packs) > 0 {
-		add("packs", []Capability{Processing, Plugins}, "it enables %v, and this program loads no pack", c.Packs)
+		add("packs", []Capability{Processing, Plugins}, "it enables %v, and this profile loads no pack; "+
+			"the observer's commands read and compile packs through CompileProcessing", c.Packs)
 	}
 	otherKinds := kinds(func(k config.SinkKind) bool { return k.Name != LocalAccount })
 	local := map[string]bool{}

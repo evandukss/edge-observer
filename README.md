@@ -58,9 +58,13 @@ proven, and what does not work. Read it before relying on anything here.
   storage. Durable payload output requires processing and release authorization. Nothing is exported.
 - **Most of the configuration contract.** [contract/config/CONFIG.md](contract/config/CONFIG.md)
   specifies packs, processing pipelines, subscribers, policy documents, traffic filtering, turning
-  plaintext retention off, export, and other kinds of sink. The program implements none of them, and
-  refuses a configuration that asks for any of them, naming the section. Of a target's five
-  `descendants` answers, three accept one value each.
+  plaintext retention off, export, and other kinds of sink. The program implements its bounded
+  processing profile: pipelines to the local account, three header operations (`remove-headers`,
+  `replace-header-values`, `truncate-header-values`), mandatory header removal as the one policy
+  form, and configuration-only packs read from `packs/<name>.json` beside the configuration. It
+  refuses the rest - external components, subscribers, queues, traffic filtering, other policy
+  operations, turning plaintext retention off, export and other kinds of sink - naming what it
+  refuses. Of a target's five `descendants` answers, three accept one value each.
 - **A reload only adds.** It puts in force a new target that needs no probe beyond those already
   placed. Anything it would take away, and a library nothing has attached to, waits for a restart.
 - **No release**: no archive, no tag, no version number.

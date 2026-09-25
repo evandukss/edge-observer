@@ -245,6 +245,120 @@
         "record_error",
         "fatal"
       ]
+    },
+    {
+      "interface": "observer.component/draft",
+      "name": "remove-headers",
+      "version": "1",
+      "role": "processor",
+      "execution": "builtin",
+      "input": {
+        "types": [
+          "reconstruction"
+        ],
+        "delivery": "record"
+      },
+      "output": {
+        "records": [
+          "reconstruction"
+        ],
+        "derived": [],
+        "suppression": false,
+        "findings": false
+      },
+      "state": "none",
+      "ordering": {
+        "records": "none",
+        "after": [],
+        "before": []
+      },
+      "lifecycle": {
+        "startup": "ignored",
+        "configuration_change": "ignored",
+        "stream_closure": "ignored",
+        "flush": "ignored",
+        "shutdown": "ignored"
+      },
+      "failures": [
+        "record_error",
+        "fatal"
+      ]
+    },
+    {
+      "interface": "observer.component/draft",
+      "name": "replace-header-values",
+      "version": "1",
+      "role": "processor",
+      "execution": "builtin",
+      "input": {
+        "types": [
+          "reconstruction"
+        ],
+        "delivery": "record"
+      },
+      "output": {
+        "records": [
+          "reconstruction"
+        ],
+        "derived": [],
+        "suppression": false,
+        "findings": false
+      },
+      "state": "none",
+      "ordering": {
+        "records": "none",
+        "after": [],
+        "before": []
+      },
+      "lifecycle": {
+        "startup": "ignored",
+        "configuration_change": "ignored",
+        "stream_closure": "ignored",
+        "flush": "ignored",
+        "shutdown": "ignored"
+      },
+      "failures": [
+        "record_error",
+        "fatal"
+      ]
+    },
+    {
+      "interface": "observer.component/draft",
+      "name": "truncate-header-values",
+      "version": "1",
+      "role": "processor",
+      "execution": "builtin",
+      "input": {
+        "types": [
+          "reconstruction"
+        ],
+        "delivery": "record"
+      },
+      "output": {
+        "records": [
+          "reconstruction"
+        ],
+        "derived": [],
+        "suppression": false,
+        "findings": false
+      },
+      "state": "none",
+      "ordering": {
+        "records": "none",
+        "after": [],
+        "before": []
+      },
+      "lifecycle": {
+        "startup": "ignored",
+        "configuration_change": "ignored",
+        "stream_closure": "ignored",
+        "flush": "ignored",
+        "shutdown": "ignored"
+      },
+      "failures": [
+        "record_error",
+        "fatal"
+      ]
     }
   ],
   "sink_kinds": [

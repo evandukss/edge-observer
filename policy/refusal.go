@@ -17,9 +17,11 @@ import (
 //	*Unanswerable   a target's two descendant answers name no admission mode
 //
 // The order is structural, then unimplemented, then composition. Unimplemented
-// comes before composition because composition against this program's empty
+// comes before composition because composition against this profile's empty
 // inventory would answer a different question: a pack "cannot be resolved"
-// where the operator needs to hear that no pack is loaded.
+// where the operator needs to hear that this profile loads no pack. The
+// observer's commands do not use this profile; they compile packs through
+// CompileProcessing.
 
 // Capability is what this program would need in order to implement a section
 // it refuses. Its value is the text an operator reads.

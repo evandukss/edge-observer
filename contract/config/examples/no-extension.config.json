@@ -58,11 +58,7 @@
       "sinks": [
         "account"
       ],
-      "queues": [
-        {
-          "name": "exchanges-out"
-        }
-      ]
+      "queues": []
     },
     {
       "name": "connections",

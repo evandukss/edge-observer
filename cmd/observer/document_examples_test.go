@@ -41,7 +41,14 @@ func checkDocumentDeclarations(contracts fs.FS) map[string]error {
 		return json.Unmarshal(content, into)
 	}
 	var component, policyDocument json.RawMessage
-	var configuration, manifest map[string]json.RawMessage
+	// The host documents are a worked case: this program does not run an
+	// external component, so they are not among its examples.
+	var host struct {
+		Configuration map[string]json.RawMessage `json:"configuration"`
+		Manifests     []struct {
+			Content map[string]json.RawMessage `json:"content"`
+		} `json:"manifests"`
+	}
 	var available config.Available
 	for _, one := range []struct {
 		name string
@@ -49,14 +56,17 @@ func checkDocumentDeclarations(contracts fs.FS) map[string]error {
 	}{
 		{"examples/component.json", &component},
 		{"examples/policy.json", &policyDocument},
-		{"config/examples/external-component.config.json", &configuration},
-		{"config/examples/packs/acme-classifier.json", &manifest},
+		{"config/testdata/cases/accept-external-component-claim-approved.json", &host},
 		{"config/examples/runtime.json", &available},
 	} {
 		if err := read(one.name, one.into); err != nil {
 			return whole(fmt.Errorf("%s: %w", one.name, err))
 		}
 	}
+	if len(host.Manifests) != 1 {
+		return whole(fmt.Errorf("the host case carries %d manifests where one is the pack", len(host.Manifests)))
+	}
+	configuration, manifest := host.Configuration, host.Manifests[0].Content
 	manifest["components"] = append(append([]byte{'['}, component...), ']')
 	configuration["policy"] = append(append([]byte{'['}, policyDocument...), ']')
 	configJSON, err := json.Marshal(configuration)

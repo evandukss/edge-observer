@@ -55,15 +55,16 @@ below lists every rule.
                            the kind of every sink a pipeline dispatches through
 
 **A condition that needs a reconstructed message is not a traffic scope condition.** It is a
-post-capture suppression, written as `suppress_matching` in the policy vocabulary
-(`contract/policy`), and it is evaluated on records of instances the observation scope already
-approved. **A content filter is therefore never evidence that an unapproved process was not
-inspected**: `examples/content-filter-is-not-approval.config.json` suppresses health checks, and a
-process outside every target whose requests would match that suppression is not inspected because no
-target selects it, not because anything filtered it.
+post-capture suppression or transformation in the policy vocabulary (`contract/policy`), and it is
+evaluated on records of instances the observation scope already approved. **A content filter is
+therefore never evidence that an unapproved process was not inspected**:
+`examples/content-filter-is-not-approval.config.json` removes the `authorization` header after capture,
+and a process outside every target that sends one is not inspected because no target selects it, not
+because anything removed it.
 
-`examples/scopes-inbound-retained.config.json` and `examples/scopes-outbound-exported.config.json` hold
-the SAME target under different traffic and retention and export scopes.
+The worked cases `testdata/cases/accept-scopes-inbound-retained.json` and
+`testdata/cases/accept-scopes-outbound-exported.json` hold the SAME target under different traffic and
+retention and export scopes.
 
 A target is `{"name", "match", "descendants"}`. A match names at least one of `exe`, `args`, `cgroup`,
 `pid` (`{"pid", "start", "boot"}`, an instance and not a number), `port` and `interface` - the
@@ -232,6 +233,63 @@ the uncovered route and requirement. Existing structural and composition reasons
 meaning. Independent findings at a reached stage are retained together. A refused earlier stage
 does not claim to have checked later stages that need its successful result.
 
+### Where the observer reads a pack
+
+**A pack named N that the configuration enables is read from `packs/N.json` in the directory holding the
+configuration file.** That directory is the lexical parent of the configuration's path, made absolute
+once where the command receives it, so a relative path means the same thing to a detached session and to
+a reload as to the command that named it. Only enabled packs are read, in the order `packs` lists them.
+Nothing is found by listing the directory, by a search path or by fetching, and a file there that the
+configuration does not enable is never opened. A configuration whose `packs` is empty reads nothing
+there. `packs/N.json` is a lookup for configuration-only packs and promises nothing about how executable
+packs will be laid out.
+
+**Installing a pack is placing its file there; activating it is naming it in `packs` and starting a
+session.** The manifest's `name` must equal N. N must match `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`, checked
+before any file is opened, so a name cannot reach outside that directory. The file is opened without
+waiting for a writer and must be a regular file before a byte of it is read. The configuration and its
+enabled packs together are held to the configuration's byte budget, `MaxProcessingBytes`, and no more
+than one byte past it is read. A link is followed, as the configuration's own path is.
+
+A pack that cannot be read as the one named is refused before capture, with a nonzero exit and a
+finding whose subject is `pack:N` and whose detail names the path tried. It never means continuing
+without the pack:
+
+| reason | when |
+|---|---|
+| `pack_name_invalid` | N does not match the name rule; no pack file of the configuration is looked for |
+| `unknown_pack` | no file exists at `packs/N.json`, including a link to nothing |
+| `pack_unreadable` | the file exists and cannot be opened or read, including a loop of links |
+| `pack_not_regular_file` | the path is a directory, a named pipe, a socket or a device |
+| `configuration_too_large` | the configuration and the enabled packs read so far exceed `MaxProcessingBytes`; no pack after it is read |
+| `pack_name_mismatch` | the manifest at `packs/N.json` declares another name. Two files whose names are exchanged are both refused, although together they declare both names |
+| `malformed`, `unknown_version` | the manifest is refused by the structural reader, under document `manifest:N`, with the path in the detail |
+
+A pack that loads is then compiled with the configuration exactly as `CompileProcessing` states above,
+so everything the profile refuses in a supplied manifest it refuses in an installed one.
+
+**The observer does not authenticate packs.** The operator controls the integrity of the
+configuration, the packs and the directories through which either can be replaced: an observed
+participant or any other untrusted user must not be able to write them. There is no ownership,
+signature or link rule on the pack file, because the configuration file is read without one and a rule
+on the pack alone would be an assurance the rest of the path does not back. The pack's identity in a
+session is its exact bytes, bound into the session's revisions; that is identity, not authentication.
+
+**A pack changed on disk does not change a running session.** The session executes the plan it compiled
+when it started. `reload` rereads the configuration and every enabled pack, in the command and again in
+the running session after it has given up its capabilities, so the configuration and its packs must be
+readable to the session then. Any change to an enabled pack's bytes - a value, a version, whitespace -
+changes the processing revision and is refused as a processing change a restart applies, leaving the
+plan and generation in force; unchanged pack bytes beside an observation-only change are reloaded as any
+other. `restart` compiles the new bundle before it stops the running session, so a pack that cannot be
+read leaves that session running.
+
+**`stop`, and `inspect` of a running session, read only where the session is** - the configuration's
+`observer.directory`, read structurally - and never a pack or anything processing. A pack that is
+broken, removed or changed never prevents stopping or inspecting a session. `start`, `start
+--daemonize`, `restart`, `dry-run`, `preflight` and `reload` compile everything, packs included.
+`inspect` of a finished session's directory reads no configuration at all.
+
 ### Subscribers
 
     {"name": "notes", "stream": "exchanges", "implementation": "annotation-subscriber"}
@@ -364,14 +422,15 @@ naming a pack is `unknown_pack` against an inventory that can load none, and the
 that no pack is loaded. **The decision is the inventory's count, not the section's name**: NONE of a
 kind (no processor, no subscriber, no sink kind leaving the host) is a kind the runtime does not
 implement; SOME of a kind without the one named is the operator's error and stays a composition
-refusal. The observer's own subset and its refusals are `policy`'s (`Unimplemented`).
+refusal. `policy.Load`'s subset and its refusals are `policy`'s (`Unimplemented`); the observer's
+commands do not use that profile, and compile through the bounded processing profile, packs included.
 
 | reason | stage | when |
 |---|---|---|
 | `unknown_version` | structural | a document, or a component declaration, of a version this draft does not read |
 | `malformed` | structural | an undefined member, a key written twice, a required member absent, a value outside its set, or a declaration contradicting itself |
 | `duplicate_name` | structural | two members of one list with one name. Also given at composition for two pipelines or two supplied packs with one name |
-| `unknown_pack` | composition | the configuration enables a pack no supplied manifest declares |
+| `unknown_pack` | composition | the configuration enables a pack no supplied manifest declares. The observer gives it before composition for a pack with no file at `packs/N.json`, naming that path ("Where the observer reads a pack") |
 | `unknown_type` | composition | a type that is not a published record type |
 | `unknown_target` | composition | a traffic rule names a target the observation scope does not have |
 | `unknown_sink` | composition | a pipeline or the export list names a sink that is not configured |
