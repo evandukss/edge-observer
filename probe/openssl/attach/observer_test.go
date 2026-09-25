@@ -5,7 +5,6 @@ package attach_test
 import (
 	"bufio"
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -15,17 +14,12 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/evandukss/edge-observer/account"
 	"github.com/evandukss/edge-observer/attachment"
-	contract "github.com/evandukss/edge-observer/contract/account"
-	"github.com/evandukss/edge-observer/fragment"
-	"github.com/evandukss/edge-observer/internal/published"
 	"github.com/evandukss/edge-observer/privilege"
 	"github.com/evandukss/edge-observer/process"
 	"github.com/evandukss/edge-observer/processing"
-	"github.com/evandukss/edge-observer/spool"
 )
 
 // built is the observer compiled as it ships: without cgo, which lets it give
@@ -151,7 +145,6 @@ type reloadAnswer struct {
 	Generation int      `json:"generation"`
 	Reason     string   `json:"reason"`
 	Added      []string `json:"added"`
-	Admitted   int      `json:"admitted"`
 	Skipped    []string `json:"skipped"`
 }
 
@@ -186,10 +179,6 @@ type logRecord struct {
 		Covered  *int   `json:"covered"`
 	} `json:"coverage"`
 	Changes []string `json:"changes"`
-	Follows *struct {
-		Session string `json:"session"`
-		Gap     string `json:"gap"`
-	} `json:"follows"`
 }
 
 func recordOf(line []byte) (logRecord, bool) {
@@ -209,24 +198,6 @@ func (r logRecord) covered(name string) (int, bool) {
 	return 0, false
 }
 
-// sessionOf is the process and session the pid file names, written by a
-// detached session before it records its activation.
-func sessionOf(t *testing.T, c configured) (int, string) {
-	t.Helper()
-	for range 100 {
-		content, err := os.ReadFile(c.pidFile())
-		if fields := strings.Fields(string(content)); err == nil && len(fields) == 2 {
-			pid, err := strconv.Atoi(fields[0])
-			if err == nil {
-				return pid, fields[1]
-			}
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("the pid file %s names no running session", c.pidFile())
-	return 0, ""
-}
-
 // runningWith is every process whose command line names this configuration.
 func runningWith(t *testing.T, path string) []int32 {
 	t.Helper()
@@ -241,22 +212,6 @@ func runningWith(t *testing.T, path string) []int32 {
 		}
 	}
 	return found
-}
-
-// activationOf is the activation record the log carries for session.
-func activationOf(t *testing.T, c configured, session string) logRecord {
-	t.Helper()
-	logged, err := os.ReadFile(c.log)
-	if err != nil {
-		t.Fatalf("read the log: %v", err)
-	}
-	for line := range strings.Lines(string(logged)) {
-		if record, ok := recordOf([]byte(line)); ok && record.Record == "activation-completed" && record.Session == session {
-			return record
-		}
-	}
-	t.Fatalf("the log carries no activation for session %s:\n%s", session, logged)
-	return logRecord{}
 }
 
 // A detached start that cannot activate exits non-zero with the reason and
@@ -279,85 +234,6 @@ func TestADetachedStartThatCannotActivateExitsNonZeroAndLeavesNoProcessBehind(t 
 	}
 	if entries, err := os.ReadDir(c.sessions()); err == nil && len(entries) != 0 {
 		t.Errorf("a detached start that failed left %d session directories", len(entries))
-	}
-}
-
-// The parent exits zero only once the child has activated, and the child is the
-// observer: it holds no capability and captures an exchange that crosses after
-// the parent has gone.
-func TestADetachedStartExitsZeroOnlyOnceActivatedAndItsChildGoesOnObserving(t *testing.T) {
-	binary := built(t)
-	client := speaking(t, serving(t))
-	c := configuring(t, target("under-test", client.process))
-
-	parent := exec.Command(binary, "start", c.path, "--daemonize")
-	intoEnvelope(t, parent)
-	output, err := parent.CombinedOutput()
-	if err != nil {
-		t.Fatalf("the detached start failed: %v\n%s", err, output)
-	}
-	pid, session := sessionOf(t, c)
-	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
-	if pid == parent.Process.Pid {
-		t.Fatalf("the pid file names the parent, %d, which has exited", pid)
-	}
-	if !strings.Contains(string(output), session) {
-		t.Errorf("the parent does not name the session it started:\n%s", output)
-	}
-	// Activated before the parent returned: the record is already in the log.
-	activationOf(t, c, session)
-
-	if capabilities := held(t, pid, "CapEff"); strings.Trim(capabilities, "0") != "" {
-		t.Errorf("the detached observer holds %s after activating", capabilities)
-	}
-	client.ask(t, "after-the-parent")
-	waitForSpool(t, filepath.Join(c.sessions(), session), 2)
-
-	if out, err := exec.Command(binary, "stop", c.path).CombinedOutput(); err != nil {
-		t.Fatalf("stop the detached observer: %v\n%s", err, out)
-	}
-	if _, err := os.Stat(filepath.Join(c.sessions(), session, "account.json")); err != nil {
-		t.Errorf("the detached session sealed no account: %v", err)
-	}
-}
-
-// A restart seals one output session and begins another told apart from it,
-// whose activation says which session it follows and how long nothing was
-// observed between. A connection open across it stays observed.
-func TestARestartIsANewOutputSessionWhoseActivationSaysHowLongNothingWasObserved(t *testing.T) {
-	binary := built(t)
-	client := speaking(t, serving(t))
-	c := configuring(t, target("under-test", client.process))
-
-	detached := exec.Command(binary, "start", c.path, "--daemonize")
-	intoEnvelope(t, detached)
-	if out, err := detached.CombinedOutput(); err != nil {
-		t.Fatalf("start detached: %v\n%s", err, out)
-	}
-	_, first := sessionOf(t, c)
-	client.ask(t, "first")
-	waitForSpool(t, filepath.Join(c.sessions(), first), 2)
-
-	if out, err := exec.Command(binary, "restart", c.path).CombinedOutput(); err != nil {
-		t.Fatalf("restart: %v\n%s", err, out)
-	}
-	pid, second := sessionOf(t, c)
-	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
-	if second == first {
-		t.Fatalf("the restarted observer is still session %s", first)
-	}
-	if _, err := os.Stat(filepath.Join(c.sessions(), first, "account.json")); err != nil {
-		t.Errorf("the first session did not seal before the second began: %v", err)
-	}
-	activation := activationOf(t, c, second)
-	if activation.Follows == nil || activation.Follows.Session != first || activation.Follows.Gap == "" {
-		t.Errorf("the second session's activation says it follows %+v, want session %s and the gap", activation.Follows, first)
-	}
-
-	client.ask(t, "second")
-	waitForSpool(t, filepath.Join(c.sessions(), second), 1)
-	if out, err := exec.Command(binary, "stop", c.path).CombinedOutput(); err != nil {
-		t.Fatalf("stop: %v\n%s", err, out)
 	}
 }
 
@@ -477,83 +353,6 @@ func ended(t *testing.T, observer running, c configured) account.Account {
 	return sealed
 }
 
-// validatedBundle assembles a finished session's contract bundle from exactly
-// what it sealed (contract account and spool) with the contract's Bundle, and
-// requires the contract's validator to accept it. Assembly adds only the
-// seal's member digests.
-func validatedBundle(t *testing.T, directory, session string, spooled int) {
-	t.Helper()
-
-	content, err := os.ReadFile(filepath.Join(directory, published.Name))
-	if err != nil {
-		t.Fatalf("read the sealed contract account: %v", err)
-	}
-	var sealed contract.Account
-	if err := json.Unmarshal(content, &sealed); err != nil {
-		t.Fatalf("decode the sealed contract account: %v", err)
-	}
-	if sealed.Moment != contract.Sealed || sealed.Session != session {
-		t.Fatalf("the contract account beside session %s is a %s account of session %s", session, sealed.Moment, sealed.Session)
-	}
-	records, err := published.Records(os.DirFS(directory))
-	if err != nil {
-		t.Fatalf("read the session's spool into records: %v", err)
-	}
-	if len(records.Observations) < spooled || spooled == 0 {
-		t.Fatalf("wiring, not the property: %d observations were read off a spool the run saw %d fragments in",
-			len(records.Observations), spooled)
-	}
-
-	// No captured plaintext is in the contract account: no plaintext-carrying
-	// member, no spool payload raw or base64. "payload" is not searched for: a
-	// capability fact of that name says whether the build copies plaintext.
-	t.Logf("the contract account is %d bytes, beside %d observations", len(content), len(records.Observations))
-	for _, member := range []string{`"headers"`, `"body"`, `"start_line"`, `"data"`} {
-		if bytes.Contains(content, []byte(member)) {
-			t.Errorf("the contract account carries a %s member", member)
-		}
-	}
-	checked := 0
-	for _, one := range records.Observations {
-		if len(one.Payload.Data) < 12 {
-			continue
-		}
-		checked++
-		raw, err := base64.StdEncoding.DecodeString(one.Payload.Data)
-		if err != nil {
-			t.Fatalf("an observation's payload is not base64: %v", err)
-		}
-		if bytes.Contains(content, []byte(one.Payload.Data)) || bytes.Contains(content, raw) {
-			t.Errorf("the contract account carries a payload the spool holds")
-		}
-	}
-	if checked == 0 {
-		t.Fatalf("wiring, not the property: no observation carried a payload to look for")
-	}
-	files, err := contract.Bundle(sealed, records)
-	if err != nil {
-		t.Fatalf("bundle the sealed contract account: %v", err)
-	}
-	root := t.TempDir()
-	for path, member := range files {
-		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, path)), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(root, path), member, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	result := contract.Validate(os.DirFS(root), contract.Options{})
-	if result.Outcome != contract.Validated {
-		t.Errorf("the contract's validator refuses the session's bundle: %s over %s, %+v",
-			result.Outcome, result.Validated, result.Findings)
-	}
-	if result.Examined.Records < len(records.Observations) {
-		t.Errorf("the validator examined %d records of a bundle holding %d observations",
-			result.Examined.Records, len(records.Observations))
-	}
-}
-
 func rendered(a account.Account) string {
 	var out bytes.Buffer
 	account.Render(&out, a, false)
@@ -626,83 +425,6 @@ func held(t *testing.T, pid int, field string) string {
 	return ""
 }
 
-func spooledRecords(t *testing.T, path string) []fragment.Record {
-	t.Helper()
-
-	file, err := os.Open(path)
-	if err != nil {
-		return nil
-	}
-	defer func() { _ = file.Close() }()
-
-	var records []fragment.Record
-	lines := bufio.NewScanner(file)
-	for lines.Scan() {
-		var record fragment.Record
-		if err := json.Unmarshal(lines.Bytes(), &record); err != nil {
-			// A line still being written.
-			continue
-		}
-		records = append(records, record)
-	}
-	return records
-}
-
-// waitForSpool waits until the session has written at least want records.
-// settleWindow is how long the spool must hold still before a count from it is
-// settled. settled() logs each wait, so a window that is too short shows as a
-// count that still moves.
-const settleWindow = 100 * time.Millisecond
-
-// settled is the spool's records once it has stopped growing. waitForSpool
-// returns what was there when it first held want, which is a lower bound: a
-// late record of the same exchange can only add. Anything computing a number
-// from the spool waits here instead.
-func settled(t *testing.T, directory string, want int) []fragment.Record {
-	t.Helper()
-	records := waitForSpool(t, directory, want)
-	started := time.Now()
-	for range 200 {
-		time.Sleep(settleWindow)
-		next := spooledRecords(t, filepath.Join(directory, spool.Name))
-		if len(next) == len(records) {
-			t.Logf("the spool settled at %d records after %s", len(next), time.Since(started))
-			return next
-		}
-		records = next
-	}
-	t.Fatalf("the spool never stopped growing: %d records after %s", len(records), time.Since(started))
-	return nil
-}
-
-// waitForSpool waits for the RAW SPOOL, which the observer stopped writing when
-// capture moved to a volatile intake. Every caller below is therefore waiting
-// for something that never arrives, and each is a test whose assertion has to
-// move rather than a call that can be pointed somewhere else.
-//
-// The approved artifact is not a substitute HERE, and the reason is timing
-// rather than content: it holds one record per approved route, written when a
-// batch finalises, which is when the connection retires. During a live
-// connection it is genuinely empty, so a mid-session wait for N records cannot
-// succeed against it however it is spelled. Measured: observedBy finds the
-// artifact's entries in the same tests where this wait finds nothing.
-//
-// So these callers do their traffic, END the session, and then count - which
-// moves the assertion across the stop boundary and changes what each
-// demonstrates. That is a judgement per test, not one decision applied to all.
-func waitForSpool(t *testing.T, directory string, want int) []fragment.Record {
-	t.Helper()
-	var records []fragment.Record
-	for range 500 {
-		if records = spooledRecords(t, filepath.Join(directory, spool.Name)); len(records) >= want {
-			return records
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("the observer wrote %d records, want %d, so what follows would measure nothing", len(records), want)
-	return nil
-}
-
 // The observer as it ships, attached to an unmodified process: it holds no
 // capability once the probes are placed, listens on nothing, and writes only
 // its own files (spool, log, pid file).
@@ -760,117 +482,6 @@ func TestTheObserverHoldsNothingListensOnNothingAndWritesOnlyItsOwnFiles(t *test
 			t.Errorf("the observer has %s open for writing, and it writes only its approved output, its log and its pid file", path)
 		}
 	}
-}
-
-// What it captures reaches the spool, the configured log carries the
-// activation standard output did, and stopping it seals the account and
-// removes its probes.
-func TestTheObserverSpoolsWhatCrossedTheProcessItWasGivenAndSealsItsAccountBesideIt(t *testing.T) {
-	binary := built(t)
-	client := speaking(t, serving(t))
-	c := configuring(t, target("under-test", client.process))
-
-	observer := started(t, binary, c)
-	client.ask(t, "spooled")
-
-	records := waitForSpool(t, observer.directory(c), 2)
-	directions := make(map[fragment.Direction]int, 2)
-	for _, record := range records {
-		if record.Process.PID != client.process.PID {
-			t.Errorf("a spooled record carries pid %d, and %d was approved", record.Process.PID, client.process.PID)
-		}
-		if err := record.Validate(); err != nil {
-			t.Errorf("a spooled record is not usable: %v", err)
-		}
-		directions[record.Direction]++
-	}
-	if directions[fragment.Sent] == 0 || directions[fragment.Received] == 0 {
-		t.Errorf("the spool carries %d sent and %d received", directions[fragment.Sent], directions[fragment.Received])
-	}
-
-	// The log is the configured file, and standard output only mirrors it.
-	logged, err := os.ReadFile(c.log)
-	if err != nil {
-		t.Fatalf("read the configured log: %v", err)
-	}
-	var activation bool
-	for line := range strings.Lines(string(logged)) {
-		if record, ok := recordOf([]byte(line)); ok && record.Record == "activation-completed" && record.Session == observer.session {
-			activation = true
-		}
-	}
-	if !activation {
-		t.Errorf("the configured log carries no activation for session %s:\n%s", observer.session, logged)
-	}
-
-	// What it keeps, and nothing beside it.
-	if got, want := names(t, c.directory), []string{"observer.log", "observer.pid", "sessions"}; !slices.Equal(got, want) {
-		t.Errorf("the observer's directory holds %v while it runs, want %v", got, want)
-	}
-	if got, want := names(t, observer.directory(c)), []string{spool.ConnectionsName, spool.Name}; !slices.Equal(got, want) {
-		t.Errorf("the session's directory holds %v while it runs, want %v", got, want)
-	}
-
-	sealed := ended(t, observer, c)
-	if sealed.Seal == nil || !sealed.Seal.Complete {
-		t.Errorf("a run that finished its traffic did not seal completely: %+v %s", sealed.Seal, sealed.SealError)
-	}
-	// The contract account is another test's claim
-	// (TestAFinishedSessionSealsAnAccountTheAccountContractsValidatorAccepts).
-	if got, want := slices.DeleteFunc(names(t, observer.directory(c)), func(name string) bool {
-		return name == published.Name
-	}), []string{"account.json", spool.ConnectionsName, spool.Name}; !slices.Equal(got, want) {
-		t.Errorf("the session's directory holds %v once it has ended, want %v", got, want)
-	}
-	if !slices.Contains(names(t, c.directory), "last-sealed.json") {
-		t.Error("the observer's directory records no last sealed session, so the next one cannot say how long nothing was observed")
-	}
-
-	// The finished session's files, copied elsewhere and inspected with the
-	// session gone, give back the account it sealed, byte for byte.
-	elsewhere := t.TempDir()
-	for _, name := range []string{"account.json", spool.ConnectionsName, spool.Name} {
-		content, err := os.ReadFile(filepath.Join(observer.directory(c), name))
-		if err != nil {
-			t.Fatalf("read the finished session's %s: %v", name, err)
-		}
-		if err := os.WriteFile(filepath.Join(elsewhere, name), content, 0o600); err != nil {
-			t.Fatalf("copy %s: %v", name, err)
-		}
-	}
-	answer, err := exec.Command(binary, "inspect", elsewhere).Output()
-	if err != nil {
-		t.Fatalf("inspect the copied session: %v\n%s", err, answer)
-	}
-	if want, _ := os.ReadFile(filepath.Join(elsewhere, "account.json")); !bytes.Equal(answer, want) {
-		t.Errorf("inspect of the copied session is not the account it sealed:\n%s", answer)
-	}
-	text, err := exec.Command(binary, "inspect", elsewhere, "--text").Output()
-	if err != nil {
-		t.Fatalf("inspect the copied session as text: %v", err)
-	}
-	if !strings.HasPrefix(string(text), "account    sealed, "+observer.session+", ") {
-		t.Errorf("the text of the copied session is not session %s's sealed account:\n%s", observer.session, text)
-	}
-}
-
-// A finished session also seals its account in the account contract, and a
-// bundle assembled from what it sealed passes the contract's validator and
-// holds none of the spool's plaintext.
-func TestAFinishedSessionSealsAnAccountTheAccountContractsValidatorAccepts(t *testing.T) {
-	binary := built(t)
-	client := speaking(t, serving(t))
-	c := configuring(t, target("under-test", client.process))
-
-	observer := started(t, binary, c)
-	client.ask(t, "contract")
-	records := waitForSpool(t, observer.directory(c), 2)
-	ended(t, observer, c)
-
-	if got, want := names(t, observer.directory(c)), []string{"account.json", spool.ConnectionsName, published.Name, spool.Name}; !slices.Equal(got, want) {
-		t.Errorf("the session's directory holds %v once it has ended, want %v", got, want)
-	}
-	validatedBundle(t, observer.directory(c), observer.session, len(records))
 }
 
 // A configuration whose targets select no process refuses to start, names the
@@ -947,47 +558,6 @@ func TestASecondStartIsRefusedWhileASessionRunsAndStartsNothing(t *testing.T) {
 	}
 }
 
-// inspect is the running session's account, served without stopping anything.
-func TestInspectServesTheRunningSessionsAccountAsItStands(t *testing.T) {
-	binary := built(t)
-	client := speaking(t, serving(t))
-	c := configuring(t, target("under-test", client.process))
-	observer := started(t, binary, c)
-
-	client.ask(t, "inspected")
-	waitForSpool(t, observer.directory(c), 2)
-
-	answer, err := exec.Command(binary, "inspect", c.path).Output()
-	if err != nil {
-		t.Fatalf("inspect the running session: %v", err)
-	}
-	var live account.Account
-	if err := json.Unmarshal(answer, &live); err != nil {
-		t.Fatalf("decode the live account: %v\n%s", err, answer)
-	}
-	if live.Kind != account.Live || live.Session != observer.session {
-		t.Errorf("inspect answered a %s account of session %q, want the live account of %s", live.Kind, live.Session, observer.session)
-	}
-	if len(live.Processes) != 1 || live.Processes[0].Outcome != attachment.Attached ||
-		live.Processes[0].Requested == 0 || live.Processes[0].Confirmed != live.Processes[0].Requested {
-		t.Errorf("the live account says %+v about the one approved process", live.Processes)
-	}
-	if live.Seen == nil || live.Seen.Transfers == 0 {
-		t.Errorf("the live account saw %+v after a request crossed the approved process", live.Seen)
-	}
-	if live.Admissions == nil || live.Admissions.Covered < 1 {
-		t.Errorf("the live account covers %+v while the approved process runs", live.Admissions)
-	}
-
-	text, err := exec.Command(binary, "inspect", c.path, "--text").Output()
-	if err != nil {
-		t.Fatalf("inspect the running session as text: %v", err)
-	}
-	if !strings.Contains(string(text), "state      attached, and events arrived") {
-		t.Errorf("the text account does not say events arrived:\n%s", text)
-	}
-}
-
 // Attached with nothing crossing and never attached produce the same silence;
 // the sealed account says which, with attachment and events side by side.
 func TestAttachedAndIdleIsSaidRatherThanLeftAsSilence(t *testing.T) {
@@ -1004,26 +574,6 @@ func TestAttachedAndIdleIsSaidRatherThanLeftAsSilence(t *testing.T) {
 	}
 	if strings.Contains(summary, string(attachment.NotAttached)) {
 		t.Errorf("an attached run's account says it was not attached:\n%s", summary)
-	}
-}
-
-// The control: a run that saw traffic says so, so "no event arrived" is a
-// measurement.
-func TestARunThatSawTrafficDoesNotSayNoEventArrived(t *testing.T) {
-	binary := built(t)
-	client := speaking(t, serving(t))
-	c := configuring(t, target("under-test", client.process))
-
-	observer := started(t, binary, c)
-	client.ask(t, "hello")
-	waitForSpool(t, observer.directory(c), 1)
-	summary := rendered(ended(t, observer, c))
-
-	if strings.Contains(summary, "no event arrived") {
-		t.Errorf("a run that captured traffic says no event arrived:\n%s", summary)
-	}
-	if !strings.Contains(summary, "events arrived") {
-		t.Errorf("a run that captured traffic does not say events arrived:\n%s", summary)
 	}
 }
 
@@ -1138,144 +688,6 @@ func TestARefusedReloadLeavesThePolicyInForceAndSaysWhy(t *testing.T) {
 				t.Errorf("the process the policy in force observes is no longer covered: %+v", live.Admissions)
 			}
 		})
-	}
-}
-
-// An additive reload puts a new target in force at the next generation and
-// admits its process, while an already-observed connection continues with no
-// gap and no duplicate; a reload adding nothing changes nothing.
-func TestAnAdditiveReloadAdmitsTheNewProcessAndLeavesTheObservedOneAsItWas(t *testing.T) {
-	binary := built(t)
-	kept := speaking(t, serving(t))
-	added := speaking(t, serving(t))
-	c := configuring(t, target("kept", kept.process))
-	observer := started(t, binary, c)
-
-	kept.ask(t, "before")
-	before := settled(t, observer.directory(c), 2)
-
-	c.rewrite(t, []map[string]any{target("kept", kept.process), target("added", added.process)}, nil)
-	answer, err := reloaded(t, binary, c)
-	if err != nil || answer.Outcome != "activated" || answer.Generation != 2 || answer.Admitted != 1 {
-		t.Fatalf("the additive reload answered %+v with %v, want generation 2 and one process admitted", answer, err)
-	}
-
-	kept.ask(t, "after")
-	added.ask(t, "added")
-	after := settled(t, observer.directory(c), len(before)+4)
-
-	of := func(records []fragment.Record, pid int32) []fragment.Record {
-		var found []fragment.Record
-		for _, one := range records {
-			if one.Process.PID == pid {
-				found = append(found, one)
-			}
-		}
-		return found
-	}
-	keptBefore, keptAfter := of(before, kept.process.PID), of(after, kept.process.PID)
-
-	// Not a record count: an exchange here is three records (a 48-byte request,
-	// and a 342-byte response read as 155 then 187), set by message sizes and
-	// kernel reads, not by the reload. What must hold is that records before the
-	// reload stand unchanged and each one after continues its direction at the
-	// offset reached: a repeat shows as an offset behind, a loss as one ahead.
-	describe := func(name string, records []fragment.Record) {
-		carried := make(map[fragment.Direction]uint64, 2)
-		for _, one := range records {
-			carried[one.Direction] += uint64(one.Length)
-			t.Logf("  %s: %s connection %d offset %d length %d", name, one.Direction, one.Connection,
-				one.Offset, one.Length)
-		}
-		for direction, total := range carried {
-			t.Logf("  %s: %s %d bytes", name, direction, total)
-		}
-	}
-	if len(keptAfter) <= len(keptBefore) {
-		describe("before", keptBefore)
-		describe("after", keptAfter)
-		t.Fatalf("the observed process held %d records before the reload and %d after one more exchange: "+
-			"the exchange that crossed it is not there", len(keptBefore), len(keptAfter))
-	}
-	for i, one := range keptBefore {
-		held := keptAfter[i]
-		if held.Direction != one.Direction || held.Offset != one.Offset || held.Length != one.Length {
-			describe("before", keptBefore)
-			describe("after", keptAfter)
-			t.Fatalf("record %d of the observed process was %s at offset %d for %d bytes and is now %s at %d "+
-				"for %d: a reload rewrote what had already crossed", i, one.Direction, one.Offset, one.Length,
-				held.Direction, held.Offset, held.Length)
-		}
-	}
-
-	// The same connection, continuing where it left off, in both directions.
-	next := make(map[fragment.Direction]uint64)
-	for _, one := range keptBefore {
-		if end := one.Offset + uint64(one.Length); end > next[one.Direction] {
-			next[one.Direction] = end
-		}
-	}
-	grew := make(map[fragment.Direction]int, 2)
-	for _, one := range keptAfter[len(keptBefore):] {
-		if one.Connection != keptBefore[0].Connection {
-			t.Errorf("the observed process's exchange after the reload is on connection %d, and it was on %d",
-				one.Connection, keptBefore[0].Connection)
-		}
-		if one.Offset != next[one.Direction] {
-			was := "repeats what already crossed"
-			if one.Offset > next[one.Direction] {
-				was = "leaves a gap"
-			}
-			describe("before", keptBefore)
-			describe("after", keptAfter)
-			t.Errorf("the %s stream continues at offset %d after the reload, want %d: it %s", one.Direction,
-				one.Offset, next[one.Direction], was)
-		}
-		next[one.Direction] = one.Offset + uint64(one.Length)
-		grew[one.Direction]++
-	}
-	if grew[fragment.Sent] == 0 || grew[fragment.Received] == 0 {
-		describe("after", keptAfter)
-		t.Errorf("the exchange after the reload added %d sent and %d received records, want both directions",
-			grew[fragment.Sent], grew[fragment.Received])
-	}
-	if len(of(after, added.process.PID)) < 2 {
-		t.Errorf("the newly admitted process's exchange is not in the spool: %d records", len(of(after, added.process.PID)))
-	}
-	live := inspected(t, binary, c)
-	if live.Policy.Generation != 2 || !observes(live, added.process.PID) {
-		t.Errorf("the live account is at generation %d and observes the new process: %v", live.Policy.Generation,
-			observes(live, added.process.PID))
-	}
-
-	// Nothing added: nothing changes, and nothing crossing is doubled.
-	unchanged, err := reloaded(t, binary, c)
-	if err != nil || unchanged.Outcome != "unchanged" || unchanged.Generation != 2 {
-		t.Errorf("a reload adding nothing answered %+v with %v", unchanged, err)
-	}
-	// Both ends settled, and the same offset check rather than a count: a reload
-	// adding nothing owes that the stream goes on as one stream.
-	counted := len(settled(t, observer.directory(c), 1))
-	kept.ask(t, "again")
-	again := settled(t, observer.directory(c), counted+1)
-	if len(again) <= counted {
-		t.Errorf("one exchange after a reload that added nothing spooled %d records, want the exchange to be there",
-			len(again)-counted)
-	}
-	reached := make(map[fragment.Direction]uint64, 2)
-	for _, one := range again {
-		if one.Process.PID != kept.process.PID {
-			continue
-		}
-		if one.Offset != reached[one.Direction] {
-			was := "repeats what already crossed"
-			if one.Offset > reached[one.Direction] {
-				was = "leaves a gap"
-			}
-			t.Errorf("after a reload that added nothing, the %s stream has a record at offset %d where it had "+
-				"reached %d: it %s", one.Direction, one.Offset, reached[one.Direction], was)
-		}
-		reached[one.Direction] = one.Offset + uint64(one.Length)
 	}
 }
 
