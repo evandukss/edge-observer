@@ -247,18 +247,28 @@ func TestT20iBodyOperationsReadContentTypeFromTheMessageAsParsed(t *testing.T) {
 	multipart := t20iMultipart([2]string{"card_number", p("CT_MULTIPART")})
 	form := "card_number=" + p("CT_FORM") + "&note=" + k("CT_FORM")
 	keepHeader := t20iHeader{"X-T20i-Keep", k("CT_HEADER")}
+	// The unlabelled pipeline's remove-headers slot removes content-type from
+	// both messages, and that removal is evidence like any other.
+	unlabelled := func(pipeline string, entries ...t20iEntry) []t20iEntry {
+		if pipeline == "unlabelled" {
+			for _, message := range []string{"request", "response"} {
+				entries = append(entries, t20iEntry{message, config.HeaderFieldPrefix + "content-type", "headers", processing.DispositionRemoved})
+			}
+		}
+		return entries
+	}
 	cases := []t20iCase{
 		{name: "ct-multipart", pieces: []string{t20iRequest("POST", "/t20i/ct-multipart", []t20iHeader{{"Content-Type", "multipart/form-data; boundary=XB"}, keepHeader}, multipart)},
 			protected: []string{p("CT_MULTIPART")}, permitted: []string{k("CT_HEADER")},
-			check: func(t *testing.T, _ string, a processing.Artifact, x record.Exchange) {
+			check: func(t *testing.T, pipeline string, a processing.Artifact, x record.Exchange) {
 				t20iRemovedWhole(t, x.Request.Message, len(multipart), "content_length")
-				t20iEvidence(t, a, x, t20iUndecidableEntry("request"))
+				t20iEvidence(t, a, x, unlabelled(pipeline, t20iUndecidableEntry("request"))...)
 			}},
 		{name: "ct-form", pieces: []string{t20iRequest("POST", "/t20i/ct-form", append(slices.Clone(t20iForm), keepHeader), form)},
 			protected: []string{p("CT_FORM")}, permitted: []string{k("CT_FORM"), k("CT_HEADER")},
 			check: func(t *testing.T, pipeline string, a processing.Artifact, x record.Exchange) {
 				t20iKept(t, x.Request.Message, "note="+k("CT_FORM"))
-				t20iEvidence(t, a, x, t20iEntry{"request", config.FormFieldPrefix + "card_number", "", processing.DispositionRemoved})
+				t20iEvidence(t, a, x, unlabelled(pipeline, t20iEntry{"request", config.FormFieldPrefix + "card_number", "", processing.DispositionRemoved})...)
 			}},
 	}
 	relabel := t20iSlot("relabel", config.ReplaceHeaderValues, map[string]any{"headers": []string{"content-type"}, "value": "application/x-www-form-urlencoded"})
