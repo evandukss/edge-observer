@@ -171,10 +171,13 @@ What was asked for, what it resolved to, and what the session's coverage turned 
 | `limits[]` | what this scope's coverage does not reach, one sentence each |
 
 An `instance` is `{pid, pid_namespace, namespace_pid, birth, executable}`: the pid in the observer's own pid
-namespace, the process's pid namespace read at resolution, its number there, its start identity and its
+namespace, the process's pid namespace, its number there, its start identity and its
 executable. Never its arguments. A determined pid namespace says what established it: `resolution_proc_read`
-for one read from `/proc` when the policy was resolved, `admission_event` for a descendant whose admission the
-kernel reported. **Approval is checked before plaintext is copied**; the scope is where a reader learns which
+for one read from `/proc` when the policy was resolved, which includes the descendants it listed as already
+running; `attach_proc_read` for a descendant found running when probes were placed and read by the walk that
+admitted it; `admission_event` for a descendant the kernel admitted at a fork, whose namespace its events carry.
+Being inherited does not decide which. An admission whose operational account does not say leaves it unnamed.
+**Approval is checked before plaintext is copied**; the scope is where a reader learns which
 instances were eligible to be read, and nothing a later filter did narrows it.
 
 #### Per-instance coverage

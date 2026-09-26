@@ -145,6 +145,7 @@ func init() {
 		from, into := ".admissions."+list+"[]", "scope.coverage."+list+"[]"
 		represented[from+".target"] = into + ".target"
 		represented[from+".inherited"] = into + ".inherited"
+		represented[from+".namespace_by"] = into + ".instance.pid_namespace.established_by"
 		represented[from+".no_later_than"] = into + ".no_later_than.value"
 		represented[from+".read.from"] = into + ".read_from.value"
 		represented[from+".read.to"] = into + ".read_to.value"

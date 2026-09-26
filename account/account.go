@@ -22,6 +22,7 @@ import (
 	"github.com/evandukss/edge-observer/attachment"
 	"github.com/evandukss/edge-observer/capture"
 	"github.com/evandukss/edge-observer/connection"
+	"github.com/evandukss/edge-observer/contract/record"
 	"github.com/evandukss/edge-observer/ebpf"
 	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/process"
@@ -152,6 +153,10 @@ type Admission struct {
 	Instance  Instance `json:"instance"`
 	Target    string   `json:"target"`
 	Inherited bool     `json:"inherited"`
+
+	// NamespaceBy is what read the instance's pid namespace, in the record
+	// contract's words (namespaceBy).
+	NamespaceBy string `json:"namespace_by"`
 
 	// NoLaterThan is the reading that found the grant gone: the latest its
 	// coverage can have ended.
@@ -437,9 +442,10 @@ func admissionsOf(grants []probe.Grant) *Admissions {
 	at := make(map[string]int)
 	for _, grant := range grants {
 		one := Admission{
-			Instance:  instanceOfSelection(grant.Selection),
-			Target:    targetOf(grant.Selection.Provenance),
-			Inherited: grant.Selection.Provenance.Inherited(),
+			Instance:    instanceOfSelection(grant.Selection),
+			Target:      targetOf(grant.Selection.Provenance),
+			Inherited:   grant.Selection.Provenance.Inherited(),
+			NamespaceBy: namespaceBy(grant.Selection),
 		}
 		index, seen := at[one.Target]
 		if !seen {
@@ -471,6 +477,23 @@ func admissionsOf(grants []probe.Grant) *Admissions {
 		}
 	}
 	return admissions
+}
+
+// namespaceBy is what read an admission's pid namespace. The kernel admitted an
+// instance whose generation it allocated, at a fork, and the namespace is the
+// one its events carry; the walk of running descendants at attach read an
+// adopted one's from /proc; the policy's resolution read the rest's. Whether
+// the instance was inherited cannot decide it: all but the first are
+// descendants.
+func namespaceBy(selection admission.Selection) string {
+	switch {
+	case selection.Instance.Generation.FromKernel():
+		return record.ByAdmissionEvent
+	case selection.Adopted:
+		return record.ByAttachRead
+	default:
+		return record.ByResolutionRead
+	}
 }
 
 func instanceOfSelection(selection admission.Selection) Instance {

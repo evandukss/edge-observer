@@ -917,13 +917,15 @@ func encode(one admission.Selection, threads int32) (admissionValue, error) {
 
 // targetIdentity is what the allowlist's target field carries for a grant
 // written under one, and so what the fork hook copies to every descendant and
-// every event carries back. The configured number cannot be it: it is a
-// position, and a reload that puts a new target first is additive (it matches
-// kept targets by name, cmd/observer) and numbers the new one 1, so one number
-// would name two programs. A name is the identity instead, since a reload that
-// changes or removes a target is refused and a restart is a new session. A
-// name's first identity is its own number where no other name holds it, so a
-// session that is never reloaded writes the numbers it always did.
+// every event carries back; the table behind it reads the field back to a
+// name. A name is the identity, since a reload that changes or removes a target
+// is refused and a restart is a new session. A name's first identity is the
+// number it is offered where no other name holds it, and otherwise the next
+// above the highest, so one identity never names two targets whatever numbers
+// a caller offers. The observer command offers each target its number in the
+// session (cmd/observer, sessionNumbers), so there the two are equal; a
+// configuration's own numbers are positions, which a reload putting a new
+// target first would give to two.
 func (s *Session) targetIdentity(one admission.Provenance) uint32 {
 	s.held.Lock()
 	defer s.held.Unlock()
@@ -944,6 +946,19 @@ func (s *Session) targetIdentity(one admission.Provenance) uint32 {
 	s.targets[identity] = admission.Provenance{Target: one.Target, Number: one.Number}
 	s.identities[one.Target] = identity
 	return identity
+}
+
+// provenanceOf is the target a grant's target field names, read back through
+// the identities this session gave (targetIdentity). One it never gave keeps
+// only its number.
+func (s *Session) provenanceOf(identity, rule uint32) admission.Provenance {
+	s.held.Lock()
+	target, known := s.targets[identity]
+	s.held.Unlock()
+	if !known {
+		return admission.Provenance{Number: int(identity), Rule: int(rule)}
+	}
+	return admission.Provenance{Target: target.Target, Number: target.Number, Rule: int(rule)}
 }
 
 // enumerate passes the pid namespaces of everything being admitted to the
@@ -1130,6 +1145,7 @@ func (s *Session) adopt() error {
 				Mode:        one.Mode,
 				Propagation: admission.CanPropagate,
 				ObserverPID: below.PID,
+				Adopted:     true,
 			}
 			value, err := encode(inherited, below.Threads)
 			if err != nil {
@@ -1524,22 +1540,20 @@ func (s *Session) Admissions() ([]admission.Selection, error) {
 		if value.Kind == denied {
 			continue
 		}
+		provenance := s.provenanceOf(value.Target, value.Rule)
+		provenance.Parent = admission.Key{
+			Namespace:  admission.Namespace{Device: value.ParentNSDevice, Inode: value.ParentNSInode},
+			PID:        int32(value.ParentPID),
+			Generation: admission.Generation(value.ParentGeneration),
+		}
 		one := admission.Selection{
 			Instance: admission.Instance{
 				Namespace:  admission.Namespace{Device: key.NamespaceDevice, Inode: key.NamespaceInode},
 				PID:        int32(key.PID),
 				Generation: admission.Generation(value.Generation),
 			},
-			Kind: decodeKind(value.Kind),
-			Provenance: admission.Provenance{
-				Number: int(value.Target),
-				Rule:   int(value.Rule),
-				Parent: admission.Key{
-					Namespace:  admission.Namespace{Device: value.ParentNSDevice, Inode: value.ParentNSInode},
-					PID:        int32(value.ParentPID),
-					Generation: admission.Generation(value.ParentGeneration),
-				},
-			},
+			Kind:        decodeKind(value.Kind),
+			Provenance:  provenance,
 			Mode:        decodeMode(value.Mode),
 			Propagation: decodePropagation(value.Propagate),
 		}
@@ -1904,6 +1918,11 @@ func (s *Session) Reconcile() ([]Declined, error) {
 	)
 	entries := allowed.Iterate()
 	for entries.Next(&key, &value) {
+		// A denial's field holds its exclusion's number, not a target identity.
+		provenance := admission.Provenance{Number: int(value.Target), Rule: int(value.Rule)}
+		if value.Kind != denied {
+			provenance = s.provenanceOf(value.Target, value.Rule)
+		}
 		one := admission.Selection{
 			Instance: admission.Instance{
 				Namespace:  admission.Namespace{Device: key.NamespaceDevice, Inode: key.NamespaceInode},
@@ -1911,7 +1930,7 @@ func (s *Session) Reconcile() ([]Declined, error) {
 				Generation: admission.Generation(value.Generation),
 			},
 			Kind:       decodeKind(value.Kind),
-			Provenance: admission.Provenance{Number: int(value.Target), Rule: int(value.Rule)},
+			Provenance: provenance,
 			Mode:       decodeMode(value.Mode),
 		}
 

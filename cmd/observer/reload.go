@@ -77,6 +77,58 @@ func additive(current, candidate policy.Policy) ([]process.Rule, string) {
 	return added, ""
 }
 
+// sessionNumbers is the number each of a candidate's targets holds in this
+// session, keyed by its number in the candidate. A kept target keeps its own;
+// an added one takes its number in the candidate where no target of the
+// session holds it, and otherwise the next above the highest. A number is a
+// position in one configuration and additive matches kept targets by name, so
+// a target put ahead of a kept one would otherwise take the kept one's number
+// and one number would name two targets for the rest of the session.
+func sessionNumbers(held []account.Target, candidate []process.Resolved) map[int]int {
+	kept := make(map[string]int, len(held))
+	taken := make(map[int]bool, len(held))
+	highest := 0
+	for _, one := range held {
+		kept[one.Name] = one.Number
+		taken[one.Number] = true
+		highest = max(highest, one.Number)
+	}
+	numbers := make(map[int]int, len(candidate))
+	for _, one := range candidate {
+		if number, found := kept[one.Name]; found {
+			numbers[one.Number] = number
+		}
+	}
+	for _, one := range candidate {
+		if _, found := kept[one.Name]; found {
+			continue
+		}
+		number := one.Number
+		if taken[number] {
+			number = highest + 1
+		}
+		taken[number] = true
+		highest = max(highest, number)
+		numbers[one.Number] = number
+	}
+	return numbers
+}
+
+// renumber puts every target number a resolution carries into this session's
+// numbering (sessionNumbers).
+func renumber(resolution *process.Resolution, numbers map[int]int) {
+	for i := range resolution.Targets {
+		resolution.Targets[i].Number = numbers[resolution.Targets[i].Number]
+	}
+	for i := range resolution.Selections {
+		one := &resolution.Selections[i]
+		one.Provenance.Number = numbers[one.Provenance.Number]
+		for j := range one.AlsoNamedBy {
+			one.AlsoNamedBy[j].Number = numbers[one.AlsoNamedBy[j].Number]
+		}
+	}
+}
+
 // sameRule compares every condition a rule names and its mode, telling a
 // written argument list from an absent one.
 func sameRule(one, other process.Rule) bool {
@@ -206,6 +258,7 @@ func (d *daemon) reload(at time.Time, body []byte) reloadRecord {
 		record.Outcome = "unchanged"
 		return record
 	}
+	renumber(&request.Resolution, sessionNumbers(d.plan.Targets, request.Resolution.Targets))
 	admitting, can := d.attached.(probe.Admitting)
 	if !can {
 		return refuse("this attachment admits nothing after attaching, so a restart applies the candidate")

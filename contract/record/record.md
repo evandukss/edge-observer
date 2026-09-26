@@ -97,6 +97,7 @@ what one step of the value IS, and no unit bounds another:
 | `established_by` | Evidence | About |
 |---|---|---|
 | `admission_event` | the pid namespace on the kernel event that admitted the instance | the instance |
+| `attach_proc_read` | `/proc/<pid>/ns/pid` of a descendant already running when probes were placed, read by the walk that admitted it | the PROCESS, as it was at that read |
 | `process_proc_read` | `/proc/<pid>/ns/net` of the holding process, read while probes were placed | the PROCESS, never a socket |
 | `resolution_proc_read` | `/proc/<pid>/ns/pid` of a process, read when the observer resolved its policy | the PROCESS, as it was at that read |
 | `socket_evidence` | kernel socket evidence on the call | the SOCKET |

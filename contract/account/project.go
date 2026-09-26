@@ -463,14 +463,10 @@ func scopeParts(source observed.Account) (Scope, error) {
 			into *[]Admission
 		}{{admissions.CoverageEnded, &coverage.CoverageEnded}, {admissions.GrantUnknown, &coverage.GrantUnknown}} {
 			for _, one := range list.from {
-				// A descendant's admission names the pid namespace the kernel
-				// reported on the event that admitted it; a target's was read
-				// from /proc at resolution.
-				by := record.ByResolutionRead
-				if one.Inherited {
-					by = record.ByAdmissionEvent
-				}
-				instance, err := instanceEstablished(one.Instance, by)
+				// The operational account says what read each admission's pid
+				// namespace. An account that does not say leaves it unnamed
+				// rather than guessed from inheritance, which does not decide it.
+				instance, err := instanceEstablished(one.Instance, one.NamespaceBy)
 				if err != nil {
 					return Scope{}, err
 				}
