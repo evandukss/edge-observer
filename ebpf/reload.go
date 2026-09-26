@@ -86,6 +86,7 @@ func (s *Session) Admit(who []admission.Selection) ([]admission.Selection, []pro
 		if err != nil {
 			return nil, skipped, fmt.Errorf("%w: %v", ErrNotAuthorised, err)
 		}
+		value.Target = s.targetIdentity(ready[i].granted.Provenance)
 		ready[i].value = value
 	}
 
