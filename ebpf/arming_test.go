@@ -416,6 +416,13 @@ type armingCoordination struct {
 	errors   chan error
 }
 
+// coordinateArming opens its child window at adoption's reading of the process
+// table, which it recognises as an open of /proc made after a probe has been
+// placed (a perf_event_open seen). Adoption reads after placement by
+// construction; Attach reads /proc before placement too, to take its first
+// reading of the admitted threads, so the first /proc open is not adoption's.
+// A new read of /proc anywhere in Attach after placement and before adopt would
+// take this window from adoption, and the afterPlacement guard would not see it.
 func coordinateArming(listener int, fixture *armingProcess) armingCoordination {
 	coordination := armingCoordination{
 		children: make(chan armingChildren, 1),
@@ -439,7 +446,7 @@ func coordinateArming(listener int, fixture *armingProcess) armingCoordination {
 
 			var actionErr error
 			opensProcfs := false
-			if request.Data.Number == int32(unix.SYS_OPENAT) && !windowOpen {
+			if request.Data.Number == int32(unix.SYS_OPENAT) && !windowOpen && placed {
 				var path string
 				path, actionErr = notificationPath(listener, request)
 				opensProcfs = actionErr == nil && path == procfs

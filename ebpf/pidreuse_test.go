@@ -207,7 +207,9 @@ func exerciseIndependentPIDReuse(t *testing.T) {
 				placed = true
 			}
 			opensProcfs := false
-			if !opened && request.Data.Number == int32(unix.SYS_OPENAT) {
+			// Adoption's reading, as coordinateArming recognises it: a /proc open
+			// after a probe has been placed.
+			if !opened && placed && request.Data.Number == int32(unix.SYS_OPENAT) {
 				var path string
 				path, staged.err = notificationPath(listener, request)
 				opensProcfs = staged.err == nil && path == procfs
