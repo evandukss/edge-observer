@@ -66,7 +66,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def answer(self):
         self.consume()
         one = answers.get(self.path.split("?", 1)[0], {"type": "text/plain", "body": "", "headers": {}})
-        payload = base64.b64decode(one["body"])
+        payload = base64.b64decode(one["body"] or "")
         self.send_response(200)
         self.send_header("Content-Type", one["type"])
         for name, value in (one.get("headers") or {}).items():
