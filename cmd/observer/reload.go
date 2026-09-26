@@ -22,11 +22,11 @@ import (
 
 // additive decides whether a candidate policy only adds to the one in force,
 // naming the targets it adds, or says what it takes away. Reload adds; restart
-// takes away. Removing a target, changing an exclusion, where the observer
-// writes, which libraries may be probed, or a kept target's conditions or mode
-// is refused with the reason, and one forbidden change refuses the whole
-// candidate. A target needing a library nothing has attached is decided where
-// libraries are known (set.Admit).
+// takes away. Removing a target, changing or reordering the exclusions, where
+// the observer writes, which libraries may be probed, or a kept target's
+// conditions or mode is refused with the reason, and one forbidden change
+// refuses the whole candidate. A target needing a library nothing has attached
+// is decided where libraries are known (set.Admit).
 func additive(current, candidate policy.Policy) ([]process.Rule, string) {
 	if current.Processing == nil || candidate.Processing == nil {
 		return nil, "reload requires a compiled processing plan for both the active session and the candidate"
@@ -55,6 +55,12 @@ func additive(current, candidate policy.Policy) ([]process.Rule, string) {
 		if !slices.ContainsFunc(candidate.Approval.Exclusions, func(offered process.Rule) bool { return sameRule(exclusion, offered) }) {
 			return nil, fmt.Sprintf("the candidate removes an exclusion (exclusion %d), which a restart applies", i+1)
 		}
+	}
+	// The account names an exclusion by its number alone and cites the
+	// configuration in force, so the same exclusions in another order would give
+	// one number to two of them.
+	if !slices.EqualFunc(current.Approval.Exclusions, candidate.Approval.Exclusions, sameRule) {
+		return nil, "the candidate reorders the exclusions, which the account names by number, so a restart applies it"
 	}
 
 	for _, held := range current.Approval.Rules {
