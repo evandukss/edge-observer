@@ -106,9 +106,10 @@ and the evidence offsets (which can lie inside a withheld message). In the same 
 at the observed boundary is reported even when no later fragment arrived. Connection routes omit
 the reconstruction and its truncation, and the actual connection ending remains independent.
 
-`policy_exclusions` records actual `RemoveHeaders` removals in that pipeline's retained messages:
-the exchange index, request or response, headers or trailers, and lowercase field name, never its
-value. Each tuple appears once; array order has no meaning. Configured-but-absent names, replacement
+`policy_exclusions` records actual removals by policy in that pipeline's retained messages: the
+exchange index, request or response, the field removed and a disposition (`removed`,
+`values_removed`, or `removed_undecidable` for a body a field operation could not decide), never its
+value. Each entry appears once; array order has no meaning. Configured-but-absent names, replacement
 and truncation add no entry. Every new artifact carries an array, including `[]` for no removals and
 for metadata routes. An older artifact with the member absent (or null) has unavailable evidence,
 not known-empty evidence. Empty evidence says nothing about an unpublished or indeterminate suffix.

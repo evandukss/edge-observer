@@ -61,7 +61,8 @@ var RequiredBlocks = []string{
 	"provenance", "provenance.observer", "provenance.configuration", "provenance.pipelines",
 	"scope", "scope.requested", "scope.instances", "scope.overlap", "scope.placement", "scope.coverage",
 	"scope.filters",
-	"capture", "capture.capability", "capture.seen", "capture.loss", "capture.admitted", "capture.ordering",
+	"capture", "capture.capability", "capture.seen", "capture.loss", "capture.loss.under_way", "capture.admitted",
+	"capture.ordering",
 	"capture.refused", "capture.spool",
 	"reconstruction", "processing", "requirements", "seal", "seal.recorded",
 }
@@ -473,12 +474,33 @@ type Seen struct {
 	ConnectionsUnrecorded string `json:"connections_unrecorded,omitempty" account:"count"`
 }
 
-// Loss is what the kernel side discarded. Losses only.
+// Loss is what the kernel side discarded, and the calls under way when the
+// probes were placed, which it never saw. Losses only.
 type Loss struct {
 	Block
 	Dropped   string   `json:"dropped,omitempty" account:"count"`
 	Unmatched string   `json:"unmatched,omitempty" account:"count"`
 	Occasion  Occasion `json:"occasion"`
+	UnderWay  UnderWay `json:"under_way"`
+}
+
+// UnderWay is what the approved processes' threads said at attach about calls
+// that began before the probes were placed (the operational account's
+// declaration, probe.UnderWay). Unavailable where a thread could not be read.
+type UnderWay struct {
+	Block
+	Threads      string  `json:"threads,omitempty" account:"count"`
+	Undetermined string  `json:"undetermined,omitempty" account:"count"`
+	First        Blocked `json:"first"`
+}
+
+// Blocked names the first thread counted under way, each member undetermined
+// where none was.
+type Blocked struct {
+	PID  record.Text `json:"pid"`
+	TID  record.Text `json:"tid"`
+	FD   record.Text `json:"fd"`
+	Call record.Text `json:"call"`
 }
 
 // Occasion is when unmatched returns were seen (the host's monotonic clock),

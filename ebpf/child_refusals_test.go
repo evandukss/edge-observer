@@ -173,6 +173,10 @@ func exerciseIndependentExitBeforeAdmission(t *testing.T) {
 	default:
 		t.Fatal("adoption never opened the independently controlled child-creation window")
 	}
+	if !children.afterPlacement {
+		t.Fatal("wiring, not the property: the child-creation window opened before any probe was placed, so it was " +
+			"not adoption's reading and the child cannot have gone between that reading and its write")
+	}
 	select {
 	case <-coordinated.exited:
 	default:
@@ -224,6 +228,7 @@ func TestChildGoneBetweenAdoptionReadAndWriteIsNamed(t *testing.T) {
 	}
 	command := exec.Command(os.Args[0], "-test.run=^TestChildGoneBetweenAdoptionReadAndWriteIsNamed$", "-test.v", "-test.timeout=45s")
 	command.Env = append(os.Environ(), environment+"=1")
+	command.WaitDelay = helperOutputWait
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("exit-before-admission property failed in its syscall-isolated process: %v\n%s", err, output)

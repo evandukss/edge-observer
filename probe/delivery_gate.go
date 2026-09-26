@@ -10,6 +10,20 @@ import (
 // counter in that report, it is evidence of a path taken, not a capture loss.
 const DeliveryWithoutGate = "decoded events delivered without an admission gate"
 
+// GateRefusal is the counter in an attachment's Refusals report for decoded
+// events the gate refused under reason. A refusal is accounted as refused and
+// never as capture loss: the event still takes its place in the production
+// order, so no stream is retired for it.
+func GateRefusal(reason GateReason) string {
+	return "an event the delivery gate refused under " + string(reason)
+}
+
+// RefusalUnplaced is the counter for refused events whose place in the
+// production order the capture could not take. Each is then read as an
+// observation missing from the order, a loss, which is the defect GateRefusal
+// exists to prevent; nonzero means the hand-off to capture is not wired.
+const RefusalUnplaced = "a refused event the capture could not place in the production order"
+
 // DeliveryKind classifies a decoded event before any identity lookup. Its
 // values match the producer's transfer and close kinds; every other value is
 // unknown and fails closed after charging a slot.
@@ -39,6 +53,15 @@ type DeliveryGateOptions struct {
 	// so withdrawal is requested while no gate decisions are running. The gate
 	// creates no goroutine and never closes this caller-owned channel.
 	StorageExhausted <-chan struct{}
+
+	// IntakeExhausted is the volatile intake's sticky exhaustion signal
+	// (intake.Store.Exhausted), observed exactly as StorageExhausted is: under the
+	// ordering lock at every Admit, Authorize and Snapshot, with no goroutine
+	// forwarding it, and after StorageExhausted where both are closed. A record the
+	// intake refused leaves capture's input incomplete, so it invalidates with
+	// GateIntakeExhausted and nothing still pending is released, as at the input
+	// limit. Nil means no intake signal is connected.
+	IntakeExhausted <-chan struct{}
 
 	// BeforeAuthorize is an optional test seam called just before authorization
 	// acquires its ordering lock. It runs with no gate lock held. Holding this
@@ -115,11 +138,11 @@ func NewDeliveryGate(options DeliveryGateOptions) (*DeliveryGate, error) {
 // Admit reserves a slot before classifying the event. A transfer with
 // measured=false invalidates capture-wide, including early or zero-length
 // transfers. A close ignores measured: false is the ordinary close shape.
-// Unknown kinds are charged then invalidate. Observable storage exhaustion is
-// consumed before reserving a slot. Otherwise, at N+1 the input limit takes
-// precedence over the event's kind and measurement, and nothing is dispatched.
-// Once invalidated, no event is charged or admitted, and the first reason survives
-// later faults.
+// Unknown kinds are charged then invalidate. Observable storage or intake
+// exhaustion is consumed before reserving a slot. Otherwise, at N+1 the input
+// limit takes precedence over the event's kind and measurement, and nothing is
+// dispatched. Once invalidated, no event is charged or admitted, and the first
+// reason survives later faults.
 func (g *DeliveryGate) Admit(kind DeliveryKind, measured bool) AdmissionDecision {
 	if g == nil || g.withdrawal == nil {
 		return AdmissionDecision{State: GateSnapshot{Reason: GateUninitialized}}
@@ -185,13 +208,14 @@ func (g *DeliveryGate) Snapshot() GateSnapshot {
 	return g.snapshotLocked()
 }
 
-// ConsumeStorageExhaustion nonblockingly observes StorageExhausted and, if ready,
-// invalidates pending releases and signals Withdrawal under the authorization
-// ordering lock. It returns the resulting diagnostic state. An open or nil
-// signal changes nothing; repeated calls retain the first reason. Controllers
-// call this when their storage signal becomes ready, without holding a storage
-// or capture lock. Admit and Authorize also observe the signal themselves, so
-// their decisions do not depend on the controller being scheduled first.
+// ConsumeStorageExhaustion nonblockingly observes StorageExhausted, then
+// IntakeExhausted, and, if one is ready, invalidates pending releases with its
+// reason and signals Withdrawal under the authorization ordering lock. It
+// returns the resulting diagnostic state. An open or nil signal changes nothing;
+// repeated calls retain the first reason. Controllers call this when either
+// signal becomes ready, without holding a storage or capture lock. Admit and
+// Authorize also observe both signals themselves, so their decisions do not
+// depend on the controller being scheduled first.
 func (g *DeliveryGate) ConsumeStorageExhaustion() GateSnapshot {
 	return g.Snapshot()
 }
@@ -226,6 +250,12 @@ func (g *DeliveryGate) consumeStorageExhaustionLocked() {
 	select {
 	case <-g.options.StorageExhausted:
 		g.invalidateLocked(GateStorageExhausted)
+		return
+	default:
+	}
+	select {
+	case <-g.options.IntakeExhausted:
+		g.invalidateLocked(GateIntakeExhausted)
 	default:
 	}
 }

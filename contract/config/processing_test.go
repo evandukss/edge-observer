@@ -242,7 +242,7 @@ func TestProcessingTransformNeighbours(t *testing.T) {
 		reason                 config.Reason
 	}{
 		{"unsupported-transform", "message.headers.authorization", "hash", nil, config.UnsupportedTransform},
-		{"unsupported-field", "message.body", "remove", nil, config.UnsupportedTransform},
+		{"unsupported-field", "message.start_line", "remove", nil, config.UnsupportedTransform},
 		{"unknown-parameter", "message.headers.authorization", "remove", map[string]any{"unknown": 1}, config.InvalidTransformParameters},
 		{"unsupported-arguments", "message.headers.authorization", "remove", map[string]any{"arguments": map[string]any{"length": 1}}, config.InvalidTransformParameters},
 	} {

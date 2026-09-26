@@ -13,8 +13,29 @@ import (
 )
 
 const (
-	ArtifactName    = "approved.jsonl"
-	ArtifactVersion = "observer.approved/1"
+	ArtifactName = "approved.jsonl"
+	// ArtifactVersion is what the worker writes. The reader also reads
+	// ArtifactVersion1, under that version's rules; a reader of version 1
+	// alone refuses a version 2 artifact.
+	ArtifactVersion  = "observer.approved/2"
+	ArtifactVersion1 = "observer.approved/1"
+)
+
+// Dispositions of a version 2 policy exclusion entry.
+const (
+	// DispositionRemoved is the named field removed: a header, a query or
+	// form parameter, a JSON member or element, the query, or the whole body
+	// by remove-body or by reduce-body-to-structure where no structure was
+	// derived.
+	DispositionRemoved = "removed"
+	// DispositionValuesRemoved is a body's bytes removed with its derived
+	// structure (member names, nesting and value kinds) kept.
+	DispositionValuesRemoved = "values_removed"
+	// DispositionRemovedUndecidable is a whole body removed because a field
+	// operation could not decide what it held: not strictly valid JSON within
+	// the bounds for a JSON field operation, or not admitted as urlencoded for
+	// a form field operation.
+	DispositionRemovedUndecidable = "removed_undecidable"
 )
 
 var (
@@ -36,12 +57,15 @@ var (
 // reader must retain both facts; a complete exchange is not a complete stream.
 // Connection routes omit both reconstruction fields. Untruncated reconstructions
 // omit ReconstructionTruncation; that omission never asserts a transport close.
-// PolicyExclusions names actual RemoveHeaders removals in retained messages,
+// PolicyExclusions names actual removals by policy in retained messages,
 // independently for this pipeline. New artifacts always carry an array: empty
 // means no field was removed from the published population, including metadata
 // routes. It says nothing about an unpublished or indeterminate suffix. Older
 // artifacts without this member decode to nil: evidence unavailable, not none.
 // A null member likewise means unavailable. Readers must preserve this distinction.
+// A body removed whole keeps its Body.Length and framing, has an empty
+// Body.Kept and Structure.State "removed"; a body whose values were removed
+// keeps its derived structure and has an empty Body.Kept.
 // No raw observation, undecidable tail, or source copy accompanies this line.
 // A reader decodes this shape directly and must not re-run local policy.
 type Artifact struct {
@@ -54,17 +78,32 @@ type Artifact struct {
 	PolicyExclusions         []PolicyExclusion         `json:"policy_exclusions"`
 }
 
-// PolicyExclusion records that policy removed a named field, never its value.
-// Exchange is the Index of an exchange in this artifact's Reconstruction.
-// Message is request or response; Section is headers or trailers; Name is the
-// lowercase HTTP field name. Each tuple occurs once even if a field repeated
-// or several slots selected it. Array order has no meaning. Configured names
-// absent from the message, replacement and truncation add no exclusion entry.
+// PolicyExclusion records that policy removed a field, never its value.
+// Exchange is the Index of an exchange in this artifact's Reconstruction and
+// Message is request or response.
+//
+// In version 2, Field is the exclusion field form of what was removed
+// (message.headers.<name>, message.body, message.body.values,
+// message.target.query, message.query.<name>, message.form.<name> or
+// message.body.json<pointer>, with the pointer as configured) and Disposition
+// is one of the Disposition constants. Section is headers or trailers for a
+// header field and absent otherwise. Name is absent.
+//
+// In version 1, Section is headers or trailers, Name is the lowercase HTTP
+// field name, and Field and Disposition are absent.
+//
+// An entry exists only where the component was present: a body with bytes, a
+// target with a "?", a parameter, member or header the message carried. Each
+// entry occurs once even if a field repeated or several slots selected it.
+// Array order has no meaning. Configured names absent from the message,
+// replacement and truncation add no entry.
 type PolicyExclusion struct {
-	Exchange int    `json:"exchange"`
-	Message  string `json:"message"`
-	Section  string `json:"section"`
-	Name     string `json:"name"`
+	Exchange    int    `json:"exchange"`
+	Message     string `json:"message"`
+	Field       string `json:"field,omitempty"`
+	Section     string `json:"section,omitempty"`
+	Name        string `json:"name,omitempty"`
+	Disposition string `json:"disposition,omitempty"`
 }
 
 // ReconstructionTruncation describes the boundary of the approved exchanges,

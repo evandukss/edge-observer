@@ -113,8 +113,12 @@ to this contract second. All five are required.
 ### Pipelines
 
     {"name": "exchanges", "input": "reconstruction",
-     "slots": [{"name": "redact", "implementation": "http-redactor", "on_failure": "drop_and_account"}],
-     "sinks": ["account"], "queues": [{"name": "exchanges-out"}]}
+     "slots": [{"name": "credentials", "implementation": "remove-headers",
+                "configuration": {"headers": ["authorization", "cookie"]}, "on_failure": "drop_and_account"},
+               {"name": "card", "implementation": "remove-json-fields",
+                "configuration": {"messages": ["request"], "pointers": ["/card/number"]},
+                "on_failure": "drop_and_account"}],
+     "sinks": ["account"], "queues": []}
 
 **Composition is an explicit pipeline.** Records of `input` enter, pass through the slots in order and
 are dispatched through every sink. A slot holds exactly one implementation. **A replacement is a
@@ -169,28 +173,147 @@ narrowed traffic rules and other policy operations are refused. Configuration-on
 pipelines or select built-ins without executable components. The general illustrative inventory
 in `examples/runtime.json` is not this runtime inventory.
 
-The supported processors take reconstruction records. Each acts on every matching field in both
-headers and trailers, in both messages of an exchange, including repeated and differently cased
-names. They act on the value left by preceding slots and never add an absent field:
+The supported processors take reconstruction records and act on the value left by preceding slots,
+in `Slots` order, including after replacement. `Arguments` carries the typed values; the executor
+does not decode argument JSON or resolve packs. HTTP payload parsing belongs in the processing
+worker, outside intake and capture locks, before these operations run.
 
-| implementation | required `configuration` members | action |
+Arguments must be an object with exactly the members the implementation's row names. Null, missing,
+duplicate, case-misspelled and unknown members are refused (`invalid_builtin_arguments`). The numeric
+limits are defined once by the constants in [processing.go](processing.go).
+
+#### Header operations
+
+Each acts on every matching field in both headers and trailers, in both messages of an exchange,
+including repeated and differently cased names, and never adds an absent field:
+
+| implementation | members | action |
 |---|---|---|
 | `remove-headers` | `headers` | remove the named fields and their values |
 | `replace-header-values` | `headers`, `value` | replace each selected value with the configured string |
 | `truncate-header-values` | `headers`, `length` | keep at most `length` bytes of each selected value |
 
-Arguments must be an object with exactly those members. Null, missing, duplicate, case-misspelled
-and unknown members are refused. `headers` is a nonempty list of distinct HTTP token names,
+`headers` is a nonempty list of at most `MaxHeaderNames` distinct HTTP token names,
 case-insensitively unique and resolved to lowercase. Names are exact; no patterns or paths are
-interpreted. `value` is a bounded string of printable ASCII bytes (empty is allowed). `length` is
-an integer between zero and `MaxHeaderValueBytes`, inclusive. No other transform form is supported.
-The numeric limits are defined once by the constants in [processing.go](processing.go).
+interpreted. `value` is a string of at most `MaxHeaderValueBytes` printable ASCII bytes (empty is
+allowed). `length` is an integer between zero and `MaxHeaderValueBytes`, inclusive.
 
 For example, replacing `x-public` with `abcdef` and then truncating it to three bytes produces
-`abc`; reversing the steps produces `abcdef`. This order is the `Slots` order, including after
-replacement. `HeaderArguments` carries the typed values; the executor does not decode argument
-JSON or resolve packs. HTTP payload parsing belongs in the processing worker, outside intake and
-capture locks, before these operations run.
+`abc`; reversing the steps produces `abcdef`.
+
+#### Body and query operations
+
+**The guarantee is a pair.** The component operations - `remove-body`, `reduce-body-to-structure`
+and `remove-query` - never parse inside what they remove, cannot fail to decide, and hold whatever
+the application. The field operations parse, and they are claimed sound only for the parser the
+differential test below ran against: PHP, at the version recorded in its capture. For any other
+parser they remove MORE - case folding and positive admission see to that - which is not the same
+as sound. Where a field operation cannot decide, it removes the whole body, never less.
+
+| implementation | members | action |
+|---|---|---|
+| `remove-body` | `messages` | drop the body bytes of each selected message; its length and framing are kept and its structure becomes `removed` |
+| `reduce-body-to-structure` | `messages` | drop the body bytes and keep the JSON structure already derived (member names, nesting, value kinds). Where none was derived the body is removed whole, as by `remove-body` |
+| `remove-query` | none: `{}` | drop the request target from its first `?`; the path is kept |
+| `remove-json-fields` | `messages`, `pointers` | remove every member or element a pointer matches |
+| `replace-json-values` | `messages`, `pointers`, `value` | replace the value of every member or element a pointer matches with `value`, written as a JSON string |
+| `remove-form-fields` | `names` | remove the named parameters from an admitted urlencoded request body |
+| `remove-query-parameters` | `names` | remove the named parameters from the request target's query |
+
+`reduce-body-to-structure` discloses value kinds, which are derived from the values: whether a
+string is written as a decimal numeral, and whether it is short or long. **Member names are body
+content and this operation keeps them**: an object keyed by a card number or an email address keeps
+the key.
+
+Argument rules:
+
+- `messages` is a nonempty list of distinct values, each `request` or `response`, resolved to
+  request-then-response order.
+- `pointers` is a nonempty list of at most `MaxFieldSelectors` pointers, distinct as written. A
+  pointer is an RFC 6901 JSON pointer of at most `MaxPointerBytes` bytes of valid UTF-8 and at most
+  `MaxPointerTokens` reference tokens. It begins with `/`; the empty pointer, which names the whole
+  document, is refused, since `remove-body` removes a whole body. In a token `~` is followed by `0`
+  or `1`, read as `~` and `/`; any other `~` is refused.
+- `names` is a nonempty list of at most `MaxFieldSelectors` names, distinct exactly. A name is 1 to
+  `MaxParameterNameBytes` bytes, each printable ASCII (`!` to `~`) other than `&`, `;`, `=`, `%`,
+  `+`, `[`, `]` and `.`. Those are refused because the matching below never compares a name holding
+  them against anything that can be configured; `card_number` already matches `card.number`,
+  `card number` and `card[number`.
+- `value` is a string of at most `MaxJSONValueBytes` printable ASCII bytes (space to `~`); empty is
+  allowed. It is escaped as a JSON string where it is written.
+
+**A JSON pointer matches more than RFC 6901 says.** A token applied to an object matches every member
+whose name, with escapes decoded, equals the token exactly OR under Unicode simple case folding, and
+every such member is acted on, duplicates included. A token applied to an array matches the element
+at that index (`0`, or digits not starting with `0`). The token `*` matches every element of an
+array and every member of an object, since PHP iterates both alike. A pointer matching nothing
+changes nothing. Where one match lies inside another, the outer one is acted on.
+
+**A JSON body is acted on only when it is strictly valid**: one JSON value per RFC 8259 with only
+JSON whitespace around it, valid UTF-8 throughout, no byte order mark, no escape naming an unpaired
+UTF-16 surrogate, nesting at most `MaxJSONFieldDepth` deep and at most `MaxJSONFieldNodes` values.
+Every other non-empty body in a selected message - form, multipart, XML, text, a mislabelled body -
+is removed whole as undecidable. The `Content-Type` label is not consulted: a JSON body labelled
+otherwise is still read, and a body labelled JSON that is not JSON is removed.
+
+**The rest of the bytes are spliced, never re-serialised.** A removed member or element goes with
+exactly one adjacent comma: the one after it, or the one before it where it was last. Whitespace,
+key order, escapes and number spelling everywhere else are kept byte for byte. A replaced value is
+the only span that changes. The structure is derived again from the retained bytes.
+
+**A urlencoded body is admitted positively.** `remove-form-fields` acts on request bodies only. A
+request body is admitted only when the request AS PARSED carries exactly one `Content-Type` field,
+counting headers and trailers, whose media type - the value before any `;`, without surrounding
+spaces and tabs - is `application/x-www-form-urlencoded`, compared case-insensitively. Every other
+non-empty request body is removed whole as undecidable, multipart included. Response bodies are not
+touched.
+
+**Body operations read header facts from the message as parsed, never as processed.** A header
+operation earlier in the route - replacing, truncating or removing `content-type` - does not change
+what a body operation admits.
+
+**Parameter names are matched as PHP files them, and wider.** A query, or an admitted body, is read
+under two separator readings: `&` alone, which is PHP's default, and `&` together with `;`. In each
+reading a parameter's name is its text before the first `=`, or all of it, and **what is removed is
+the UNION of the byte ranges the two readings select**. So `card_number=AAA;BBB` loses all of
+`AAA;BBB`, which PHP files under `card_number`, and `x=1;card_number=4111` loses `card_number=4111`.
+The name is decoded as PHP decodes it: `+` is a space, `%` followed by two hexadecimal digits is that
+byte, and any other `%` stays itself. The NORMALISED name is the decoded name cut at its first NUL
+byte, with leading spaces removed and every space, `.` and `+` changed to `_`. A parameter is
+selected when ANY of these readings of its name equals a configured name:
+
+1. the decoded name;
+2. the normalised name cut at its first `[`;
+3. where the first `[` of the normalised name has no `]` after it, the normalised name with that
+   `[` changed to `_`;
+4. in that case, the normalised name with every `[` changed to `_`.
+
+Each run of removed bytes goes with exactly one adjacent separator. Where the separators on its two
+sides differ, the `;` goes and the `&` stays, so every boundary PHP reads is kept; otherwise the one
+after it goes, or the one before it where the run is last. Empty parameters and every other byte are
+kept. **The readings are held by a differential test**: PHP's own `parse_str`, run in the laboratory
+participant's image over a generated corpus of names and values - every byte in every position of a
+short name, brackets matched and unmatched, whitespace, `+` and `%20`, NUL, and `;` inside values -
+with the test asserting that every byte PHP files under a name a rule can configure is removed by a
+rule naming it. The capture is `processing/testdata/php-parse-str.json` and names the PHP version.
+
+**One body grammar per pipeline.** A pipeline whose effective slots hold `remove-form-fields`
+together with `remove-json-fields` or `replace-json-values` is refused (`body_grammar_conflict`),
+because each removes the other's bodies whole. Two pipelines is how an operator gets both.
+
+**Not covered**, and no operation here reaches it:
+
+- a value encapsulated inside another value: JSON in a JSON string, a form field such as `payload=`
+  holding JSON, base64, a JWT. The application decodes it and no rule looks inside;
+- a secret in the request PATH, such as `/reset/<token>`;
+- a URL inside a header value, such as `location` or `referer`; `remove-headers` removes the header;
+- a framework that merges grammars, such as Laravel's `input()` or Rails' `params`, reading the
+  query, the form body and top-level JSON members under one name: such an application needs one
+  exclusion per grammar;
+- PHP versions other than the one the differential test ran against;
+- any other parser, for which the field operations remove more but are not claimed sound.
+
+#### Mandatory exclusions
 
 A mandatory exclusion uses a policy requirement of this form:
 
@@ -201,37 +324,73 @@ A mandatory exclusion uses a policy requirement of this form:
  "failure_action":"drop_and_account"}
 ```
 
-The field form is `message.headers.<exact HTTP name>` in lowercase; it includes trailer occurrences.
-The sink must be a configured, routed sink. `stop_pipeline` is the other permitted failure action.
-`arguments` may be absent or an empty object; there are no arguments to `remove`. Other parameters,
-transformations, fields and target kinds are refused. Claims and approvals are unsupported.
-Requirement IDs and policy documents also pass the general policy vocabulary checks.
+The transformation is `remove`, and `arguments` may be absent or an empty object; there are no
+arguments to `remove`. The field is named by GRAMMAR, so its name promises nothing about a
+framework. It is one of:
+
+| field | what is removed | satisfied on a route by |
+|---|---|---|
+| `message.headers.<name>` | the header, trailers included; `<name>` is a lowercase HTTP token | `remove-headers` naming it |
+| `message.body` | every byte and the structure of both messages' bodies | `remove-body`, both messages covered |
+| `message.body.values` | every body value; names, nesting and value kinds may stay | per message, `remove-body` or `reduce-body-to-structure`, both messages covered |
+| `message.target.query` | the request target from its first `?` | `remove-query` |
+| `message.query.<name>` | the query parameter; `<name>` follows the name rule above | `remove-query-parameters` naming it, or `remove-query` |
+| `message.form.<name>` | the urlencoded request body parameter; `<name>` as above | `remove-form-fields` naming it, or `remove-body` selecting the request |
+| `message.body.json<pointer>` | the JSON member or element; `<pointer>` follows the pointer rule above | per message, `remove-json-fields` selecting it with a pointer whose tokens are exactly the first tokens of `<pointer>`, or `remove-body` or `reduce-body-to-structure` selecting it; both messages covered |
+
+A route covers a message when some slot selecting that message satisfies the field, so slots may
+share the work: `remove-json-fields` on the request and `remove-body` on the response together
+satisfy `message.body.json/card`. **`reduce-body-to-structure` does not satisfy `message.body`,
+because member names are body plaintext, and for the same reason it satisfies no
+`message.form.<name>`**: a JSON member name can carry a form value PHP files, as in
+`{"&card_number=4111":1}`, and the structure keeps names. Replacing or truncating a value satisfies
+no removal, and `replace-json-values` satisfies none. Other parameters, transformations, fields and
+target kinds are refused (`unsupported_transform`, `invalid_transform_parameters`). The sink must be
+a configured, routed sink. `drop_and_account` and `stop_pipeline` are the permitted failure actions.
+Claims and approvals are unsupported. Requirement IDs and policy documents also pass the general policy
+vocabulary checks.
 
 An exclusion is a session-wide obligation, even when its declaration names one sink. Every effective
-reconstruction-to-sink route must contain `remove-headers` selecting that field. Replacing or
-truncating a value does not satisfy removal. A pack-added route to a different sink is checked too.
-Every slot removing the excluded field must have `on_failure` equal to the requirement's
-`failure_action`. A matching slot later in the route does not excuse an earlier mismatch.
-The resolved `HeaderExclusion` carries that action, and the executor uses the validated slot action;
-it does not choose a precedence between conflicting actions. Conflicting requirements on the same
-header therefore cannot activate a route that removes it.
+reconstruction-to-sink route must satisfy it, a pack-added route to a different sink included; a
+route that does not is refused (`exclusion_not_enforced`, naming the route, the requirement and, for
+a body field, the message left uncovered). Every slot the route counts towards the removal must have
+`on_failure` equal to the requirement's `failure_action` (`exclusion_failure_action_mismatch`); a
+matching slot later in the route does not excuse an earlier mismatch. No body or query operation
+returns a record error, so for them the match is kept for uniformity with headers and changes
+nothing at run time. The resolved `Exclusion` carries the field and that action, and the executor
+uses the validated slot action; it does not choose a precedence between conflicting actions.
+Conflicting requirements on the same field therefore cannot activate a route that removes it.
 Connection routes carry metadata only and cannot contain these fields. No sink callback, temporary
 file, diagnostic or raw spool may create another durable plaintext path; enumerating configured
 routes cannot itself establish that the runtime respects this boundary.
 
+**What the approved output says.** Every removal is recorded in the artifact, `observer.approved/2`,
+as an entry naming the exchange, the message, the field and a disposition - `removed`,
+`values_removed`, or `removed_undecidable` for a whole body a field operation could not decide - and
+only where the component was present, which is what separates excluded from never present.
+Replacement and truncation add no entry. The observer's approved inspection document states the
+shape, outside this contract bundle.
+
+#### Bounds and refusals
+
 The compiler bounds the aggregate bytes of configuration and all supplied manifests before JSON
 decoding, the number of supplied/enabled packs, effective pipelines, slots per pipeline, names per
-header operation and argument sizes. Fan-out is the sum of sink edges over *all* pipelines for one
-input type, not just the number of sinks on one pipeline. The `MaxProcessing*` and `MaxHeader*`
+header operation, pointers and names per field operation, the bytes and tokens of a pointer, the
+bytes of a parameter name and argument sizes. Fan-out is the sum of sink edges over *all* pipelines
+for one input type, not just the number of sinks on one pipeline. The `MaxProcessing*`,
+`MaxHeader*`, `MaxFieldSelectors`, `MaxPointer*`, `MaxParameterNameBytes` and `MaxJSONValueBytes`
 constants define the inclusive maxima. These are static work limits, not a traffic or heap budget.
+`MaxJSONFieldDepth` and `MaxJSONFieldNodes` bound what a JSON field operation reads at run time; a
+body past either is removed whole as undecidable.
 
 Refusals carry document, subject, rule and detail. `configuration_too_large` and `fanout_too_large`
 name the static bounds; `unsupported_component`, `unsupported_role` and `unsupported_form` name
 unimplemented runtime forms; `invalid_builtin_arguments`, `unsupported_transform` and
-`invalid_transform_parameters` identify the argument/form checks; `exclusion_not_enforced` names
-the uncovered route and requirement. Existing structural and composition reasons retain their
-meaning. Independent findings at a reached stage are retained together. A refused earlier stage
-does not claim to have checked later stages that need its successful result.
+`invalid_transform_parameters` identify the argument/form checks; `body_grammar_conflict` names a
+pipeline holding two body grammars; `exclusion_not_enforced` names the uncovered route and
+requirement. Existing structural and composition reasons retain their meaning. Independent findings
+at a reached stage are retained together. A refused earlier stage does not claim to have checked
+later stages that need its successful result.
 
 ### Where the observer reads a pack
 

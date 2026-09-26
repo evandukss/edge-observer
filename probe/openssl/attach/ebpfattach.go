@@ -516,8 +516,15 @@ type ebpfAttachment struct {
 	gate       *probe.DeliveryGate
 	ungated    atomic.Int64
 
+	// unplaced is refused events whose place in the order the sink could not
+	// take (refused).
+	unplaced atomic.Int64
+
 	mutex sync.Mutex
 	known map[int32]identity
+
+	// gateRefused is events the gate refused, by its reason; under mutex.
+	gateRefused map[probe.GateReason]int64
 
 	closed sync.Once
 	done   chan struct{}
@@ -535,6 +542,7 @@ func (a *ebpfAttachment) deliverEvent(event ebpf.Event) {
 	// close on an unseen PID must neither read procfs nor grow the identity cache.
 	if a.gate != nil {
 		if decision := a.gate.Admit(probe.DeliveryKind(event.Kind), event.Measured); !decision.Admitted {
+			a.refused(event, decision.State.Reason)
 			return
 		}
 	} else {
@@ -572,6 +580,25 @@ func (a *ebpfAttachment) deliverEvent(event ebpf.Event) {
 			At:         event.At,
 		})
 	}
+}
+
+// refused accounts for an event the gate refused: counted under its reason, and
+// its place in the production order handed to capture, so the refusal is not
+// read as a loss. The hand-off fails open: a sink without it installs nothing
+// and the refusal is again counted as lost, so every refusal it could not
+// place is counted under probe.RefusalUnplaced, which is what catches that.
+func (a *ebpfAttachment) refused(event ebpf.Event, reason probe.GateReason) {
+	a.mutex.Lock()
+	if a.gateRefused == nil {
+		a.gateRefused = make(map[probe.GateReason]int64)
+	}
+	a.gateRefused[reason]++
+	a.mutex.Unlock()
+	if placing, can := a.sink.(interface{ Refused(uint64, time.Time) }); can {
+		placing.Refused(event.Stamp, event.At)
+		return
+	}
+	a.unplaced.Add(1)
 }
 
 // identity is who an event came from: the process a fragment is attributed to,
@@ -753,7 +780,7 @@ func (a *ebpfAttachment) Losses() (probe.Losses, error) {
 		return probe.Losses{}, err
 	}
 	return probe.Losses{
-		Dropped: dropped, Unmatched: unmatched, Descendants: descendants, When: when,
+		Dropped: dropped, Unmatched: unmatched, UnderWay: a.session.UnderWay(), Descendants: descendants, When: when,
 	}, nil
 }
 
@@ -774,5 +801,13 @@ func (a *ebpfAttachment) refusals(read func() (ebpf.Refusals, error)) (map[strin
 		counted[string(reason)] = value
 	}
 	counted[probe.DeliveryWithoutGate] = a.ungated.Load()
+	a.mutex.Lock()
+	for _, reason := range probe.GateReasons() {
+		if reason.InvalidatesCapture() {
+			counted[probe.GateRefusal(reason)] = a.gateRefused[reason]
+		}
+	}
+	a.mutex.Unlock()
+	counted[probe.RefusalUnplaced] = a.unplaced.Load()
 	return counted, nil
 }

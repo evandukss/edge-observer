@@ -22,6 +22,7 @@ import (
 	"github.com/evandukss/edge-observer/attachment"
 	"github.com/evandukss/edge-observer/capture"
 	"github.com/evandukss/edge-observer/connection"
+	"github.com/evandukss/edge-observer/contract/record"
 	"github.com/evandukss/edge-observer/ebpf"
 	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/process"
@@ -123,12 +124,14 @@ type Exclusion struct {
 	Denied []Instance `json:"denied"`
 }
 
-// Loss is what capture discarded on the kernel side, or why that is unknown.
+// Loss is what capture discarded on the kernel side, or why that is unknown,
+// and what the threads said about calls under way when the probes were placed.
 type Loss struct {
 	Known     bool           `json:"known"`
 	Why       string         `json:"why,omitempty"`
 	Dropped   int64          `json:"dropped"`
 	Unmatched int64          `json:"unmatched"`
+	UnderWay  probe.UnderWay `json:"under_way"`
 	When      probe.Occasion `json:"when"`
 }
 
@@ -152,6 +155,10 @@ type Admission struct {
 	Instance  Instance `json:"instance"`
 	Target    string   `json:"target"`
 	Inherited bool     `json:"inherited"`
+
+	// NamespaceBy is what read the instance's pid namespace, in the record
+	// contract's words (namespaceBy).
+	NamespaceBy string `json:"namespace_by"`
 
 	// NoLaterThan is the reading that found the grant gone: the latest its
 	// coverage can have ended.
@@ -328,7 +335,8 @@ func (a *Account) Ran(at time.Time, run Run) {
 		a.Loss = &Loss{Why: run.LossesErr.Error()}
 		a.Admitted = &Admitted{Why: run.LossesErr.Error()}
 	} else {
-		a.Loss = &Loss{Known: true, Dropped: run.Losses.Dropped, Unmatched: run.Losses.Unmatched, When: run.Losses.When}
+		a.Loss = &Loss{Known: true, Dropped: run.Losses.Dropped, Unmatched: run.Losses.Unmatched,
+			UnderWay: run.Losses.UnderWay, When: run.Losses.When}
 		a.Admitted = &Admitted{Known: true, Descendants: run.Losses.Descendants}
 	}
 
@@ -437,9 +445,10 @@ func admissionsOf(grants []probe.Grant) *Admissions {
 	at := make(map[string]int)
 	for _, grant := range grants {
 		one := Admission{
-			Instance:  instanceOfSelection(grant.Selection),
-			Target:    targetOf(grant.Selection.Provenance),
-			Inherited: grant.Selection.Provenance.Inherited(),
+			Instance:    instanceOfSelection(grant.Selection),
+			Target:      targetOf(grant.Selection.Provenance),
+			Inherited:   grant.Selection.Provenance.Inherited(),
+			NamespaceBy: namespaceBy(grant.Selection),
 		}
 		index, seen := at[one.Target]
 		if !seen {
@@ -471,6 +480,23 @@ func admissionsOf(grants []probe.Grant) *Admissions {
 		}
 	}
 	return admissions
+}
+
+// namespaceBy is what read an admission's pid namespace. The kernel admitted an
+// instance whose generation it allocated, at a fork, and the namespace is the
+// one its events carry; the walk of running descendants at attach read an
+// adopted one's from /proc; the policy's resolution read the rest's. Whether
+// the instance was inherited cannot decide it: all but the first are
+// descendants.
+func namespaceBy(selection admission.Selection) string {
+	switch {
+	case selection.Instance.Generation.FromKernel():
+		return record.ByAdmissionEvent
+	case selection.Adopted:
+		return record.ByAttachRead
+	default:
+		return record.ByResolutionRead
+	}
 }
 
 func instanceOfSelection(selection admission.Selection) Instance {
@@ -615,6 +641,7 @@ func Render(to io.Writer, a Account, local bool) {
 	default:
 		say("lost       %d events the kernel could not buffer, %d returns with no entry recorded%s",
 			a.Loss.Dropped, a.Loss.Unmatched, occasion(a.Loss.When))
+		say("under way  %s", underWay(a.Loss.UnderWay))
 	}
 	// Not a loss: whether descendant admission did anything.
 	switch {
@@ -658,8 +685,8 @@ func Render(to io.Writer, a Account, local bool) {
 	case a.Seal == nil:
 	case a.Seal.Complete:
 		say("sealed     %d admissions withdrawn, %s drained, %s outstanding, %s interrupted in flight, "+
-			"%s calls still executing", a.Seal.Withdrawal.Instances, a.Seal.Drain.Delivered,
-			a.Seal.Drain.Outstanding, a.Seal.Interrupted, a.Seal.Counters.StillExecuting)
+			"%s calls still executing%s", a.Seal.Withdrawal.Instances, a.Seal.Drain.Delivered,
+			a.Seal.Drain.Outstanding, a.Seal.Interrupted, a.Seal.Counters.StillExecuting, besideSeal(a.Lost()))
 	default:
 		for _, why := range a.Seal.Because {
 			say("sealed     INCOMPLETE: %s", why)
@@ -699,6 +726,88 @@ func Render(to io.Writer, a Account, local bool) {
 			say("pipelines  stopped: %s", strings.Join(p.StoppedPipelines, ", "))
 		}
 	}
+}
+
+// underWay is the line for calls under way when the probes were placed: the
+// threads blocked in socket I/O throughout, the first of them, and those that
+// ran meanwhile, which are NOT KNOWN rather than none.
+func underWay(u probe.UnderWay) string {
+	line := fmt.Sprintf("%d threads were inside socket I/O throughout probe placement", u.Threads)
+	if u.First != nil {
+		line += fmt.Sprintf(", the first pid %d thread %d in %s on descriptor %d, so a TLS call any of them "+
+			"was inside began before the probes and what it moved is absent", u.First.PID, u.First.TID,
+			u.First.Call, u.First.FD)
+	}
+	if u.Undetermined != 0 {
+		line += fmt.Sprintf("; %d threads ran while the probes were placed, so whether each lost a call is NOT KNOWN",
+			u.Undetermined)
+	}
+	if !u.Known {
+		line += "; NOT KNOWN for the rest: " + underWayWhy(u)
+	}
+	return line
+}
+
+// underWayWhy is why a reading is not known. An account written before the
+// reading existed carries none, and says so rather than nothing.
+func underWayWhy(u probe.UnderWay) string {
+	if u.Why == "" {
+		return "this account does not carry a reading of the threads"
+	}
+	return u.Why
+}
+
+// Lost is every loss the account carries that is not nothing - a count above
+// zero or a reading not known - as one clause, or empty where there is none: the
+// kernel's losses, the calls under way when the probes were placed, and the
+// records the volatile intake refused. A seal that completed says its steps
+// succeeded and nothing about what capture lost, so wherever a session is said
+// to have sealed this is printed on the same line (Render, and the stop
+// command). An event the delivery gate refused is not a loss and is not here.
+func (a Account) Lost() string {
+	var lost []string
+	switch {
+	case a.Loss == nil:
+	case !a.Loss.Known:
+		lost = append(lost, "what capture lost is NOT KNOWN: "+a.Loss.Why)
+	default:
+		if a.Loss.Dropped != 0 {
+			lost = append(lost, fmt.Sprintf("%d events the kernel could not buffer", a.Loss.Dropped))
+		}
+		if a.Loss.Unmatched != 0 {
+			lost = append(lost, fmt.Sprintf("%d returns with no entry recorded", a.Loss.Unmatched))
+		}
+		u := a.Loss.UnderWay
+		if u.Threads != 0 {
+			lost = append(lost, fmt.Sprintf("%d threads under way when the probes were placed", u.Threads))
+		}
+		if u.Undetermined != 0 {
+			lost = append(lost, fmt.Sprintf("%d threads NOT KNOWN, having run while the probes were placed",
+				u.Undetermined))
+		}
+		if !u.Known {
+			lost = append(lost, "whether a call was under way when the probes were placed is NOT KNOWN: "+
+				underWayWhy(u))
+		}
+	}
+	if a.Seen != nil {
+		if a.Seen.Rejected != 0 {
+			lost = append(lost, fmt.Sprintf("%d records the volatile intake refused", a.Seen.Rejected))
+		}
+		if a.Seen.ConnectionsUnrecorded != 0 {
+			lost = append(lost, fmt.Sprintf("%d connection records the volatile intake refused",
+				a.Seen.ConnectionsUnrecorded))
+		}
+	}
+	return strings.Join(lost, ", ")
+}
+
+// besideSeal is Lost as it follows a seal line.
+func besideSeal(lost string) string {
+	if lost == "" {
+		return ""
+	}
+	return "; LOST " + lost
 }
 
 // occasion is when the unmatched returns were seen, on which clock, and the

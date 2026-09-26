@@ -3,14 +3,32 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 )
 
-func compileHeaderArguments(implementation string, raw json.RawMessage) (*HeaderArguments, error) {
+// argumentMembers is each compiled-in operation's exact member set.
+var argumentMembers = map[string][]string{
+	RemoveHeaders:         {"headers"},
+	ReplaceHeaderValues:   {"headers", "value"},
+	TruncateHeaderValues:  {"headers", "length"},
+	RemoveBody:            {"messages"},
+	ReduceBodyToStructure: {"messages"},
+	RemoveQuery:           {},
+	RemoveJSONFields:      {"messages", "pointers"},
+	ReplaceJSONValues:     {"messages", "pointers", "value"},
+	RemoveFormFields:      {"names"},
+	RemoveQueryParameters: {"names"},
+}
+
+func compileArguments(implementation string, raw json.RawMessage) (*Arguments, error) {
 	var given struct {
-		Headers []string `json:"headers"`
-		Value   *string  `json:"value"`
-		Length  *int     `json:"length"`
+		Headers  []string `json:"headers"`
+		Value    *string  `json:"value"`
+		Length   *int     `json:"length"`
+		Messages []string `json:"messages"`
+		Pointers []string `json:"pointers"`
+		Names    []string `json:"names"`
 	}
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, fmt.Errorf("configuration must be an argument object")
@@ -22,36 +40,72 @@ func compileHeaderArguments(implementation string, raw json.RawMessage) (*Header
 	if err := json.Unmarshal(raw, &members); err != nil || members == nil {
 		return nil, fmt.Errorf("configuration must be an argument object")
 	}
-	allowed := map[string]bool{"headers": true}
-	switch implementation {
-	case RemoveHeaders:
-	case ReplaceHeaderValues:
-		allowed["value"] = true
-	case TruncateHeaderValues:
-		allowed["length"] = true
-	default:
+	defined, known := argumentMembers[implementation]
+	if !known {
 		return nil, fmt.Errorf("no argument definition for component")
 	}
 	for key := range members {
-		if !allowed[key] {
+		if !slices.Contains(defined, key) {
 			return nil, fmt.Errorf("argument %q is not defined for %s", key, implementation)
 		}
 	}
-	if len(given.Headers) == 0 || len(given.Headers) > MaxHeaderNames {
-		return nil, fmt.Errorf("headers must contain between 1 and %d exact names", MaxHeaderNames)
+	for _, key := range defined {
+		if _, present := members[key]; !present {
+			return nil, fmt.Errorf("argument %q is required for %s", key, implementation)
+		}
 	}
-	seen := map[string]bool{}
-	args := &HeaderArguments{}
-	for _, name := range given.Headers {
-		if !headerName(name) {
-			return nil, fmt.Errorf("headers must contain exact HTTP token names")
+	args := &Arguments{}
+	if slices.Contains(defined, "headers") {
+		if len(given.Headers) == 0 || len(given.Headers) > MaxHeaderNames {
+			return nil, fmt.Errorf("headers must contain between 1 and %d exact names", MaxHeaderNames)
 		}
-		lower := strings.ToLower(name)
-		if seen[lower] {
-			return nil, fmt.Errorf("header names must be distinct ignoring case")
+		seen := map[string]bool{}
+		for _, name := range given.Headers {
+			if !headerName(name) {
+				return nil, fmt.Errorf("headers must contain exact HTTP token names")
+			}
+			lower := strings.ToLower(name)
+			if seen[lower] {
+				return nil, fmt.Errorf("header names must be distinct ignoring case")
+			}
+			seen[lower] = true
+			args.Headers = append(args.Headers, lower)
 		}
-		seen[lower] = true
-		args.Headers = append(args.Headers, lower)
+	}
+	if slices.Contains(defined, "messages") {
+		messages, err := compileMessages(given.Messages)
+		if err != nil {
+			return nil, err
+		}
+		args.Messages = messages
+	}
+	if slices.Contains(defined, "pointers") {
+		if len(given.Pointers) == 0 || len(given.Pointers) > MaxFieldSelectors {
+			return nil, fmt.Errorf("pointers must contain between 1 and %d pointers", MaxFieldSelectors)
+		}
+		for i, pointer := range given.Pointers {
+			if err := ValidPointer(pointer); err != nil {
+				return nil, fmt.Errorf("pointers[%d]: %w", i, err)
+			}
+			if slices.Contains(args.Pointers, pointer) {
+				return nil, fmt.Errorf("pointers must be distinct")
+			}
+			args.Pointers = append(args.Pointers, pointer)
+		}
+	}
+	if slices.Contains(defined, "names") {
+		if len(given.Names) == 0 || len(given.Names) > MaxFieldSelectors {
+			return nil, fmt.Errorf("names must contain between 1 and %d parameter names", MaxFieldSelectors)
+		}
+		for i, name := range given.Names {
+			if err := ValidParameterName(name); err != nil {
+				return nil, fmt.Errorf("names[%d]: %w", i, err)
+			}
+			if slices.Contains(args.Names, name) {
+				return nil, fmt.Errorf("names must be distinct")
+			}
+			args.Names = append(args.Names, name)
+		}
 	}
 	switch implementation {
 	case ReplaceHeaderValues:
@@ -61,10 +115,19 @@ func compileHeaderArguments(implementation string, raw json.RawMessage) (*Header
 		if len(*given.Value) > MaxHeaderValueBytes {
 			return nil, fmt.Errorf("value exceeds %d bytes", MaxHeaderValueBytes)
 		}
-		for _, b := range []byte(*given.Value) {
-			if b < 32 || b > 126 {
-				return nil, fmt.Errorf("value must contain only printable ASCII")
-			}
+		if !printable(*given.Value) {
+			return nil, fmt.Errorf("value must contain only printable ASCII")
+		}
+		args.Value = *given.Value
+	case ReplaceJSONValues:
+		if given.Value == nil {
+			return nil, fmt.Errorf("value is required and must be a string")
+		}
+		if len(*given.Value) > MaxJSONValueBytes {
+			return nil, fmt.Errorf("value exceeds %d bytes", MaxJSONValueBytes)
+		}
+		if !printable(*given.Value) {
+			return nil, fmt.Errorf("value must contain only printable ASCII")
 		}
 		args.Value = *given.Value
 	case TruncateHeaderValues:
@@ -77,6 +140,44 @@ func compileHeaderArguments(implementation string, raw json.RawMessage) (*Header
 		args.Length = *given.Length
 	}
 	return args, nil
+}
+
+// compileMessages resolves a message selection to request-then-response order.
+func compileMessages(given []string) ([]string, error) {
+	if len(given) == 0 {
+		return nil, fmt.Errorf("messages must name request, response or both")
+	}
+	var request, response int
+	for _, m := range given {
+		switch m {
+		case MessageRequest:
+			request++
+		case MessageResponse:
+			response++
+		default:
+			return nil, fmt.Errorf("messages may contain only request and response")
+		}
+	}
+	if request > 1 || response > 1 {
+		return nil, fmt.Errorf("messages must be distinct")
+	}
+	var out []string
+	if request == 1 {
+		out = append(out, MessageRequest)
+	}
+	if response == 1 {
+		out = append(out, MessageResponse)
+	}
+	return out, nil
+}
+
+func printable(value string) bool {
+	for _, b := range []byte(value) {
+		if b < 32 || b > 126 {
+			return false
+		}
+	}
+	return true
 }
 
 func headerName(name string) bool {

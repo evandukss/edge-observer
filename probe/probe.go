@@ -651,9 +651,18 @@ type Losses struct {
 	Dropped int64 `json:"dropped"`
 
 	// Unmatched is returns whose entry was never recorded, so the length is
-	// unknown. It may include calls in flight when probes were placed, which
-	// fire inconsistently, so zero does not prove a run began outside a call.
+	// unknown. A return probe is armed when a call enters, and the probes are
+	// placed on the library for every process, so this is a call that entered
+	// after placement with nothing recorded: before its process was admitted (an
+	// additive reload), or where its entry could not be recorded. A call that
+	// entered before placement returns here only where another return probe on
+	// that function armed it at entry; otherwise nothing fires, and UnderWay is
+	// what accounts for it.
 	Unmatched int64 `json:"unmatched"`
+
+	// UnderWay is what the approved processes' threads say about calls that
+	// began before the probes were placed.
+	UnderWay UnderWay `json:"under_way"`
 
 	// Descendants is processes admitted because an approved process forked them:
 	// not a loss, but evidence the admission mechanism worked.
@@ -662,6 +671,45 @@ type Losses struct {
 	// When is the occasion of the unmatched returns, zero where none: without it
 	// the count cannot be correlated with anything.
 	When Occasion `json:"when"`
+}
+
+// UnderWay is calls that began before the probes were placed. Such a call
+// recorded no entry, its return fires nothing and its system calls open no
+// frame, so the bytes it moves are absent with no event, gap or counter marking
+// them. Nothing in the kernel can count it; the threads can say where one was.
+// Each approved process's threads are read before the probes are placed and
+// again after, once, at attach.
+type UnderWay struct {
+	// Known is false where a thread could not be read, and Why says which; the
+	// counts are then of the threads that could be.
+	Known bool   `json:"known"`
+	Why   string `json:"why,omitempty"`
+
+	// Threads is those inside the same socket system call (the read and write
+	// family the program follows) on the same descriptor in both readings, and
+	// switched out no further: blocked throughout placement, so the call each is
+	// inside began before the probes. It counts socket I/O, not TLS calls: a plain
+	// socket read in an approved process is counted too. A thread blocked in any
+	// other call (accept, a wait, a lock) is not.
+	Threads int64 `json:"threads"`
+
+	// Undetermined is threads that ran while the probes were placed, or started
+	// then, or were not read before: a TLS call of theirs may have begun before
+	// the probes and ended after, which nothing tells apart from one that began
+	// after. Whether each lost a call is NOT KNOWN, never none.
+	Undetermined int64 `json:"undetermined"`
+
+	// First names the first thread counted in Threads; nil where none.
+	First *Blocked `json:"first,omitempty"`
+}
+
+// Blocked is one thread counted under way: the observer's numbers for its
+// process and thread, the descriptor, and the system call by name.
+type Blocked struct {
+	PID  int32  `json:"pid"`
+	TID  int32  `json:"tid"`
+	FD   int64  `json:"fd"`
+	Call string `json:"call"`
 }
 
 // Occasion is when a counted thing was seen: on the monotonic clock, in

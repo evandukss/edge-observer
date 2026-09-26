@@ -115,7 +115,10 @@ func TestDeliveryGateEntryClassifiesUncertaintyBeforeEitherSink(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			g := admissionGate(t, 10)
 			a, captured, records := deliveryFixture(t, g)
-			b, other, _ := deliveryFixture(t, g)
+			// The second placement delivers to the same capture, as every placement
+			// does in the product (EBPF.Attach passes one sink to each place), so the
+			// three stamps below are one production order seen by one capture.
+			b := &ebpfAttachment{gate: g, sink: captured, procfs: t.TempDir(), known: make(map[int32]identity)}
 			a.deliverEvent(decodedPayload(1))
 			before := captured.Stats()
 			if before.Records != 1 {
@@ -127,12 +130,16 @@ func TestDeliveryGateEntryClassifiesUncertaintyBeforeEitherSink(t *testing.T) {
 			if state := g.Snapshot(); state.Charged != 2 || state.Reason != tc.reason {
 				t.Fatalf("fault not reached: %+v", state)
 			}
-			if len(b.known) != 0 || other.Stats() != (capture.Stats{}) {
-				t.Fatalf("fault reached identity or capture: %d, %+v", len(b.known), other.Stats())
+			if len(b.known) != 0 || captured.Stats() != before {
+				t.Fatalf("fault reached identity or capture: %d, %+v", len(b.known), captured.Stats())
 			}
 			a.deliverEvent(decodedDelivery(ebpf.Closed, 3))
 			if captured.Stats() != before || len(records.records) != 1 {
 				t.Fatal("invalidation did not cover the other placement")
+			}
+			if after := captured.Stats(); after.Lost != 0 || after.Unexplained != 0 {
+				t.Fatalf("the capture located a gap across stamps 1, 2 and 3: lost %d, unexplained %d",
+					after.Lost, after.Unexplained)
 			}
 			if got := g.Authorize(probe.ReleaseEvidence{InputsSettled: true, LifecycleSettled: true}); got.Authorized || got.Reason != tc.reason {
 				t.Fatalf("another placement's pending payload remained eligible: %+v", got)

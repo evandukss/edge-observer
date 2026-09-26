@@ -320,12 +320,16 @@ func emit(to io.Writer, a account.Account, text, local bool) error {
 }
 
 // sealedSession is the most recent session to seal, so the next can report how
-// long nothing was observed in between.
+// long nothing was observed in between. Lost is the account's losses as one
+// clause (account.Account.Lost) and Reason the gate's reason for refusing
+// release, for stop to print beside how it sealed.
 type sealedSession struct {
-	Session  string    `json:"session"`
-	Sealed   time.Time `json:"sealed"`
-	Account  string    `json:"account"`
-	Complete bool      `json:"complete"`
+	Session  string           `json:"session"`
+	Sealed   time.Time        `json:"sealed"`
+	Account  string           `json:"account"`
+	Complete bool             `json:"complete"`
+	Lost     string           `json:"lost,omitempty"`
+	Reason   probe.GateReason `json:"reason,omitempty"`
 }
 
 func lastSealed(directory string) (sealedSession, error) {
@@ -364,6 +368,14 @@ func stop(path string, stdout io.Writer) error {
 		how := "complete"
 		if !last.Complete {
 			how = "INCOMPLETE, and the account says why"
+		}
+		// What capture lost goes right after how it sealed: a seal says its steps
+		// succeeded, not that nothing was lost.
+		if last.Lost != "" {
+			how += " (LOST " + last.Lost + ")"
+		}
+		if last.Reason != "" {
+			how += ", release refused: " + string(last.Reason)
 		}
 		_, _ = fmt.Fprintf(stdout, "stopped    session %s, sealed %s, account %s\n", session, how, last.Account)
 		return nil
@@ -466,8 +478,12 @@ func (d *daemon) serveUntilStop(stopping, asking <-chan os.Signal, ticks <-chan 
 			d.consumeStorageExhaustion()
 			return
 		case <-d.intake.Exhausted():
-			// This stops input, but admitted records remain drainable. It is
-			// not permanent refusal by the approved-output writer.
+			// The intake refused a record, so capture's input is incomplete. The gate
+			// takes intake_exhausted as its reason now, which requests withdrawal and
+			// makes every pending release ineligible, as at the input limit
+			// (probe.DeliveryGateOptions.IntakeExhausted). It is not the
+			// approved-output writer's refusal.
+			d.gate.ConsumeStorageExhaustion()
 			return
 		case <-d.storageExhausted:
 			d.consumeStorageExhaustion()
@@ -779,7 +795,12 @@ func (d *daemon) finish(log *logger) error {
 	if final.Seal != nil {
 		sealedAt = final.Seal.Sealed
 	}
-	last, _ := json.Marshal(sealedSession{Session: d.session, Sealed: sealedAt, Account: path, Complete: record.Complete})
+	reason := probe.GateReason("")
+	if final.Processing != nil {
+		reason = final.Processing.GateReason
+	}
+	last, _ := json.Marshal(sealedSession{Session: d.session, Sealed: sealedAt, Account: path, Complete: record.Complete,
+		Lost: final.Lost(), Reason: reason})
 	if err := place(filepath.Join(d.policy.Settings.Directory, lastName), last); err != nil {
 		record.Error = err.Error()
 	}

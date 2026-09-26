@@ -37,11 +37,42 @@ capture-time policy revision unchanged.
 
 ## Policy exclusion evidence
 
-`policy_exclusions` records actual `RemoveHeaders` removals from retained
-messages, per pipeline. Each entry names the exchange index, request or
-response, headers or trailers, and lowercase field name. It never carries the
-removed value. Replacement and truncation leave a field present and do not add
-entries. The reader distinguishes:
+`policy_exclusions` records actual removals by processing policy from retained
+messages, per pipeline. It never carries a removed value.
+
+The worker writes `observer.approved/2`. Each entry names the exchange index,
+`request` or `response`, the `field` removed and a `disposition`:
+
+| field | disposition | written when |
+|---|---|---|
+| `message.headers.<name>` | `removed` | a header or trailer was removed; `section` is `headers` or `trailers` |
+| `message.body` | `removed` | `remove-body`, or `reduce-body-to-structure` with no structure derived, removed a body with bytes |
+| `message.body` | `removed_undecidable` | a field operation removed a body with bytes whole: not strictly valid JSON within the bounds, or a request body not admitted as urlencoded |
+| `message.body.values` | `values_removed` | `reduce-body-to-structure` removed the bytes of a body whose structure was derived |
+| `message.target.query` | `removed` | `remove-query` removed a query; the target had a `?` |
+| `message.query.<name>` | `removed` | a query parameter matched a configured name |
+| `message.form.<name>` | `removed` | an admitted urlencoded request body parameter matched a configured name |
+| `message.body.json<pointer>` | `removed` | a JSON member or element matched the configured pointer, written as configured |
+
+`section` is present only for a header field; `name` is absent. An entry exists
+only where the component was present, which is what separates a field excluded
+from a field never present. Each entry occurs once per exchange and message
+however many occurrences or slots it covers. Replacement and truncation, of a
+header or of a JSON value, add no entry.
+
+A body removed whole keeps `body.length` and `framing`, has an empty
+`body.kept` and has `structure.state` `removed`. A body whose values were
+removed has an empty `body.kept` and keeps its derived `structure`. A body with
+a JSON member removed or replaced keeps its other bytes exactly, and its
+structure is derived again from them. A reader therefore tells apart no body
+(length 0), a body removed by policy, a body with its values removed and a kept
+body, and a request target whose query was removed from one that had none.
+
+`observer.approved/1` artifacts are still read. Their entries carry `section`
+and a lowercase header `name`, with no `field` or `disposition`, and record
+`remove-headers` removals only.
+
+In both versions the reader distinguishes:
 
 - A populated array: the named fields were excluded by policy.
 - An empty array: no fields were excluded in the retained population. A field
@@ -52,9 +83,10 @@ entries. The reader distinguishes:
   emits `null` for an originally absent key.
 
 Text inspection preserves the artifact as indented JSON, then prints the
-exclusion disposition and quoted, decoded body bytes. The JSON retains every
-published metadata and reconstruction field, including provenance and limits.
-It escapes header and trailer values; decoded bodies use Go string quoting.
+exclusion disposition and quoted, decoded body bytes with the body's structure
+state. The JSON retains every published metadata and reconstruction field,
+including provenance and limits. It escapes header and trailer values; decoded
+bodies use Go string quoting.
 
 ## Reader validation
 
@@ -68,8 +100,9 @@ Diagnostics do not quote malformed record content.
 
 Both reading and rendering validate these structural requirements:
 
-- The artifact version is supported; policy revision, pipeline, sink and route
-  kind are nonempty. Connection record kind/version and identity are present.
+- The artifact version is `observer.approved/2` or `observer.approved/1`;
+  policy revision, pipeline, sink and route kind are nonempty. Connection
+  record kind/version and identity are present.
 - A reconstruction has the published record kind/version, names the same
   connection and process, and contains at least one exchange. Exchange indexes
   are unique and nonnegative. Each exchange is complete with present, complete,
@@ -83,10 +116,23 @@ Both reading and rendering validate these structural requirements:
   the exclusion boundary. Reasons are the codes declared in `TruncationStop`.
   Unplaced must be undetermined bytes, without a numeric value, with reason
   `reconstruction_truncated`. That reason also requires truncation evidence.
-- Each exclusion is a unique tuple referring to an existing retained exchange,
-  request or response, and headers or trailers. Names are lowercase HTTP field
-  tokens. The named field cannot also be present in the same message section.
-  Metadata-only records carry no populated exclusion or truncation evidence.
+- Each exclusion is a unique entry referring to an existing retained exchange
+  and to request or response. Metadata-only records carry no populated
+  exclusion or truncation evidence.
+- In `observer.approved/1`, an entry names headers or trailers and a lowercase
+  HTTP field token, and the named field cannot also be present in that message
+  section. No structure state is `removed`.
+- In `observer.approved/2`, an entry's field is one of the forms above, with the
+  disposition its row names, and `name` is absent. A header entry names headers
+  or trailers and the header cannot also be present there; no other entry has a
+  section. `message.target.query`, `message.query.<name>` and
+  `message.form.<name>` entries are on a request, and after a
+  `message.target.query` entry its target has no `?`. A `message.body` entry
+  requires an empty `body.kept` and structure state `removed`, and a structure
+  state `removed` requires such an entry. A `message.body.values` entry requires
+  an empty `body.kept` and structure state `derived` or `removed`. Parameter
+  names and pointers follow the configuration's name and pointer rules
+  ([CONFIG.md](../contract/config/CONFIG.md)).
 
 Unknown JSON members are ignored by the typed decoder. These are structural
 readability checks, not a re-execution of capture policy. The text renderer

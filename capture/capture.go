@@ -344,6 +344,17 @@ func (s *Session) Transfer(t probe.Transfer) {
 	s.mutex.Unlock()
 }
 
+// Refused takes the place in the production order of an event the delivery
+// gate refused. It is placed in no stream and ends none: a refusal is not a
+// loss. Without its place, every refused event would read at Finish as an
+// observation missing from the order, counted Lost, and every live stream would
+// be retired as a loss retires them. A gap before it is still a gap.
+func (s *Session) Refused(stamp uint64, at time.Time) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	s.observe(stamp, at)
+}
+
 // observe reads one observation's place in the backend's production order and
 // acts on what is missing since the last one. The caller holds the lock.
 //

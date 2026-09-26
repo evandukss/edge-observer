@@ -182,6 +182,10 @@ func exerciseIndependentPIDReuse(t *testing.T) {
 	type result struct {
 		old, replacement process.Process
 		err              error
+
+		// afterPlacement is whether a probe had been placed when the old process
+		// was staged, which adoption's reading follows by construction.
+		afterPlacement bool
 	}
 	coordinated := make(chan result, 1)
 	runtime.LockOSThread()
@@ -192,21 +196,27 @@ func exerciseIndependentPIDReuse(t *testing.T) {
 	go func() {
 		var staged result
 		var old reusedIdentity
-		opened, replaced := false, false
+		opened, replaced, placed := false, false, false
 		for {
 			var request seccompNotification
 			if err := notification(listener, &request); err != nil {
 				coordinated <- result{err: err}
 				return
 			}
+			if request.Data.Number == int32(unix.SYS_PERF_EVENT_OPEN) {
+				placed = true
+			}
 			opensProcfs := false
-			if !opened && request.Data.Number == int32(unix.SYS_OPENAT) {
+			// Adoption's reading, as coordinateArming recognises it: a /proc open
+			// after a probe has been placed.
+			if !opened && placed && request.Data.Number == int32(unix.SYS_OPENAT) {
 				var path string
 				path, staged.err = notificationPath(listener, request)
 				opensProcfs = staged.err == nil && path == procfs
 			}
 			switch {
 			case opensProcfs:
+				staged.afterPlacement = placed
 				old, staged.err = reuseCommand(actor, "T", "old")
 				if staged.err == nil {
 					staged.old, staged.err = process.Identify(procfs, old.observer)
@@ -252,6 +262,10 @@ func exerciseIndependentPIDReuse(t *testing.T) {
 	default:
 		t.Fatal("adoption completed without the independently controlled pid reuse")
 	}
+	if !staged.afterPlacement {
+		t.Fatal("wiring, not the property: the old process was staged before any probe was placed, so its number " +
+			"was reused before adoption's reading rather than between that reading and the sweep")
+	}
 	if staged.old.PID != staged.replacement.PID || staged.old.Namespace != staged.replacement.Namespace || staged.old.NamespacePID != staged.replacement.NamespacePID ||
 		staged.old.StartTime == staged.replacement.StartTime || staged.old.PPID != rootPID || staged.replacement.PPID == rootPID {
 		t.Fatalf("reuse and unselected replacement parent were not established: old %+v, new %+v", staged.old, staged.replacement)
@@ -288,6 +302,7 @@ func TestPIDReusedBetweenAdoptionAndSweepIsNotAdmitted(t *testing.T) {
 	command := exec.Command(os.Args[0], "-test.run=^TestPIDReusedBetweenAdoptionAndSweepIsNotAdmitted$", "-test.v", "-test.timeout=45s")
 	command.Env = append(os.Environ(), environment+"=1")
 	command.SysProcAttr = &syscall.SysProcAttr{Cloneflags: unix.CLONE_NEWPID | unix.CLONE_NEWNS}
+	command.WaitDelay = helperOutputWait
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("pid reuse property failed in its syscall-isolated process: %v\n%s", err, output)

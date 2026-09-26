@@ -463,14 +463,10 @@ func scopeParts(source observed.Account) (Scope, error) {
 			into *[]Admission
 		}{{admissions.CoverageEnded, &coverage.CoverageEnded}, {admissions.GrantUnknown, &coverage.GrantUnknown}} {
 			for _, one := range list.from {
-				// A descendant's admission names the pid namespace the kernel
-				// reported on the event that admitted it; a target's was read
-				// from /proc at resolution.
-				by := record.ByResolutionRead
-				if one.Inherited {
-					by = record.ByAdmissionEvent
-				}
-				instance, err := instanceEstablished(one.Instance, by)
+				// The operational account says what read each admission's pid
+				// namespace. An account that does not say leaves it unnamed
+				// rather than guessed from inheritance, which does not decide it.
+				instance, err := instanceEstablished(one.Instance, one.NamespaceBy)
 				if err != nil {
 					return Scope{}, err
 				}
@@ -517,7 +513,7 @@ func captureOf(source observed.Account) (Capture, error) {
 	}
 	if loss := source.Loss; loss.Known {
 		capture.Loss = Loss{Block: Block{State: Carried}, Dropped: decimalOf(loss.Dropped),
-			Unmatched: decimalOf(loss.Unmatched), Occasion: occasionOf(loss.When)}
+			Unmatched: decimalOf(loss.Unmatched), Occasion: occasionOf(loss.When), UnderWay: underWayOf(loss.UnderWay)}
 	} else {
 		capture.Loss = Loss{Block: Block{State: Unavailable, Why: loss.Why}}
 	}
@@ -546,6 +542,32 @@ func captureOf(source observed.Account) (Capture, error) {
 		capture.Spool = Spool{Block: Block{State: Unavailable, Why: "the operational account carries no spool block"}}
 	}
 	return capture, nil
+}
+
+// underWayOf carries the reading of the threads, its reason wherever the
+// operational account gives one. One that is not known is unavailable, never
+// counts of zero; what the threads that could be read showed goes into its
+// reason, since an unavailable block holds no values.
+func underWayOf(under probe.UnderWay) UnderWay {
+	if !under.Known {
+		why := under.Why
+		if why == "" {
+			why = "the operational account carries no reading of the threads"
+		}
+		why += fmt.Sprintf("; among the threads that could be read, %d were under way and %d undetermined",
+			under.Threads, under.Undetermined)
+		return UnderWay{Block: Block{State: Unavailable, Why: why}}
+	}
+	first := Blocked{PID: record.Text{State: record.Undetermined}, TID: record.Text{State: record.Undetermined},
+		FD: record.Text{State: record.Undetermined}, Call: record.Text{State: record.Undetermined}}
+	if one := under.First; one != nil {
+		first = Blocked{PID: record.Text{State: record.Determined, Value: decimalOf(one.PID)},
+			TID:  record.Text{State: record.Determined, Value: decimalOf(one.TID)},
+			FD:   record.Text{State: record.Determined, Value: decimalOf(one.FD)},
+			Call: record.Text{State: record.Determined, Value: one.Call}}
+	}
+	return UnderWay{Block: Block{State: Carried, Why: under.Why}, Threads: decimalOf(under.Threads),
+		Undetermined: decimalOf(under.Undetermined), First: first}
 }
 
 func occasionOf(when probe.Occasion) Occasion {
