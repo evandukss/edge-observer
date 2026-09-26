@@ -245,12 +245,15 @@ func CompileProcessing(configuration []byte, manifests []Supplied) (*ProcessingP
 		one := &processingFindings{document: p.DeclaredBy}
 		for si := range p.Slots {
 			s := &p.Slots[si]
-			args, err := compileHeaderArguments(s.Implementation, s.Configuration)
+			args, err := compileArguments(s.Implementation, s.Configuration)
 			if err != nil {
 				f.list = append(f.list, Finding{Document: s.SelectedBy, Subject: "slot:" + p.Name + "." + s.Name, Reason: InvalidBuiltinArguments, Detail: err.Error()})
 			} else {
 				s.Arguments = args
 			}
+		}
+		if jsonSlot, formSlot := bodyGrammars(p.Slots); jsonSlot != "" && formSlot != "" {
+			one.add("pipeline:"+p.Name, BodyGrammarConflict, "slot %s reads bodies as JSON and slot %s as urlencoded; each removes the other's bodies whole, so they need two pipelines", jsonSlot, formSlot)
 		}
 		for _, sink := range p.Sinks {
 			fanout[p.Input]++
@@ -272,7 +275,7 @@ func CompileProcessing(configuration []byte, manifests []Supplied) (*ProcessingP
 
 func processingAvailable() Available {
 	var builtins []Component
-	for _, name := range []string{RemoveHeaders, ReplaceHeaderValues, TruncateHeaderValues} {
+	for _, name := range []string{RemoveHeaders, ReplaceHeaderValues, TruncateHeaderValues, RemoveBody, ReduceBodyToStructure, RemoveQuery, RemoveJSONFields, ReplaceJSONValues, RemoveFormFields, RemoveQueryParameters} {
 		builtins = append(builtins, Component{
 			Interface: ComponentVersion, Name: name, Version: "1", Role: RoleProcessor, Execution: ExecutionBuiltin,
 			Input: Consumes{Types: []string{"reconstruction"}, Delivery: DeliveryRecord}, Output: Output{Records: []string{"reconstruction"}},
@@ -288,6 +291,24 @@ func processingAvailable() Available {
 		Descendants:       FixedAnswers{Boundary: "exec_ends_the_grant", RootExit: "survivors_keep_their_grants", Replacement: "needs_restart"},
 		EnforcementPoints: map[string]policy.Limits{"builtin_transformation": {}}, Transformations: map[string]policy.Limits{"remove": {}},
 	}
+}
+
+// bodyGrammars names the first slot reading bodies as JSON and the first
+// reading them as urlencoded, either empty where there is none.
+func bodyGrammars(slots []EffectiveSlot) (jsonSlot, formSlot string) {
+	for _, s := range slots {
+		switch s.Implementation {
+		case RemoveJSONFields, ReplaceJSONValues:
+			if jsonSlot == "" {
+				jsonSlot = s.Name
+			}
+		case RemoveFormFields:
+			if formSlot == "" {
+				formSlot = s.Name
+			}
+		}
+	}
+	return jsonSlot, formSlot
 }
 
 // processingFindings reports runtime-profile decisions over the composed
@@ -315,6 +336,9 @@ func (p *ProcessingPlan) Pipelines() []EffectivePipeline {
 			if slot.Arguments != nil {
 				arguments := *slot.Arguments
 				arguments.Headers = slices.Clone(arguments.Headers)
+				arguments.Messages = slices.Clone(arguments.Messages)
+				arguments.Pointers = slices.Clone(arguments.Pointers)
+				arguments.Names = slices.Clone(arguments.Names)
 				slot.Arguments = &arguments
 			}
 		}

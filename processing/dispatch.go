@@ -375,6 +375,8 @@ func applySlot(c *reconstruct.Connection, slot config.EffectiveSlot, exclusions 
 	}
 	switch slot.Implementation {
 	case config.RemoveHeaders, config.ReplaceHeaderValues, config.TruncateHeaderValues:
+	case config.RemoveBody, config.ReduceBodyToStructure, config.RemoveQuery, config.RemoveJSONFields, config.ReplaceJSONValues, config.RemoveFormFields, config.RemoveQueryParameters:
+		return true
 	default:
 		return false
 	}

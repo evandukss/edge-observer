@@ -42,7 +42,7 @@ func TestApprovedReaderDistinguishesAllFourExclusionWireForms(t *testing.T) {
 	}
 	const unavailable = "policy exclusions  unavailable:"
 	const none = "policy exclusions  none excluded in retained messages;"
-	const excluded = "policy excluded  exchange=0 message=\"request\" section=\"headers\" name=\"authorization\""
+	const excluded = "policy excluded  exchange=0 message=\"request\" field=\"message.headers.authorization\" section=\"headers\" disposition=\"removed\""
 	for _, tc := range []struct {
 		name string
 		line []byte
@@ -50,7 +50,7 @@ func TestApprovedReaderDistinguishesAllFourExclusionWireForms(t *testing.T) {
 		want []processing.PolicyExclusion
 		text string
 	}{
-		{"populated", out.lines[0], `[{"exchange":0,"message":"request","section":"headers","name":"authorization"}]`, []processing.PolicyExclusion{{Exchange: 0, Message: "request", Section: "headers", Name: "authorization"}}, excluded},
+		{"populated", out.lines[0], `[{"exchange":0,"message":"request","field":"message.headers.authorization","section":"headers","disposition":"removed"}]`, []processing.PolicyExclusion{{Exchange: 0, Message: "request", Field: "message.headers.authorization", Section: "headers", Disposition: "removed"}}, excluded},
 		{"literal-empty-array", empty, "[]", []processing.PolicyExclusion{}, none},
 		{"absent-legacy-key", append(absent, '\n'), "", nil, unavailable},
 		{"literal-null-after-public-round-trip", append(null, '\n'), "null", nil, unavailable},

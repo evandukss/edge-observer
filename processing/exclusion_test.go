@@ -13,10 +13,11 @@ import (
 // Read the proposed wire member without referring to new production names, so
 // the current producer can reach the actual-removal control before the red.
 type exclusionWire struct {
-	Exchange int    `json:"exchange"`
-	Message  string `json:"message"`
-	Section  string `json:"section"`
-	Name     string `json:"name"`
+	Exchange    int    `json:"exchange"`
+	Message     string `json:"message"`
+	Field       string `json:"field"`
+	Section     string `json:"section"`
+	Disposition string `json:"disposition"`
 }
 
 func policyExclusions(t *testing.T, line []byte) ([]exclusionWire, bool) {
@@ -124,8 +125,8 @@ func TestRemoveHeadersRecordsNamedPolicyExclusions(t *testing.T) {
 			}
 			t.Logf("RemoveHeaders reached %s/%s: useful output remains; both names and all three original values removed", location.message, location.section)
 			requirePolicyExclusions(t, out.lines[1], []exclusionWire{
-				{Exchange: 0, Message: location.message, Section: location.section, Name: "authorization"},
-				{Exchange: 0, Message: location.message, Section: location.section, Name: "x-secret"},
+				{Exchange: 0, Message: location.message, Field: "message.headers.authorization", Section: location.section, Disposition: "removed"},
+				{Exchange: 0, Message: location.message, Field: "message.headers.x-secret", Section: location.section, Disposition: "removed"},
 			})
 			// This explicit-empty assertion is intentionally after the new
 			// evidence assertion: the old producer reaches removal before red.
@@ -171,8 +172,8 @@ func TestPolicyExclusionsFollowRetainedPipelineMessages(t *testing.T) {
 	}
 	t.Log("three independent operations reached two retained exchanges beside metadata; incomplete suffix withheld")
 	requirePolicyExclusions(t, out.lines[0], []exclusionWire{
-		{Exchange: 0, Message: "request", Section: "headers", Name: "authorization"},
-		{Exchange: 1, Message: "response", Section: "headers", Name: "x-secret"},
+		{Exchange: 0, Message: "request", Field: "message.headers.authorization", Section: "headers", Disposition: "removed"},
+		{Exchange: 1, Message: "response", Field: "message.headers.x-secret", Section: "headers", Disposition: "removed"},
 	})
 	for _, index := range []int{1, 2, 3} {
 		requirePolicyExclusions(t, out.lines[index], nil)

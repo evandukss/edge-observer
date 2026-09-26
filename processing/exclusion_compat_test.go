@@ -44,7 +44,7 @@ func TestPolicyExclusionEvidencePreservesAvailability(t *testing.T) {
 		want []processing.PolicyExclusion
 		wire string
 	}{
-		{"populated", out.lines[1], []processing.PolicyExclusion{{Exchange: 0, Message: "request", Section: "headers", Name: "authorization"}}, `[{"exchange":0,"message":"request","section":"headers","name":"authorization"}]`},
+		{"populated", out.lines[1], []processing.PolicyExclusion{{Exchange: 0, Message: "request", Field: "message.headers.authorization", Section: "headers", Disposition: "removed"}}, `[{"exchange":0,"message":"request","field":"message.headers.authorization","section":"headers","disposition":"removed"}]`},
 		{"new-empty", out.lines[0], []processing.PolicyExclusion{}, "[]"},
 		{"old-absent", oldLine, nil, ""},
 	} {
