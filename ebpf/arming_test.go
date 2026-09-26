@@ -318,6 +318,8 @@ func installArmingListener() (int, error) {
 		{Code: classicReturn, K: unix.SECCOMP_RET_USER_NOTIF},
 		{Code: classicJumpEqual, Jf: 1, K: uint32(unix.SYS_BPF)},
 		{Code: classicReturn, K: unix.SECCOMP_RET_USER_NOTIF},
+		{Code: classicJumpEqual, Jf: 1, K: uint32(unix.SYS_PERF_EVENT_OPEN)},
+		{Code: classicReturn, K: unix.SECCOMP_RET_USER_NOTIF},
 		{Code: classicReturn, K: seccompReturnAllow},
 	}
 	program := unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]}
@@ -402,6 +404,10 @@ func continueNotification(listener int, request seccompNotification) error {
 type armingChildren struct {
 	live      int32
 	transient int32
+
+	// afterPlacement is whether a probe had been placed (a perf_event_open seen)
+	// when the window opened, which adoption's reading follows by construction.
+	afterPlacement bool
 }
 
 type armingCoordination struct {
@@ -419,12 +425,16 @@ func coordinateArming(listener int, fixture *armingProcess) armingCoordination {
 	go func() {
 		windowOpen := false
 		transientExited := false
+		placed := false
 		var children armingChildren
 		for {
 			var request seccompNotification
 			if err := notification(listener, &request); err != nil {
 				coordination.errors <- fmt.Errorf("receive an arming syscall: %w", err)
 				return
+			}
+			if request.Data.Number == int32(unix.SYS_PERF_EVENT_OPEN) {
+				placed = true
 			}
 
 			var actionErr error
@@ -436,6 +446,7 @@ func coordinateArming(listener int, fixture *armingProcess) armingCoordination {
 			}
 			switch {
 			case opensProcfs:
+				children.afterPlacement = placed
 				children.live, actionErr = fixture.child('L', "live")
 				if actionErr == nil {
 					children.transient, actionErr = fixture.child('T', "transient")
@@ -495,6 +506,10 @@ func exerciseArmingWindow(t *testing.T) {
 	case children = <-coordination.children:
 	default:
 		t.Fatal("the attachment completed without exposing the interval after probe placement and before descendant adoption")
+	}
+	if !children.afterPlacement {
+		t.Fatal("wiring, not the property: the children were forked before any probe was placed, so neither was " +
+			"forked during arming and nothing below measures a child forked in that interval")
 	}
 	select {
 	case <-coordination.exited:
@@ -556,11 +571,19 @@ func TestAChildForkedDuringArmingIsObservedExactlyOnceAndLeavesNoApproval(t *tes
 
 	command := exec.Command(os.Args[0], arguments...)
 	command.Env = append(os.Environ(), armingHelperEnvironment+"=1")
+	command.WaitDelay = helperOutputWait
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("the arming-window property failed in its syscall-isolated process: %v\n%s", err, output)
 	}
 }
+
+// helperOutputWait bounds how long a test waits for a helper's output once the
+// helper has exited. A fixture's child inherits the helper's stderr, and one a
+// helper left stopped when it failed early (a guard, before the transient child
+// was continued) holds that pipe open for ever; without the bound the failure's
+// own message never arrives and the run times out saying nothing.
+const helperOutputWait = 10 * time.Second
 
 // childDeadlineMargin is what the child needs after giving up to dump every
 // goroutine and exit, and the parent to read the output, before the parent's
