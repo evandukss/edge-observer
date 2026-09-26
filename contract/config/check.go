@@ -251,7 +251,7 @@ type EffectiveSlot struct {
 	Configuration  json.RawMessage `json:"configuration,omitempty"`
 	OnFailure      string          `json:"on_failure"`
 	// Arguments is populated only by CompileProcessing, after validation.
-	Arguments *HeaderArguments `json:"arguments,omitempty"`
+	Arguments *Arguments `json:"arguments,omitempty"`
 
 	// SelectedBy is "configuration" or "pack:<name>".
 	SelectedBy string `json:"selected_by"`

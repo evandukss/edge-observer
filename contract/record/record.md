@@ -242,7 +242,7 @@ have ended, so an interval test over `valid` reads every such pair as overlappin
 | `complete`, `framed` | uncertainty | every byte present / the end known |
 | `defect`, `detail` | uncertainty | `none`, `stream_ended`, `hole`, `malformed`, `ambiguous_framing`, `limit`, and one line that never carries body bytes |
 | `stream` | identity | `{direction, offset, end}`. `direction` is DERIVED from `role`: a server receives requests |
-| `structure` | content, uncertainty | `derived` with a `shape`, `refused` with a reason, or `none` for no body |
+| `structure` | content, uncertainty | `derived` with a `shape`, `refused` with a reason, `none` for no body, or `removed` by processing policy (only in an `observer.approved/2` artifact, never from a spool) |
 
 A `shape` is `{kind, fields[], elems[], count, elided}` with kinds `invalid`, `object`, `array`, `integer`,
 `fraction`, `boolean`, `null`, `short_string`, `long_string`, `decimal_string`, and fields

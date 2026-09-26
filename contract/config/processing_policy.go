@@ -58,7 +58,7 @@ func compileExclusions(plan *ProcessingPlan) []Finding {
 			if !slices.Contains(plan.resolved.Inventory.RecordFields, field) {
 				plan.resolved.Inventory.RecordFields = append(plan.resolved.Inventory.RecordFields, field)
 			}
-			plan.exclusions = append(plan.exclusions, HeaderExclusion{Declaration: r.ID, Header: header, FailureAction: r.FailureAction})
+			plan.exclusions = append(plan.exclusions, Exclusion{Declaration: r.ID, Field: field, Header: header, FailureAction: r.FailureAction})
 		}
 		failures = append(failures, f.list...)
 	}

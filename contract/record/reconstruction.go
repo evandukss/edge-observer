@@ -100,19 +100,21 @@ type MessageRange struct {
 	End       string `json:"end"`
 }
 
-// Structure is the shape of a body: derived, refused with a reason, or none
-// because there was no body.
+// Structure is the shape of a body: derived, refused with a reason, none
+// because there was no body, or removed by processing policy.
 type Structure struct {
 	State   string `json:"state"`
 	Refused string `json:"refused,omitempty"`
 	Shape   *Shape `json:"shape,omitempty"`
 }
 
-// States of a structure.
+// States of a structure. StructureRemoved occurs only in an approved artifact
+// of version observer.approved/2 or later, never in a record read from a spool.
 const (
 	StructureDerived = "derived"
 	StructureRefused = "refused"
 	StructureNone    = "none"
+	StructureRemoved = "removed"
 )
 
 // Shape is a body's structure without its values.
