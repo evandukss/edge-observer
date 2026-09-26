@@ -18,11 +18,11 @@ import (
 const t19Inserted = "t19-inserted"
 
 // A child forked under the policy that admitted its parent, and first read
-// after an additive reload that renumbers the targets, is credited to its
-// parent's target and not to whichever target holds the parent's old number
-// now. The child can make no TLS call before the reload: nothing listens on
-// its port until afterwards, and its exchange fails at the connect, before
-// any TLS call.
+// after an additive reload whose configuration renumbers the targets, giving
+// the parent's number to a new one, is credited to its parent's target and not
+// to the new one. The child can make no TLS call before the reload: nothing
+// listens on its port until afterwards, and its exchange fails at the connect,
+// before any TLS call.
 func TestT19AChildFirstReadAfterAReloadThatRenumbersTargetsIsCreditedToItsParentsTarget(t *testing.T) {
 	binary := built(t)
 	boot := thisBoot(t)
@@ -34,25 +34,28 @@ func TestT19AChildFirstReadAfterAReloadThatRenumbersTargetsIsCreditedToItsParent
 	c := configuring(t, exactly(t19Target, a.root, boot, "follow"))
 	observer := started(t, binary, c)
 	child := a.child(t, "fork", "C")
+	before := inspected(t, binary, c)
 
 	c.rewrite(t, []map[string]any{exactly(t19Inserted, inserted, boot, "none"),
 		exactly(t19Target, a.root, boot, "follow")}, nil)
+	// The candidate on its own numbers the added target 1, the number the
+	// session gave the parent's target at the start: a number taken from the
+	// configuration alone would name two programs.
+	candidate := previewed(t, binary, c)
+	if named(before, t19Target).Number != 1 || named(candidate, t19Inserted).Number != 1 {
+		t.Fatalf("wiring, not the property: the session numbers %q %d and the candidate on its own numbers %q "+
+			"%d, want both 1, so the reload offers no number the session already holds",
+			t19Target, named(before, t19Target).Number, t19Inserted, named(candidate, t19Inserted).Number)
+	}
 	answer, err := reloaded(t, binary, c)
 	if err != nil || answer.Outcome != "activated" || !slices.Equal(answer.Added, []string{t19Inserted}) {
 		t.Fatalf("wiring, not the property: the reload answered %+v with %v, want %q added and activated",
 			answer, err, t19Inserted)
 	}
-	// The session keeps the parent's target under the number it resolved to at
-	// the start and adds the new one under its number in the candidate, so both
-	// read 1: one number now names two programs.
 	live := inspected(t, binary, c)
-	if first, second := named(live, t19Inserted).Number, named(live, t19Target).Number; first != 1 || second != 1 {
-		t.Fatalf("wiring, not the property: after the reload %q is target %d and %q is target %d, want both 1, "+
-			"so no number names two targets", t19Inserted, first, t19Target, second)
-	}
 	if !observes(live, inserted.PID) {
 		t.Fatalf("wiring, not the property: the reload admitted nothing under %q (pid %d), so no grant written "+
-			"after it holds the number the parent's target held before", t19Inserted, inserted.PID)
+			"after it was offered the parent's number", t19Inserted, inserted.PID)
 	}
 	if got := witnessed(witness, "C", child.PID); got != 0 {
 		t.Fatalf("wiring, not the property: the child pid %d completed %d exchanges before the reload, so its "+

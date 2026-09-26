@@ -147,6 +147,10 @@ const (
 	// process when the observer resolved its policy. It is the process's, as it
 	// was at that read.
 	ByResolutionRead = "resolution_proc_read"
+	// ByAttachRead is the pid namespace read from /proc/<pid>/ns/pid of a
+	// descendant already running when probes were placed, by the walk that
+	// admitted it. It is the process's, as it was at that read.
+	ByAttachRead = "attach_proc_read"
 	// BySocketEvidence is the network namespace of the socket itself, taken
 	// from kernel socket evidence on the call.
 	BySocketEvidence = "socket_evidence"
