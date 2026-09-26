@@ -35,7 +35,7 @@ func TestT20SplicingKeepsEveryOtherByte(t *testing.T) {
 			"{ \"card\" : { \"number\" : \"" + t20Card + "\" } }",
 			"{ \"card\" : { \"number\" : \"re\\\"da\\\\cted\" } }"},
 		{"form-middle", config.RemoveFormFields, `{"names":["card_number"]}`,
-			"a=1&card_number=" + t20Card + ";b=%20&&c",
+			"a=1&card_number=" + t20Card + "&b=%20&&c",
 			"a=1&b=%20&&c"},
 		{"form-last", config.RemoveFormFields, `{"names":["card_number"]}`,
 			"a=1;card.number=" + t20Card,

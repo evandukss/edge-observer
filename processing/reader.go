@@ -86,8 +86,11 @@ func ReadArtifacts(session fs.FS, visit func(Artifact) error) (result error) {
 // directions and offsets, the actual connection ending, Unplaced and every
 // ReconstructionTruncation stop remain visible. No local policy is consulted.
 // PolicyExclusions is rendered as unavailable for nil (absent or null on the
-// wire), none excluded for an empty array, or the named tuples for a populated
-// array. These claims concern retained messages only, never an unknown suffix.
+// wire), none excluded for an empty array, or one line per entry for a
+// populated array: the field and disposition in version 2, the section and
+// header name in version 1. These claims concern retained messages only, never
+// an unknown suffix. Each retained body line names its structure state, so a
+// body removed by policy does not read as an empty one.
 // It propagates output errors and applies the same validation as ReadArtifacts.
 //
 // The text includes the persisted record as indented JSON, followed by decoded
@@ -115,8 +118,17 @@ func RenderArtifact(out io.Writer, artifact Artifact) error {
 		w.printf("policy exclusions  none excluded in retained messages; no claim about an indeterminate suffix\n")
 	default:
 		for _, e := range artifact.PolicyExclusions {
-			w.printf("policy excluded  exchange=%d message=%q section=%q name=%q (value not retained)\n",
-				e.Exchange, e.Message, e.Section, e.Name)
+			switch {
+			case artifact.Version == ArtifactVersion1:
+				w.printf("policy excluded  exchange=%d message=%q section=%q name=%q (value not retained)\n",
+					e.Exchange, e.Message, e.Section, e.Name)
+			case e.Section != "":
+				w.printf("policy excluded  exchange=%d message=%q field=%q section=%q disposition=%q (value not retained)\n",
+					e.Exchange, e.Message, e.Field, e.Section, e.Disposition)
+			default:
+				w.printf("policy excluded  exchange=%d message=%q field=%q disposition=%q (value not retained)\n",
+					e.Exchange, e.Message, e.Field, e.Disposition)
+			}
 		}
 	}
 	if artifact.Reconstruction != nil {
@@ -125,8 +137,8 @@ func RenderArtifact(out io.Writer, artifact Artifact) error {
 				m := side.Message
 				// Validation established the encoding before any output.
 				body, _ := base64.StdEncoding.DecodeString(m.Body.Kept)
-				w.printf("retained body  exchange=%d message=%q direction=%q offset=%q end=%q bytes=%q\n",
-					e.Index, m.Kind, m.Stream.Direction, m.Stream.Offset, m.Stream.End, body)
+				w.printf("retained body  exchange=%d message=%q direction=%q offset=%q end=%q structure=%q bytes=%q\n",
+					e.Index, m.Kind, m.Stream.Direction, m.Stream.Offset, m.Stream.End, m.Structure.State, body)
 			}
 		}
 	}

@@ -368,8 +368,8 @@ routes cannot itself establish that the runtime respects this boundary.
 as an entry naming the exchange, the message, the field and a disposition - `removed`,
 `values_removed`, or `removed_undecidable` for a whole body a field operation could not decide - and
 only where the component was present, which is what separates excluded from never present.
-Replacement and truncation add no entry. The shape is in
-[docs/approved-inspection.md](../../docs/approved-inspection.md).
+Replacement and truncation add no entry. The observer's approved inspection document states the
+shape, outside this contract bundle.
 
 #### Bounds and refusals
 

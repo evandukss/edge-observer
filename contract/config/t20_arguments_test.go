@@ -23,7 +23,7 @@ func TestT20ArgumentRules(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		implementation, accepted string
-		refused              []string
+		refused                  []string
 	}{
 		{config.RemoveBody, `{"messages":["response","request"]}`, []string{
 			`{}`, `null`, `[]`, `{"messages":[]}`, `{"messages":["request","request"]}`, `{"messages":["body"]}`,

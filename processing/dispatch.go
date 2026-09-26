@@ -13,6 +13,7 @@ import (
 	"github.com/evandukss/edge-observer/contract/record"
 	"github.com/evandukss/edge-observer/fragment"
 	"github.com/evandukss/edge-observer/http1"
+	"github.com/evandukss/edge-observer/jsonshape"
 	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/reconstruct"
 )
@@ -88,10 +89,10 @@ func (w *Worker) process(ctx context.Context, b *batch) error {
 			// construction: a metadata pipeline never receives source messages.
 		case "reconstruction":
 			processed := copyConnection(source)
-			exclusions := exclusionEvidence{fields: []PolicyExclusion{}}
+			run := slotRun{source: source, evidence: exclusionEvidence{fields: []PolicyExclusion{}}, bodies: map[*reconstruct.Message]string{}, shapes: w.options.Limits.JSON}
 			failed := false
 			for _, slot := range p.Slots {
-				if !applySlot(&processed, slot, &exclusions) {
+				if !run.apply(&processed, slot) {
 					w.failure(p.Name, slot.OnFailure)
 					failed = true
 					break
@@ -106,9 +107,10 @@ func (w *Worker) process(ctx context.Context, b *batch) error {
 					w.failure(p.Name, firstAction(p))
 					continue
 				}
+				run.mark(&projected[0], processed)
 				artifact.Reconstruction = &projected[0]
 				artifact.ReconstructionTruncation = truncation
-				artifact.PolicyExclusions = exclusions.fields
+				artifact.PolicyExclusions = run.evidence.fields
 				if truncation != nil {
 					artifact.Reconstruction.Unplaced = record.Count{State: record.Undetermined, Unit: record.Bytes, Why: "reconstruction_truncated"}
 				}
@@ -357,50 +359,117 @@ type exclusionEvidence struct {
 	seen   map[PolicyExclusion]struct{}
 }
 
-func (e *exclusionEvidence) removed(where PolicyExclusion, name string) {
-	where.Name = strings.ToLower(name)
+// add records one removal once, however many occurrences or slots it covers.
+func (e *exclusionEvidence) add(entry PolicyExclusion) {
 	if e.seen == nil {
 		e.seen = make(map[PolicyExclusion]struct{})
 	}
-	if _, exists := e.seen[where]; exists {
+	if _, exists := e.seen[entry]; exists {
 		return
 	}
-	e.seen[where] = struct{}{}
-	e.fields = append(e.fields, where)
+	e.seen[entry] = struct{}{}
+	e.fields = append(e.fields, entry)
 }
 
-func applySlot(c *reconstruct.Connection, slot config.EffectiveSlot, exclusions *exclusionEvidence) bool {
-	if slot.Arguments == nil {
+// slotRun is one pipeline's pass over a copy of the parsed connection. Body
+// operations read header facts from source, the connection as parsed, so no
+// header operation earlier in the route changes what they admit.
+type slotRun struct {
+	source   reconstruct.Connection
+	evidence exclusionEvidence
+	// bodies holds what policy did to a processed message's body: removed, or
+	// values_removed. A message absent from it kept its body.
+	bodies map[*reconstruct.Message]string
+	shapes jsonshape.Limits
+}
+
+func (r *slotRun) apply(c *reconstruct.Connection, slot config.EffectiveSlot) bool {
+	a := slot.Arguments
+	if a == nil {
 		return false
 	}
 	switch slot.Implementation {
-	case config.RemoveHeaders, config.ReplaceHeaderValues, config.TruncateHeaderValues:
-	case config.RemoveBody, config.ReduceBodyToStructure, config.RemoveQuery, config.RemoveJSONFields, config.ReplaceJSONValues, config.RemoveFormFields, config.RemoveQueryParameters:
-		return true
+	case config.RemoveHeaders, config.ReplaceHeaderValues, config.TruncateHeaderValues,
+		config.RemoveBody, config.ReduceBodyToStructure, config.RemoveQuery,
+		config.RemoveJSONFields, config.ReplaceJSONValues, config.RemoveFormFields, config.RemoveQueryParameters:
 	default:
 		return false
 	}
 	for index, e := range c.Exchanges {
 		for side, m := range []*reconstruct.Message{e.Request, e.Response} {
-			where := PolicyExclusion{Exchange: index, Message: "request", Section: "headers"}
+			message := config.MessageRequest
 			if side == 1 {
-				where.Message = "response"
+				message = config.MessageResponse
 			}
-			m.Headers = transformFields(m.Headers, slot, where, exclusions)
-			where.Section = "trailers"
-			m.Trailers = transformFields(m.Trailers, slot, where, exclusions)
+			where := PolicyExclusion{Exchange: index, Message: message, Disposition: DispositionRemoved}
+			switch slot.Implementation {
+			case config.RemoveHeaders, config.ReplaceHeaderValues, config.TruncateHeaderValues:
+				where.Section = "headers"
+				m.Headers = r.transformFields(m.Headers, slot, where)
+				where.Section = "trailers"
+				m.Trailers = r.transformFields(m.Trailers, slot, where)
+			case config.RemoveBody:
+				if slices.Contains(a.Messages, message) && (len(m.Body) > 0 || r.bodies[m] == DispositionValuesRemoved) {
+					r.removeBody(m, where, DispositionRemoved)
+				}
+			case config.ReduceBodyToStructure:
+				if slices.Contains(a.Messages, message) && len(m.Body) > 0 {
+					if m.Shape == nil {
+						r.removeBody(m, where, DispositionRemoved)
+						break
+					}
+					m.Body = nil
+					r.bodies[m] = DispositionValuesRemoved
+					where.Field, where.Disposition = config.BodyValuesField, DispositionValuesRemoved
+					r.evidence.add(where)
+				}
+			case config.RemoveJSONFields, config.ReplaceJSONValues:
+				if slices.Contains(a.Messages, message) && len(m.Body) > 0 {
+					r.editBody(m, slot, where)
+				}
+			case config.RemoveFormFields:
+				if side == 0 && len(m.Body) > 0 {
+					if !admittedForm(r.source.Exchanges[index].Request) {
+						r.removeBody(m, where, DispositionRemovedUndecidable)
+						break
+					}
+					body, matched := removeParameters(string(m.Body), a.Names)
+					r.spliced(m, []byte(body), matched, config.FormFieldPrefix, where)
+				}
+			case config.RemoveQuery:
+				if side == 0 {
+					if cut := strings.IndexByte(m.Target, '?'); cut >= 0 {
+						m.Target = m.Target[:cut]
+						where.Field = config.TargetQueryField
+						r.evidence.add(where)
+					}
+				}
+			case config.RemoveQueryParameters:
+				if side == 0 {
+					if path, query, has := strings.Cut(m.Target, "?"); has {
+						kept, matched := removeParameters(query, a.Names)
+						m.Target = path + "?" + kept
+						for _, name := range matched {
+							where.Field = config.QueryFieldPrefix + name
+							r.evidence.add(where)
+						}
+					}
+				}
+			}
 		}
 	}
 	return true
 }
 
-func transformFields(fields []http1.Header, slot config.EffectiveSlot, where PolicyExclusion, exclusions *exclusionEvidence) []http1.Header {
+func (r *slotRun) transformFields(fields []http1.Header, slot config.EffectiveSlot, where PolicyExclusion) []http1.Header {
 	out := fields[:0]
 	for _, h := range fields {
-		if slices.Contains(slot.Arguments.Headers, strings.ToLower(h.Name)) {
+		name := strings.ToLower(h.Name)
+		if slices.Contains(slot.Arguments.Headers, name) {
 			switch slot.Implementation {
 			case config.RemoveHeaders:
-				exclusions.removed(where, h.Name)
+				where.Field = config.HeaderFieldPrefix + name
+				r.evidence.add(where)
 				continue
 			case config.ReplaceHeaderValues:
 				h.Value = slot.Arguments.Value
@@ -411,4 +480,79 @@ func transformFields(fields []http1.Header, slot config.EffectiveSlot, where Pol
 		out = append(out, h)
 	}
 	return out
+}
+
+// removeBody drops a body's bytes and structure; its length and framing stay.
+func (r *slotRun) removeBody(m *reconstruct.Message, where PolicyExclusion, disposition string) {
+	m.Body, m.Shape, m.ShapeRefused = nil, nil, ""
+	r.bodies[m] = DispositionRemoved
+	where.Field, where.Disposition = config.BodyField, disposition
+	r.evidence.add(where)
+}
+
+func (r *slotRun) editBody(m *reconstruct.Message, slot config.EffectiveSlot, where PolicyExclusion) {
+	var replacement []byte
+	if slot.Implementation == config.ReplaceJSONValues {
+		replacement = jsonString(slot.Arguments.Value)
+	}
+	body, hits, err := editJSON(m.Body, slot.Arguments.Pointers, replacement)
+	if err != nil {
+		r.removeBody(m, where, DispositionRemovedUndecidable)
+		return
+	}
+	var matched []string
+	for i, hit := range hits {
+		if hit {
+			matched = append(matched, slot.Arguments.Pointers[i])
+		}
+	}
+	if replacement != nil {
+		// A replaced value is not a removal and records no entry.
+		r.spliced(m, body, nil, config.JSONFieldPrefix, where)
+		return
+	}
+	r.spliced(m, body, matched, config.JSONFieldPrefix, where)
+}
+
+// spliced keeps a body whose other bytes are unchanged, records a removal for
+// each selector that matched, and derives the structure again from what is
+// kept, so it never describes a removed member.
+func (r *slotRun) spliced(m *reconstruct.Message, body []byte, matched []string, prefix string, where PolicyExclusion) {
+	for _, selector := range matched {
+		where.Field = prefix + selector
+		r.evidence.add(where)
+	}
+	if string(body) == string(m.Body) {
+		return
+	}
+	m.Body = body
+	m.Shape, m.ShapeRefused = nil, ""
+	if shape, err := jsonshape.Extract(body, r.shapes); err == nil {
+		m.Shape = &shape
+	} else {
+		m.ShapeRefused = "body structure unavailable"
+	}
+}
+
+// mark writes into the projection what policy did to each body: a removed
+// body keeps its length and framing, has no kept bytes and has structure
+// state removed; a body whose values went keeps its derived structure.
+func (r *slotRun) mark(projected *record.Reconstruction, processed reconstruct.Connection) {
+	for i, e := range processed.Exchanges {
+		for _, pair := range []struct {
+			source *reconstruct.Message
+			side   record.Side
+		}{{e.Request, projected.Exchanges[i].Request}, {e.Response, projected.Exchanges[i].Response}} {
+			if pair.side.Message == nil {
+				continue
+			}
+			switch r.bodies[pair.source] {
+			case DispositionRemoved:
+				pair.side.Message.Body.Kept = ""
+				pair.side.Message.Structure = record.Structure{State: record.StructureRemoved}
+			case DispositionValuesRemoved:
+				pair.side.Message.Body.Kept = ""
+			}
+		}
+	}
 }

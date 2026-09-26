@@ -58,7 +58,7 @@ func ValidParameterName(name string) error {
 	}
 	for _, b := range []byte(name) {
 		if b < '!' || b > '~' || strings.IndexByte("&;=%+[].", b) >= 0 {
-			return errors.New("a parameter name is printable ASCII without space, &, ;, =, %, +, [, ] or .")
+			return errors.New("a parameter name is printable ASCII without a space or any of & ; = % + . [ ]")
 		}
 	}
 	return nil

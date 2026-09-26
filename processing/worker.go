@@ -160,10 +160,12 @@ func New(options Options) (*Worker, error) {
 // their compiled order, including zero-slot pipelines. Connection inputs receive
 // metadata only. All output follows the compiled Routes. A slot failure follows
 // its resolved OnFailure; stop_pipeline persists for the rest of this worker.
-// RemoveHeaders records each actually removed field name and its exchange,
-// request/response and header/trailer location in Artifact.PolicyExclusions,
-// once per tuple and without its value. Only retained messages contribute;
-// absent fields and other operations do not. Each pipeline has its own evidence.
+// Every removal - a header, a body, a body's values, a query, a parameter or
+// a JSON member - is recorded in Artifact.PolicyExclusions with its exchange,
+// request/response, field and disposition, once per entry and without its
+// value. Only retained messages contribute; absent components, replacement and
+// truncation do not. Each pipeline has its own evidence. Body operations read
+// header facts from the message as parsed, never as an earlier slot left it.
 // New artifacts carry an explicit empty array when nothing was excluded,
 // including metadata routes; older artifacts without the member are unavailable.
 // Every candidate calls Gate.Authorize after processing, immediately before the

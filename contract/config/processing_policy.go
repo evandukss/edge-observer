@@ -146,15 +146,6 @@ func covers(slot EffectiveSlot, field ExclusionField) []string {
 	if a == nil {
 		return nil
 	}
-	whole := func() []string {
-		if field.Kind == FormFieldPrefix {
-			if slices.Contains(a.Messages, MessageRequest) {
-				return []string{MessageRequest}
-			}
-			return nil
-		}
-		return a.Messages
-	}
 	switch field.Kind {
 	case HeaderFieldPrefix:
 		if slot.Implementation == RemoveHeaders && slices.Contains(a.Headers, field.Header) {
@@ -164,11 +155,15 @@ func covers(slot EffectiveSlot, field ExclusionField) []string {
 		if slot.Implementation == RemoveBody {
 			return a.Messages
 		}
-	case BodyValuesField, FormFieldPrefix:
+	case BodyValuesField:
 		if slot.Implementation == RemoveBody || slot.Implementation == ReduceBodyToStructure {
-			return whole()
+			return a.Messages
 		}
-		if field.Kind == FormFieldPrefix && slot.Implementation == RemoveFormFields && slices.Contains(a.Names, field.Name) {
+	case FormFieldPrefix:
+		// Not reduce-body-to-structure: it keeps member names, and a JSON
+		// member name can carry a form value PHP files.
+		if (slot.Implementation == RemoveBody && slices.Contains(a.Messages, MessageRequest)) ||
+			(slot.Implementation == RemoveFormFields && slices.Contains(a.Names, field.Name)) {
 			return []string{MessageRequest}
 		}
 	case TargetQueryField:

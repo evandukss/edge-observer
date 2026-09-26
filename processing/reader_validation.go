@@ -6,12 +6,13 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/contract/record"
 )
 
 // Error text is structural and never includes a value taken from the file.
 func validateArtifact(a Artifact) error {
-	if a.Version != ArtifactVersion {
+	if a.Version != ArtifactVersion && a.Version != ArtifactVersion1 {
 		return errors.New("unsupported artifact version")
 	}
 	if a.PolicyRevision == "" || a.Route.Pipeline == "" || a.Route.Sink == "" || a.Route.Kind == "" {
@@ -45,9 +46,10 @@ func validateArtifact(a Artifact) error {
 		return err
 	}
 	seen := make(map[PolicyExclusion]bool, len(a.PolicyExclusions))
+	bodyEntry := map[*record.Message]bool{}
 	for _, exclusion := range a.PolicyExclusions {
 		e, exists := exchanges[exclusion.Exchange]
-		if !exists || seen[exclusion] || !lowerFieldName(exclusion.Name) {
+		if !exists || seen[exclusion] {
 			return errors.New("invalid policy exclusion identity")
 		}
 		seen[exclusion] = true
@@ -60,22 +62,87 @@ func validateArtifact(a Artifact) error {
 		default:
 			return errors.New("invalid policy exclusion message")
 		}
-		var fields []record.Field
-		switch exclusion.Section {
-		case "headers":
-			fields = m.Headers
-		case "trailers":
-			fields = m.Trailers
-		default:
-			return errors.New("invalid policy exclusion section")
+		if a.Version == ArtifactVersion1 {
+			if exclusion.Field != "" || exclusion.Disposition != "" || !lowerFieldName(exclusion.Name) {
+				return errors.New("invalid policy exclusion identity")
+			}
+			if err := absentHeader(m, exclusion.Section, exclusion.Name); err != nil {
+				return err
+			}
+			continue
 		}
-		for _, field := range fields {
-			if strings.EqualFold(field.Name, exclusion.Name) {
-				return errors.New("excluded field also present in retained message")
+		body, err := versionTwoExclusion(exclusion, m)
+		if err != nil {
+			return err
+		}
+		bodyEntry[m] = bodyEntry[m] || body
+	}
+	for _, e := range r.Exchanges {
+		for _, m := range []*record.Message{e.Request.Message, e.Response.Message} {
+			if m.Structure.State == record.StructureRemoved && (a.Version == ArtifactVersion1 || !bodyEntry[m]) {
+				return errors.New("removed body structure without removal evidence")
 			}
 		}
 	}
 	return nil
+}
+
+// absentHeader is that a removed header is not also present in its section.
+func absentHeader(m *record.Message, section, name string) error {
+	var fields []record.Field
+	switch section {
+	case "headers":
+		fields = m.Headers
+	case "trailers":
+		fields = m.Trailers
+	default:
+		return errors.New("invalid policy exclusion section")
+	}
+	for _, field := range fields {
+		if strings.EqualFold(field.Name, name) {
+			return errors.New("excluded field also present in retained message")
+		}
+	}
+	return nil
+}
+
+// versionTwoExclusion checks one entry against the message it names, and
+// reports whether it is a whole-body removal.
+func versionTwoExclusion(exclusion PolicyExclusion, m *record.Message) (bool, error) {
+	field, err := config.ParseExclusionField(exclusion.Field)
+	if err != nil || exclusion.Name != "" {
+		return false, errors.New("invalid policy exclusion field")
+	}
+	if (field.Kind == config.HeaderFieldPrefix) != (exclusion.Section != "") {
+		return false, errors.New("invalid policy exclusion section")
+	}
+	want := DispositionRemoved
+	switch field.Kind {
+	case config.BodyField:
+		if exclusion.Disposition == DispositionRemovedUndecidable {
+			want = DispositionRemovedUndecidable
+		}
+		if m.Body.Kept != "" || m.Structure.State != record.StructureRemoved {
+			return false, errors.New("removed body evidence contradicts the retained body")
+		}
+	case config.BodyValuesField:
+		want = DispositionValuesRemoved
+		if m.Body.Kept != "" || (m.Structure.State != record.StructureDerived && m.Structure.State != record.StructureRemoved) {
+			return false, errors.New("removed values evidence contradicts the retained body")
+		}
+	case config.TargetQueryField, config.QueryFieldPrefix, config.FormFieldPrefix:
+		if m.Kind != "request" || (field.Kind == config.TargetQueryField && strings.Contains(m.Target, "?")) {
+			return false, errors.New("query or form evidence contradicts its message")
+		}
+	case config.HeaderFieldPrefix:
+		if err := absentHeader(m, exclusion.Section, field.Header); err != nil {
+			return false, err
+		}
+	}
+	if exclusion.Disposition != want {
+		return false, errors.New("invalid policy exclusion disposition")
+	}
+	return field.Kind == config.BodyField, nil
 }
 
 func readableSide(side record.Side, kind string) bool {
