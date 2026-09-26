@@ -245,9 +245,9 @@ Argument rules:
 **A JSON pointer matches more than RFC 6901 says.** A token applied to an object matches every member
 whose name, with escapes decoded, equals the token exactly OR under Unicode simple case folding, and
 every such member is acted on, duplicates included. A token applied to an array matches the element
-at that index (`0`, or digits not starting with `0`); the token `*` matches every element of an
-array, and applied to an object matches only a member named `*`. A pointer matching nothing changes
-nothing. Where one match lies inside another, the outer one is acted on.
+at that index (`0`, or digits not starting with `0`). The token `*` matches every element of an
+array and every member of an object, since PHP iterates both alike. A pointer matching nothing
+changes nothing. Where one match lies inside another, the outer one is acted on.
 
 **A JSON body is acted on only when it is strictly valid**: one JSON value per RFC 8259 with only
 JSON whitespace around it, valid UTF-8 throughout, no byte order mark, no escape naming an unpaired
@@ -272,12 +272,15 @@ touched.
 operation earlier in the route - replacing, truncating or removing `content-type` - does not change
 what a body operation admits.
 
-**Parameter names are matched as PHP files them, and wider.** A query, or an admitted body, is split
-into parameters on both `&` and `;`. A parameter's name is its text before the first `=`, or all of
-it. The name is decoded as PHP decodes it: `+` is a space, `%` followed by two hexadecimal digits is
-that byte, and any other `%` stays itself. The NORMALISED name is the decoded name cut at its first
-NUL byte, with leading spaces removed and every space, `.` and `+` changed to `_`. A parameter is
-removed when ANY of these readings equals a configured name:
+**Parameter names are matched as PHP files them, and wider.** A query, or an admitted body, is read
+under two separator readings: `&` alone, which is PHP's default, and `&` together with `;`. In each
+reading a parameter's name is its text before the first `=`, or all of it, and **what is removed is
+the UNION of the byte ranges the two readings select**. So `card_number=AAA;BBB` loses all of
+`AAA;BBB`, which PHP files under `card_number`, and `x=1;card_number=4111` loses `card_number=4111`.
+The name is decoded as PHP decodes it: `+` is a space, `%` followed by two hexadecimal digits is that
+byte, and any other `%` stays itself. The NORMALISED name is the decoded name cut at its first NUL
+byte, with leading spaces removed and every space, `.` and `+` changed to `_`. A parameter is
+selected when ANY of these readings of its name equals a configured name:
 
 1. the decoded name;
 2. the normalised name cut at its first `[`;
@@ -285,13 +288,14 @@ removed when ANY of these readings equals a configured name:
    `[` changed to `_`;
 4. in that case, the normalised name with every `[` changed to `_`.
 
-A removed parameter goes with exactly one adjacent separator: the one after it, or the one before it
-where it was last. Empty parameters and every other byte are kept. **The readings are held by a
-differential test**: PHP's own `parse_str`, run in the laboratory participant's image over a
-generated corpus of names - every byte in every position of a short name, brackets matched and
-unmatched, whitespace, `+` and `%20`, NUL - with the test asserting that every parameter PHP files
-under a name a rule can configure is removed by a rule naming it. The capture is
-`processing/testdata/php-parse-str.json` and names the PHP version.
+Each run of removed bytes goes with exactly one adjacent separator. Where the separators on its two
+sides differ, the `;` goes and the `&` stays, so every boundary PHP reads is kept; otherwise the one
+after it goes, or the one before it where the run is last. Empty parameters and every other byte are
+kept. **The readings are held by a differential test**: PHP's own `parse_str`, run in the laboratory
+participant's image over a generated corpus of names and values - every byte in every position of a
+short name, brackets matched and unmatched, whitespace, `+` and `%20`, NUL, and `;` inside values -
+with the test asserting that every byte PHP files under a name a rule can configure is removed by a
+rule naming it. The capture is `processing/testdata/php-parse-str.json` and names the PHP version.
 
 **One body grammar per pipeline.** A pipeline whose effective slots hold `remove-form-fields`
 together with `remove-json-fields` or `replace-json-values` is refused (`body_grammar_conflict`),
@@ -331,17 +335,19 @@ framework. It is one of:
 | `message.body.values` | every body value; names, nesting and value kinds may stay | per message, `remove-body` or `reduce-body-to-structure`, both messages covered |
 | `message.target.query` | the request target from its first `?` | `remove-query` |
 | `message.query.<name>` | the query parameter; `<name>` follows the name rule above | `remove-query-parameters` naming it, or `remove-query` |
-| `message.form.<name>` | the urlencoded request body parameter; `<name>` as above | `remove-form-fields` naming it, or `remove-body` or `reduce-body-to-structure` selecting the request |
+| `message.form.<name>` | the urlencoded request body parameter; `<name>` as above | `remove-form-fields` naming it, or `remove-body` selecting the request |
 | `message.body.json<pointer>` | the JSON member or element; `<pointer>` follows the pointer rule above | per message, `remove-json-fields` selecting it with a pointer whose tokens are exactly the first tokens of `<pointer>`, or `remove-body` or `reduce-body-to-structure` selecting it; both messages covered |
 
 A route covers a message when some slot selecting that message satisfies the field, so slots may
 share the work: `remove-json-fields` on the request and `remove-body` on the response together
 satisfy `message.body.json/card`. **`reduce-body-to-structure` does not satisfy `message.body`,
-because member names are body plaintext.** Replacing or truncating a value satisfies no removal, and
-`replace-json-values` satisfies none. Other parameters, transformations, fields and target kinds are
-refused (`unsupported_transform`, `invalid_transform_parameters`). The sink must be a configured,
-routed sink. `drop_and_account` and `stop_pipeline` are the permitted failure actions. Claims and
-approvals are unsupported. Requirement IDs and policy documents also pass the general policy
+because member names are body plaintext, and for the same reason it satisfies no
+`message.form.<name>`**: a JSON member name can carry a form value PHP files, as in
+`{"&card_number=4111":1}`, and the structure keeps names. Replacing or truncating a value satisfies
+no removal, and `replace-json-values` satisfies none. Other parameters, transformations, fields and
+target kinds are refused (`unsupported_transform`, `invalid_transform_parameters`). The sink must be
+a configured, routed sink. `drop_and_account` and `stop_pipeline` are the permitted failure actions.
+Claims and approvals are unsupported. Requirement IDs and policy documents also pass the general policy
 vocabulary checks.
 
 An exclusion is a session-wide obligation, even when its declaration names one sink. Every effective
