@@ -197,7 +197,7 @@ func p3t9bAssertOutput(t *testing.T, name string, out []byte, revision string) {
 	if name == "removed" {
 		for _, side := range []string{"request", "response"} {
 			for _, section := range []string{"headers", "trailers"} {
-				want = append(want, processing.PolicyExclusion{Exchange: 0, Message: side, Section: section, Name: "authorization"})
+				want = append(want, processing.PolicyExclusion{Exchange: 0, Message: side, Field: config.HeaderFieldPrefix + "authorization", Section: section, Disposition: processing.DispositionRemoved})
 			}
 		}
 	}
@@ -216,6 +216,9 @@ func p3t9bAssertOutput(t *testing.T, name string, out []byte, revision string) {
 			t.Fatalf("LEGACY_UNAVAILABLE: legacy evidence misrepresented\n%s", out)
 		}
 	case "removed":
+		if a.Version != processing.ArtifactVersion {
+			t.Fatalf("EXCLUSION_TUPLES: artifact version %q, want %q", a.Version, processing.ArtifactVersion)
+		}
 		got := make(map[processing.PolicyExclusion]bool)
 		for _, e := range a.PolicyExclusions {
 			got[e] = true
@@ -223,13 +226,13 @@ func p3t9bAssertOutput(t *testing.T, name string, out []byte, revision string) {
 		if len(a.PolicyExclusions) != len(want) || len(got) != len(want) {
 			t.Fatalf("EXCLUSION_TUPLES: got %+v want %+v", a.PolicyExclusions, want)
 		}
+		rendered := t20iRenderedEntries(text, want[0].Field)
 		for _, e := range want {
-			line := fmt.Sprintf("policy excluded  exchange=%d message=%q section=%q name=%q (value not retained)", e.Exchange, e.Message, e.Section, e.Name)
-			if !got[e] || strings.Count(text, line) != 1 {
-				t.Fatalf("EXCLUSION_TUPLES: missing/duplicate tuple %+v\n%s", e, out)
+			if !got[e] || t20iRenderedCount(rendered, e) != 1 {
+				t.Fatalf("EXCLUSION_TUPLES: missing/duplicate entry %+v\n%s", e, out)
 			}
 		}
-		if strings.Count(text, "policy excluded  exchange=") != len(want) || strings.Contains(text, "policy exclusions  unavailable:") || strings.Contains(text, "policy exclusions  none excluded") {
+		if len(rendered) != len(want) || strings.Contains(text, "policy exclusions  unavailable:") || strings.Contains(text, "policy exclusions  none excluded") {
 			t.Fatal("EXCLUSION_TUPLES: contradictory disposition")
 		}
 	default:
@@ -273,6 +276,38 @@ func p3t9bAssertOutput(t *testing.T, name string, out []byte, revision string) {
 			t.Fatalf("TRANSFORM_PRESENT: %s must keep transformed field value %q", name, value)
 		}
 	}
+}
+
+// t20iRenderedEntries are the lines of the text rendering, outside the
+// indented artifact, that name this field, a message and the removed
+// disposition. The version 2 line has no published format, so an entry is
+// matched by what it names rather than by its layout.
+func t20iRenderedEntries(text, field string) []string {
+	var lines []string
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.ContainsAny(trimmed[:1], "\"{}[]") {
+			continue
+		}
+		if strings.Contains(line, field) && strings.Contains(line, processing.DispositionRemoved) &&
+			(strings.Contains(line, "request") || strings.Contains(line, "response")) {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+// t20iRenderedCount is how many rendered lines name e's message and section.
+// The section is looked for outside the field, which itself holds "headers".
+func t20iRenderedCount(lines []string, e processing.PolicyExclusion) int {
+	count := 0
+	for _, line := range lines {
+		rest := strings.ReplaceAll(line, e.Field, "")
+		if strings.Contains(rest, e.Message) && strings.Contains(rest, e.Section) {
+			count++
+		}
+	}
+	return count
 }
 
 func p3t9bAbsent(t *testing.T, assertion string, out []byte, value string) {
