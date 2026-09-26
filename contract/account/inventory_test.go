@@ -81,6 +81,15 @@ var represented = map[string]string{
 	".admitted.known": "capture.admitted.state", ".admitted.why": "capture.admitted.why",
 	".admitted.descendants": "capture.admitted.descendants",
 
+	".loss.under_way.known":        "capture.loss.under_way.state",
+	".loss.under_way.why":          "capture.loss.under_way.why",
+	".loss.under_way.threads":      "capture.loss.under_way.threads",
+	".loss.under_way.undetermined": "capture.loss.under_way.undetermined",
+	".loss.under_way.first.pid":    "capture.loss.under_way.first.pid.value",
+	".loss.under_way.first.tid":    "capture.loss.under_way.first.tid.value",
+	".loss.under_way.first.fd":     "capture.loss.under_way.first.fd.value",
+	".loss.under_way.first.call":   "capture.loss.under_way.first.call.value",
+
 	".admissions.rule": "scope.coverage.rule", ".admissions.covered": "scope.coverage.covered",
 	".admissions.by_target[].target":  "scope.coverage.by_target[].target",
 	".admissions.by_target[].covered": "scope.coverage.by_target[].covered",

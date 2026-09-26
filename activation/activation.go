@@ -109,8 +109,10 @@ type Capture struct {
 // writerExhausted must be the approved-output writer's non-nil sticky signal,
 // created before this call. A nil signal refuses as delivery_gate; an already
 // closed signal invalidates the new gate and refuses verification. The same
-// signal must be selected by the session controller. Intake.Exhausted is not
-// interchangeable: its refusal stops input while admitted work stays drainable.
+// signal must be selected by the session controller. The intake's own signal is
+// wired to the gate here as a separate source with its own reason,
+// intake_exhausted: a refused record leaves capture's input incomplete, so
+// nothing still pending is released after it.
 func Prepare(read policy.Policy, participants []process.Process, maxEvents uint64, writerExhausted <-chan struct{}) (*Capture, error) {
 	if read.Processing == nil || read.ProcessingRevision == "" {
 		return nil, &Refusal{Check: ProcessingPlan, PID: os.Getpid(), Detail: "a compiler-produced processing plan and revision are required"}
@@ -122,7 +124,8 @@ func Prepare(read policy.Policy, participants []process.Process, maxEvents uint6
 	if err != nil {
 		return nil, &Refusal{Check: DeliveryGate, PID: os.Getpid(), Detail: err.Error()}
 	}
-	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: maxEvents, StorageExhausted: writerExhausted})
+	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: maxEvents, StorageExhausted: writerExhausted,
+		IntakeExhausted: store.Exhausted()})
 	if err != nil {
 		_ = store.Close()
 		return nil, &Refusal{Check: DeliveryGate, PID: os.Getpid(), Detail: err.Error()}

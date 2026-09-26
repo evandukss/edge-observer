@@ -185,7 +185,8 @@ session's account as it stands.
     sudo ./observer stop observer.config.json
 
 (or Ctrl-C in the first terminal) ends the run. `stop` prints the session it ended, whether it sealed
-completely, and the path of the account it sealed.
+completely, on the same line anything the account says was lost and why release was refused, and the
+path of the account it sealed.
 
 ### 4. Inspect
 

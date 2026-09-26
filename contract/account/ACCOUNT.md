@@ -125,6 +125,7 @@ The dotted path of every block, and each is required wherever its parent block i
     capture.capability
     capture.seen
     capture.loss
+    capture.loss.under_way
     capture.admitted
     capture.ordering
     capture.refused
@@ -226,7 +227,8 @@ Every member is its own block, so one that could not be read is not read as the 
 |---|---|
 | `capability` | the capability facts of the ATTACHMENT, and `sentence`, the observer's own sentence saying what it can report |
 | `seen` | `transfers`, `unmeasured`, `empty`, `records`, `connections`, `closed`, `early`, and what capture could not place: `rejected`, `unattributed`, `endings_unmatched`, `connections_unrecorded` |
-| `loss` | `dropped`, `unmatched`, `occasion` `{first, last, handle, pid, tid}`: the first and last unmatched return on the monotonic clock, and the first one's handle, process and thread, each undetermined where no occasion was stated. Losses only |
+| `loss` | `dropped`, `unmatched`, `occasion` `{first, last, handle, pid, tid}`: the first and last unmatched return on the monotonic clock, and the first one's handle, process and thread, each undetermined where no occasion was stated; and `under_way`. Losses only |
+| `loss.under_way` | calls that began before the probes were placed, which nothing in the kernel sees: no entry is recorded and their return fires nothing. The approved processes' threads are read before placement and after. `threads` is those blocked inside the same socket system call on the same descriptor in both readings and switched out no further, so the call each is inside began before the probes; it counts socket I/O, not TLS calls. `undetermined` is those that ran meanwhile, whose loss is not known and is never read as none. `first` `{pid, tid, fd, call}` names the first of `threads`, each undetermined where there is none. `unavailable` where a thread could not be read |
 | `admitted` | `descendants`. Not a loss |
 | `ordering` | `disordered`, `unstamped`, `tolerated`, `lost`, `retired`, `unexplained`. Never folded into `loss`: a session that could not order its observations has not lost them |
 | `refused` | `reasons` `{reason: count}` |
@@ -264,7 +266,10 @@ prefix and also count a refused suffix. `output_failures` counts failed approved
 artifact-serialization defect instead terminates processing and names the binary defect in the seal
 reason; it does not increment either counter. Neither counter is policy suppression or capture loss,
 which retain their own dispositions and readings. `gate_reason` is empty when the gate has no
-invalidation reason; `unknown_length`, `input_limit` and `storage_exhausted` remain distinguishable.
+invalidation reason; otherwise it is one of the reasons `probe.GateReasons` classifies as invalidating
+the capture - `input_limit`, `storage_exhausted`, `intake_exhausted`, `unknown_length` and
+`unknown_kind` - and each remains distinguishable. `intake_exhausted` is the volatile intake refusing a
+record: capture's input is then incomplete, and nothing still pending is released.
 `stopped_pipelines` names pipelines stopped by their failure action, not a session terminal state.
 When only this aggregate is supplied, `pipelines` is empty because attribution was not supplied;
 that is not a per-pipeline zero. Aggregate counts must never be copied onto a synthetic pipeline

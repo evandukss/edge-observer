@@ -414,6 +414,11 @@ type Session struct {
 	// closing, so the account can say it could not find out what was lost.
 	failed  atomic.Bool
 	failure atomic.Pointer[string]
+
+	// underWay is what the threads said at attach about calls that began before
+	// the probes were placed (underway.go). Written once, before the session is
+	// returned.
+	underWay probe.UnderWay
 }
 
 // readerFailure is why the ring reader stopped, or empty where it stopped
@@ -534,6 +539,10 @@ func Attach(options Options) (*Session, error) {
 		return nil, err
 	}
 
+	// The threads before any probe exists, so a call already under way can be told
+	// from one that began after (underway.go).
+	before := session.readBefore()
+
 	// Every function is unmeasurable before any probe is placed, and cleared only
 	// once its return probe is confirmed: an entry probe is live the moment it is
 	// placed.
@@ -564,6 +573,9 @@ func Attach(options Options) (*Session, error) {
 		_ = session.Close()
 		return nil, err
 	}
+
+	// And the threads again, over everything admitted by now.
+	session.underWay = session.readAfter(before)
 
 	// And the sockets those processes already hold (seedSockets).
 	if err := session.seedSockets(); err != nil {
@@ -2080,12 +2092,12 @@ func (s *Session) Reads() (map[admission.Generation]uint64, error) {
 func (s *Session) Dropped() (int64, error) { return s.stat(obpf.StatReserveFailed) }
 
 // Unmatched is how many returns fired with nothing recorded on the way in, so
-// the call's count was never read. It may cover a call already inside the
-// function when the probes were placed; whether that return fires varies
-// between runs on some kernels, so neither zero nor one is evidence about such
-// a call. Attaching before the traffic starts bounds the loss. Returns of entry
-// points reached inside a probed call are not counted (struct call's live
-// flag, bpf/ssl.bpf.h).
+// the call's count was never read: calls that entered after the probes were
+// placed and recorded nothing (probe.Losses). A call already inside the
+// function when the probes were placed returns here only where another return
+// probe on that function armed it at entry; otherwise its return fires nothing,
+// and UnderWay accounts for it. Returns of entry points reached inside a probed
+// call are not counted (struct call's live flag, bpf/ssl.bpf.h).
 func (s *Session) Unmatched() (int64, error) { return s.stat(obpf.StatUnmatched) }
 
 // Unmeasurable is how many calls entered a function this session holds no

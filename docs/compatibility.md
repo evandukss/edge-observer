@@ -99,8 +99,9 @@ Attaching needs root, or these capabilities:
 
     CAP_BPF  CAP_PERFMON  CAP_SYS_ADMIN  CAP_SYS_PTRACE  CAP_SYS_RESOURCE  CAP_DAC_READ_SEARCH
 
-They are needed to load the programs and place the probes. The observer drops every capability once
-the probes are placed.
+They are needed to load the programs and place the probes, and `CAP_SYS_PTRACE` to read the approved
+processes' threads before and after placement, which is how a call already under way when the probes
+are placed is counted. The observer drops every capability once the probes are placed.
 
 **In a container**, whether the observer needs the host's pid namespace is not established. Its tests
 need it: in one run without it, 27 of their 182 failed. Two of those failures name a cause, the tests
