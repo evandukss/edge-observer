@@ -362,7 +362,8 @@ type t18Artifact struct {
 		} `json:"exchanges"`
 	} `json:"reconstruction"`
 	PolicyExclusions []struct {
-		Name string `json:"name"`
+		Field       string `json:"field"`
+		Disposition string `json:"disposition"`
 	} `json:"policy_exclusions"`
 }
 
@@ -408,12 +409,14 @@ func t18Targets(records []t18Artifact) []string {
 }
 
 // t18Excluded counts the policy exclusions of this header name the records
-// carry.
+// carry. The observer writes observer.approved/2, where a header entry is the
+// field message.headers.<name> with disposition removed and has no name
+// (docs/approved-inspection.md).
 func t18Excluded(records []t18Artifact, name string) int {
 	count := 0
 	for _, one := range records {
 		for _, excluded := range one.PolicyExclusions {
-			if excluded.Name == name {
+			if excluded.Field == "message.headers."+name && excluded.Disposition == "removed" {
 				count++
 			}
 		}
