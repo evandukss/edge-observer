@@ -198,7 +198,7 @@ func TestProcessingReplacementResolvesArgumentsAndFailureAction(t *testing.T) {
 	p.Replacements = []config.Replacement{{Pipeline: "exchanges", Slot: "s", Implementation: config.TruncateHeaderValues, Configuration: json.RawMessage(`{"headers":["X-Public"],"length":3}`)}}
 	plan := acceptedProcessing(t, c, p)
 	s := plan.Pipelines()[0].Slots[0]
-	if s.Implementation != config.TruncateHeaderValues || s.OnFailure != config.OnFailureStopPipeline || s.SelectedBy != "pack:profile" || !reflect.DeepEqual(s.Arguments, &config.HeaderArguments{Headers: []string{"x-public"}, Length: 3}) {
+	if s.Implementation != config.TruncateHeaderValues || s.OnFailure != config.OnFailureStopPipeline || s.SelectedBy != "pack:profile" || !reflect.DeepEqual(s.Arguments, &config.Arguments{Headers: []string{"x-public"}, Length: 3}) {
 		t.Fatalf("executor received the wrong resolved slot: %+v", s)
 	}
 	p.Replacements[0].Configuration = json.RawMessage(`{"headers":["x-public"],"length":-1}`)

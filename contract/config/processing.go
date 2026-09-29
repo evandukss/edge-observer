@@ -105,10 +105,6 @@ type Arguments struct {
 	Names    []string `json:"names,omitempty"`
 }
 
-// HeaderArguments is the name Arguments had while every operation acted on
-// headers.
-type HeaderArguments = Arguments
-
 // ProcessingPlan is the sole execution form. A nil plan cannot activate.
 // Pipelines run in order on independent copies of the input; their slots run
 // in order. Every output goes through Routes, including the zero-slot path.
@@ -142,9 +138,6 @@ type Exclusion struct {
 	Header        string `json:"header,omitempty"`
 	FailureAction string `json:"failure_action"`
 }
-
-// HeaderExclusion is the name Exclusion had while every exclusion was a header.
-type HeaderExclusion = Exclusion
 
 // CompileProcessing resolves configuration-only packs and checks the bounded
 // runtime profile before capture admission. It never attaches or executes.
