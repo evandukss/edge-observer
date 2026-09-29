@@ -244,7 +244,7 @@ func TestT20iEachRefusalBesideANeighbourThatActivatesAndWrites(t *testing.T) {
 			neighbour: t20iSetup{pipelines: t20iRoute(t20iSlot("body", config.RemoveBody, t20iMessages("request"))), requirements: formRequirement},
 			exchange:  t20iFormExchange("form-by-body")},
 		// Contract 52 revision 25: structure keeps member names, and a member
-		// name can carry a value PHP files as a form field.
+		// name can carry a form parameter.
 		{name: "reduce-does-not-satisfy-a-form-field",
 			refused: t20iSetup{pipelines: t20iRoute(t20iSlot("reduce", config.ReduceBodyToStructure, t20iMessages("request"))), requirements: formRequirement},
 			reasons: []string{string(config.ExclusionNotEnforced)}, mention: routeNamed("t20i-form-card"),

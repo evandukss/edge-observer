@@ -107,8 +107,8 @@ func TestT20iRemoveJSONFieldsRemovesEveryMatchAndKeepsEveryOtherByte(t *testing.
 		decided("j-array", `{"cards":[{"number":"`+p("J_ARRAY1")+`","brand":"`+k("J_ARRAY1")+`"},{"number":"`+p("J_ARRAY2")+`","brand":"`+k("J_ARRAY2")+`"}]}`,
 			`{"cards":[{"brand":"`+k("J_ARRAY1")+`"},{"brand":"`+k("J_ARRAY2")+`"}]}`,
 			[]string{p("J_ARRAY1"), p("J_ARRAY2")}, []string{k("J_ARRAY1"), k("J_ARRAY2")}, "/cards/*/number"),
-		// Contract 52 revision 25: "*" matches every object member too, since
-		// PHP iterates an object exactly like an array.
+		// Contract 52 revision 25: "*" matches every object member too, as it
+		// matches every array element.
 		decided("j-object-members", `{"cards":{"a":{"number":"`+p("J_OBJECT1")+`","brand":"`+k("J_OBJECT1")+`"},"0":{"number":"`+p("J_OBJECT2")+`","brand":"`+k("J_OBJECT2")+`"}}}`,
 			`{"cards":{"a":{"brand":"`+k("J_OBJECT1")+`"},"0":{"brand":"`+k("J_OBJECT2")+`"}}}`,
 			[]string{p("J_OBJECT1"), p("J_OBJECT2")}, []string{k("J_OBJECT1"), k("J_OBJECT2")}, "/cards/*/number"),

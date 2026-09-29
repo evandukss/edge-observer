@@ -13,7 +13,7 @@ import (
 	"github.com/evandukss/edge-observer/processing"
 )
 
-// t20iVariant is a parameter PHP files under card_number, with "@" where the
+// t20iVariant is a parameter named card_number, with "@" where the
 // protected value goes. exact is true where the rest of the query or body
 // after removal is determined: one parameter removed, last, "&" only.
 type t20iVariant struct {
@@ -22,8 +22,8 @@ type t20iVariant struct {
 	markers         []string
 }
 
-// t20iVariants are the names the contract's matching covers for the
-// configured name card_number, each read by PHP 8.5.1 as card_number.
+// t20iVariants are the parameters exact matching removes for the configured
+// name card_number: the name once, and the name twice.
 func t20iVariants(prefix string) []t20iVariant {
 	one := func(name, parameter string) t20iVariant {
 		marker := t20iProtected(prefix + "_" + strings.ToUpper(strings.ReplaceAll(name, "-", "_")))
@@ -40,16 +40,17 @@ func t20iVariants(prefix string) []t20iVariant {
 	}
 }
 
-// t20iParameters is a query or urlencoded body split as the contract splits
-// it, on both separators.
+// t20iParameters splits a query or urlencoded body on & and on ;, finer than
+// the contract's split on & alone. It is used only to find a parameter that
+// must survive, which the finer split still finds.
 func t20iParameters(s string) []string {
 	return strings.FieldsFunc(s, func(r rune) bool { return r == '&' || r == ';' })
 }
 
-// remove-query-parameters under message.query.card_number: every name PHP
-// files under card_number goes, with every byte of its value as PHP reads it,
-// and every other parameter stays.
-func TestT20iRemoveQueryParametersRemovesEveryNamePHPFilesUnderTheConfiguredName(t *testing.T) {
+// remove-query-parameters under message.query.card_number: every parameter
+// named card_number goes, with every byte of its value, and every other
+// parameter stays.
+func TestT20iRemoveQueryParametersRemovesEveryParameterWithTheConfiguredName(t *testing.T) {
 	var cases []t20iCase
 	entry := t20iEntry{"request", config.QueryFieldPrefix + "card_number", "", processing.DispositionRemoved}
 	for _, v := range t20iVariants("QP") {
@@ -109,10 +110,10 @@ func TestT20iRemoveQueryParametersRemovesEveryNamePHPFilesUnderTheConfiguredName
 }
 
 // remove-form-fields under message.form.card_number. An admitted urlencoded
-// body loses every name PHP files under card_number and keeps the rest; a
+// body loses every parameter named card_number and keeps the rest; a
 // request body the rule does not admit goes whole; a response body is not
 // touched.
-func TestT20iRemoveFormFieldsRemovesEveryNamePHPFilesUnderTheConfiguredName(t *testing.T) {
+func TestT20iRemoveFormFieldsRemovesEveryParameterWithTheConfiguredName(t *testing.T) {
 	var cases []t20iCase
 	entry := t20iEntry{"request", config.FormFieldPrefix + "card_number", "", processing.DispositionRemoved}
 	keepHeader := t20iHeader{"X-T20i-Keep", t20iPermitted("FF_HEADER")}
@@ -160,8 +161,8 @@ func TestT20iRemoveFormFieldsRemovesEveryNamePHPFilesUnderTheConfiguredName(t *t
 				t20iKept(t, x.Request.Message, "note="+k("FF_CHUNK"))
 				t20iEvidence(t, a, x, entry)
 			}},
-		// Contract 52 revision 25's form input: valid JSON that PHP reads as a
-		// urlencoded body carrying card_number.
+		// Contract 52 revision 25's form input: valid JSON that, split on & as
+		// a urlencoded body, carries a parameter named card_number.
 		t20iCase{name: "ff-json-named", pieces: []string{t20iRequest("POST", "/t20i/ff-json-named", append(slices.Clone(t20iForm), keepHeader),
 			`{"&card_number=`+p("FF_JSON_NAMED")+`":1}`)},
 			protected: []string{p("FF_JSON_NAMED")}, permitted: []string{k("FF_HEADER")},

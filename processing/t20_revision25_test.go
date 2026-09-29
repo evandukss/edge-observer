@@ -9,7 +9,7 @@ import (
 )
 
 // A * token matches every member of an object as well as every element of
-// an array, as PHP iterates both alike.
+// an array.
 func TestT20WildcardMatchesObjectMembers(t *testing.T) {
 	rule := t20Slot("card", config.RemoveJSONFields, `{"messages":["request"],"pointers":["/cards/*/number"]}`)
 	body := `{"cards":{"first":{"number":"` + t20Card + `","other":"` + t20Other + `"},"second":{"number":"4000000000000002"}}}`
@@ -23,7 +23,7 @@ func TestT20WildcardMatchesObjectMembers(t *testing.T) {
 }
 
 // reduce-body-to-structure keeps member names, and a JSON member name can
-// carry a form value PHP files, so it satisfies no form field exclusion.
+// carry a form parameter, so it satisfies no form field exclusion.
 func TestT20ReduceDoesNotSatisfyAFormField(t *testing.T) {
 	requirement := []cp.Requirement{t20Requirement(config.FormFieldPrefix + "card_number")}
 	t20Refused(t, config.ExclusionNotEnforced, requirement,
@@ -32,8 +32,8 @@ func TestT20ReduceDoesNotSatisfyAFormField(t *testing.T) {
 	t20Writes(t, requirement, request, goodResponse, pipeline("exchanges", t20Slot("r", config.RemoveBody, `{"messages":["request"]}`)))
 	t20Writes(t, requirement, request, goodResponse, pipeline("exchanges", t20Slot("r", config.RemoveFormFields, `{"names":["card_number"]}`)))
 
-	// The case the rule exists for: the structure keeps a name that PHP,
-	// reading the same bytes as a form, files the value under.
+	// The case the rule exists for: the structure keeps a name that, read as a
+	// form split on &, is a card_number parameter carrying the value.
 	plan := t20Plan(t, pipeline("exchanges", t20Slot("r", config.ReduceBodyToStructure, `{"messages":["request"]}`)))
 	_, _, text := t20Exchange(t, plan, t20Post("/pay", "application/json", `{"&card_number=`+t20Card+`":1}`), goodResponse)
 	if !strings.Contains(text, t20Card) {
