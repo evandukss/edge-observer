@@ -49,16 +49,17 @@ func ParseExclusionField(field string) (ExclusionField, error) {
 	return ExclusionField{}, errors.New("the field is not one of the supported exclusion field forms")
 }
 
-// ValidParameterName is the configured-name rule for query and form parameters.
-// The refused bytes are the ones the matching readings change or split on, so
-// a name holding one could never be compared against what PHP files.
+// ValidParameterName is the configured-name rule for query and form
+// parameters: 1 to MaxParameterNameBytes bytes, each printable ASCII other than
+// space. A name is compared literally with the percent-decoded name as sent,
+// so any such byte can be matched.
 func ValidParameterName(name string) error {
 	if name == "" || len(name) > MaxParameterNameBytes {
 		return fmt.Errorf("a parameter name is between 1 and %d bytes", MaxParameterNameBytes)
 	}
 	for _, b := range []byte(name) {
-		if b < '!' || b > '~' || strings.IndexByte("&;=%+[].", b) >= 0 {
-			return errors.New("a parameter name is printable ASCII without a space or any of & ; = % + . [ ]")
+		if b < '!' || b > '~' {
+			return errors.New("a parameter name is printable ASCII without a space")
 		}
 	}
 	return nil

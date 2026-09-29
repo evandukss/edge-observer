@@ -171,8 +171,8 @@ func (j *jsonEditor) object(depth int, active []cursor) error {
 		}
 		j.pos++
 		j.space()
-		// * matches every member as it matches every element: PHP iterates
-		// objects and arrays alike.
+		// * matches every member as it matches every element: an application
+		// can iterate objects and arrays alike.
 		act, next := j.descend(active, func(token string) bool { return token == "*" || name == token || strings.EqualFold(name, token) })
 		valueStart, err := j.value(depth+1, next)
 		if err != nil {

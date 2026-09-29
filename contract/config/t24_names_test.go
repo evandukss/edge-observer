@@ -20,7 +20,7 @@ func TestT24ParameterNameGrammar(t *testing.T) {
 			if got := plan.Pipelines()[0].Slots[0].Arguments.Names; len(got) != 7 || got[0] != "card.number" || got[1] != "items[]" {
 				t.Fatalf("PROPERTY: the names did not resolve as written: %q", got)
 			}
-			for _, refused := range []string{`{"names":["card number"]}`, `{"names":[" card"]}`, `{"names":["né"]}`, `{"names":["a\tb"]}`, `{"names":["a\u007fb"]}`} {
+			for _, refused := range []string{`{"names":["card number"]}`, `{"names":[" card"]}`, `{"names":["n\u00e9"]}`, `{"names":["a\tb"]}`, `{"names":["a\u007fb"]}`} {
 				c.Pipelines[0].Slots[0].Configuration = json.RawMessage(refused)
 				refusedProcessing(t, c, config.InvalidBuiltinArguments)
 			}

@@ -161,7 +161,7 @@ func covers(slot EffectiveSlot, field ExclusionField) []string {
 		}
 	case FormFieldPrefix:
 		// Not reduce-body-to-structure: it keeps member names, and a JSON
-		// member name can carry a form value PHP files.
+		// member name can carry a form parameter, as in {"&card_number=4111":1}.
 		if (slot.Implementation == RemoveBody && slices.Contains(a.Messages, MessageRequest)) ||
 			(slot.Implementation == RemoveFormFields && slices.Contains(a.Names, field.Name)) {
 			return []string{MessageRequest}

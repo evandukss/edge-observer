@@ -205,10 +205,11 @@ For example, replacing `x-public` with `abcdef` and then truncating it to three 
 
 **The guarantee is a pair.** The component operations - `remove-body`, `reduce-body-to-structure`
 and `remove-query` - never parse inside what they remove, cannot fail to decide, and hold whatever
-the application. The field operations parse, and they are claimed sound only for the parser the
-differential test below ran against: PHP, at the version recorded in its capture. For any other
-parser they remove MORE - case folding and positive admission see to that - which is not the same
-as sound. Where a field operation cannot decide, it removes the whole body, never less.
+the application. The field operations parse, and they hold only for an application that reads the
+part as they do: JSON members by the rules below, and parameters by their names exactly as sent,
+once percent-decoded. An application that reads names differently needs the component operations
+for a guarantee. Where a field operation cannot decide, it removes the whole body or query, never
+less.
 
 | implementation | members | action |
 |---|---|---|
@@ -235,10 +236,8 @@ Argument rules:
   document, is refused, since `remove-body` removes a whole body. In a token `~` is followed by `0`
   or `1`, read as `~` and `/`; any other `~` is refused.
 - `names` is a nonempty list of at most `MaxFieldSelectors` names, distinct exactly. A name is 1 to
-  `MaxParameterNameBytes` bytes, each printable ASCII (`!` to `~`) other than `&`, `;`, `=`, `%`,
-  `+`, `[`, `]` and `.`. Those are refused because the matching below never compares a name holding
-  them against anything that can be configured; `card_number` already matches `card.number`,
-  `card number` and `card[number`.
+  `MaxParameterNameBytes` bytes, each printable ASCII other than space (`!` to `~`). It is compared
+  literally with the decoded name, so `card.number` and `items[]` name exactly those parameters.
 - `value` is a string of at most `MaxJSONValueBytes` printable ASCII bytes (space to `~`); empty is
   allowed. It is escaped as a JSON string where it is written.
 
@@ -246,8 +245,7 @@ Argument rules:
 whose name, with escapes decoded, equals the token exactly OR under Unicode simple case folding, and
 every such member is acted on, duplicates included. A token applied to an array matches the element
 at that index (`0`, or digits not starting with `0`). The token `*` matches every element of an
-array and every member of an object, since PHP iterates both alike. A pointer matching nothing
-changes nothing. Where one match lies inside another, the outer one is acted on.
+array and every member of an object. A pointer matching nothing changes nothing. Where one match lies inside another, the outer one is acted on.
 
 **A JSON body is acted on only when it is strictly valid**: one JSON value per RFC 8259 with only
 JSON whitespace around it, valid UTF-8 throughout, no byte order mark, no escape naming an unpaired
@@ -272,30 +270,17 @@ touched.
 operation earlier in the route - replacing, truncating or removing `content-type` - does not change
 what a body operation admits.
 
-**Parameter names are matched as PHP files them, and wider.** A query, or an admitted body, is read
-under two separator readings: `&` alone, which is PHP's default, and `&` together with `;`. In each
-reading a parameter's name is its text before the first `=`, or all of it, and **what is removed is
-the UNION of the byte ranges the two readings select**. So `card_number=AAA;BBB` loses all of
-`AAA;BBB`, which PHP files under `card_number`, and `x=1;card_number=4111` loses `card_number=4111`.
-The name is decoded as PHP decodes it: `+` is a space, `%` followed by two hexadecimal digits is that
-byte, and any other `%` stays itself. The NORMALISED name is the decoded name cut at its first NUL
-byte, with leading spaces removed and every space, `.` and `+` changed to `_`. A parameter is
-selected when ANY of these readings of its name equals a configured name:
+**Parameter names match exactly as sent.** A query, or an admitted body, is split into parameters
+on `&` alone; `;` is an ordinary byte. A parameter's name is its text before the first `=`, or all
+of it. The name is decoded once - `+` is a space and `%` followed by two hexadecimal digits is that
+byte - and the parameter is removed when its decoded name equals a configured name exactly. Nothing
+else is read into a name: `card.number`, `card_number[]` and ` card_number` are other names than
+`card_number`. **A `%` not followed by two hexadecimal digits, anywhere in a name or a value,
+leaves the part undecidable**: the whole query goes, as `remove-query` removes it, or the whole
+body, and the evidence says `removed_undecidable`.
 
-1. the decoded name;
-2. the normalised name cut at its first `[`;
-3. where the first `[` of the normalised name has no `]` after it, the normalised name with that
-   `[` changed to `_`;
-4. in that case, the normalised name with every `[` changed to `_`.
-
-Each run of removed bytes goes with exactly one adjacent separator. Where the separators on its two
-sides differ, the `;` goes and the `&` stays, so every boundary PHP reads is kept; otherwise the one
-after it goes, or the one before it where the run is last. Empty parameters and every other byte are
-kept. **The readings are held by a differential test**: PHP's own `parse_str`, run in the laboratory
-participant's image over a generated corpus of names and values - every byte in every position of a
-short name, brackets matched and unmatched, whitespace, `+` and `%20`, NUL, and `;` inside values -
-with the test asserting that every byte PHP files under a name a rule can configure is removed by a
-rule naming it. The capture is `processing/testdata/php-parse-str.json` and names the PHP version.
+A removed run of parameters goes with exactly one adjacent `&`: the one after it, or the one before
+it where the run is last. Empty parameters and every other byte are kept.
 
 **One body grammar per pipeline.** A pipeline whose effective slots hold `remove-form-fields`
 together with `remove-json-fields` or `replace-json-values` is refused (`body_grammar_conflict`),
@@ -307,11 +292,11 @@ because each removes the other's bodies whole. Two pipelines is how an operator 
   holding JSON, base64, a JWT. The application decodes it and no rule looks inside;
 - a secret in the request PATH, such as `/reset/<token>`;
 - a URL inside a header value, such as `location` or `referer`; `remove-headers` removes the header;
-- a framework that merges grammars, such as Laravel's `input()` or Rails' `params`, reading the
-  query, the form body and top-level JSON members under one name: such an application needs one
-  exclusion per grammar;
-- PHP versions other than the one the differential test ran against;
-- any other parser, for which the field operations remove more but are not claimed sound.
+- an application that reads the query, the form body and top-level JSON members under one name:
+  it needs one exclusion per grammar;
+- an application that reads a parameter name other than exactly as sent - rewriting characters in
+  it, reading brackets as nesting, or splitting on `;` - for which the parameter operations are not
+  sound; the component operations hold for it.
 
 #### Mandatory exclusions
 
@@ -342,7 +327,7 @@ A route covers a message when some slot selecting that message satisfies the fie
 share the work: `remove-json-fields` on the request and `remove-body` on the response together
 satisfy `message.body.json/card`. **`reduce-body-to-structure` does not satisfy `message.body`,
 because member names are body plaintext, and for the same reason it satisfies no
-`message.form.<name>`**: a JSON member name can carry a form value PHP files, as in
+`message.form.<name>`**: a JSON member name can carry a form parameter, as in
 `{"&card_number=4111":1}`, and the structure keeps names. Replacing or truncating a value satisfies
 no removal, and `replace-json-values` satisfies none. Other parameters, transformations, fields and
 target kinds are refused (`unsupported_transform`, `invalid_transform_parameters`). The sink must be
@@ -366,10 +351,10 @@ routes cannot itself establish that the runtime respects this boundary.
 
 **What the approved output says.** Every removal is recorded in the artifact, `observer.approved/2`,
 as an entry naming the exchange, the message, the field and a disposition - `removed`,
-`values_removed`, or `removed_undecidable` for a whole body a field operation could not decide - and
-only where the component was present, which is what separates excluded from never present.
-Replacement and truncation add no entry. The observer's approved inspection document states the
-shape, outside this contract bundle.
+`values_removed`, or `removed_undecidable` for a whole body or query a field operation could not
+decide - and only where the component was present, which is what separates excluded from never
+present. Replacement and truncation add no entry. The observer's approved inspection document states
+the shape, outside this contract bundle.
 
 #### Bounds and refusals
 

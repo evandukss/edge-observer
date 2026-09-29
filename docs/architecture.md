@@ -108,12 +108,13 @@ the reconstruction and its truncation, and the actual connection ending remains 
 
 `policy_exclusions` records actual removals by policy in that pipeline's retained messages: the
 exchange index, request or response, the field removed and a disposition (`removed`,
-`values_removed`, or `removed_undecidable` for a body a field operation could not decide), never its
-value. Each entry appears once; array order has no meaning. Configured-but-absent names, replacement
-and truncation add no entry. Every new artifact carries an array, including `[]` for no removals and
-for metadata routes. An older artifact with the member absent (or null) has unavailable evidence,
-not known-empty evidence. Empty evidence says nothing about an unpublished or indeterminate suffix.
-These encoded bytes share the approved-output allowance with the rest of the artifact.
+`values_removed`, or `removed_undecidable` for a body or query a field operation could not decide),
+never its value. Each entry appears once; array order has no meaning. Configured-but-absent names,
+replacement and truncation add no entry. Every new artifact carries an array, including `[]` for no
+removals and for metadata routes. An older artifact with the member absent (or null) has unavailable
+evidence, not known-empty evidence. Empty evidence says nothing about an unpublished or
+indeterminate suffix. These encoded bytes share the approved-output allowance with the rest of the
+artifact.
 
 The command runs the worker on one serial goroutine, separate from the controller that selects
 stop, gate withdrawal and writer exhaustion. It takes queued intake on a 10 ms cadence; elapsed

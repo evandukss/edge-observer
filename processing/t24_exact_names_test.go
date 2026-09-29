@@ -13,7 +13,7 @@ func TestT24ParameterNamesMatchExactlyAsSent(t *testing.T) {
 	const kept = "card.number=T24KEEP1&card_number%5B%5D=T24KEEP2&%20card_number=T24KEEP3&Card_Number=T24KEEP4&note=" + t20Other
 	for _, tc := range []struct {
 		name, implementation, text, want string
-		survivors                         []string
+		survivors                        []string
 	}{
 		{"query", config.RemoveQueryParameters, "card_number=" + t20Card + "&" + kept, kept,
 			[]string{"T24KEEP1", "T24KEEP2", "T24KEEP3", "T24KEEP4", t20Other}},

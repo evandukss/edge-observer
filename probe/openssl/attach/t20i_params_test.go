@@ -36,26 +36,7 @@ func t20iVariants(prefix string) []t20iVariant {
 	}
 	return []t20iVariant{
 		one("exact", "card_number=@"),
-		one("dot", "card.number=@"),
-		one("plus", "card+number=@"),
-		one("space", "card%20number=@"),
-		one("leading-plus", "+card_number=@"),
-		one("leading-space", "%20card_number=@"),
-		one("leading-spaces", "%20+%20card_number=@"),
-		one("nul", "card_number%00tail=@"),
-		one("brackets", "card_number[]=@"),
-		one("key", "card_number[k]=@"),
-		one("nested", "card_number[a][b]=@"),
-		one("unmatched", "card[number=@"),
-		one("encoded-bracket", "card%5Bnumber=@"),
-		one("encoded-brackets", "card_number%5B%5D=@"),
-		one("encoded-dot", "card%2Enumber=@"),
-		one("dot-then-key", "card.number[x]=@"),
-		one("marker-in-name", "card_number[@]=v"),
 		two("duplicate", "card_number=@1&card_number=@2"),
-		// Contract 52 revision 25: PHP reads "@1;@2" as ONE value, since its
-		// separator is "&" alone, so all of it goes.
-		two("semicolon-in-value", "card_number=@1;@2"),
 	}
 }
 
@@ -99,10 +80,6 @@ func TestT20iRemoveQueryParametersRemovesEveryNamePHPFilesUnderTheConfiguredName
 			p("QP_FIRST"), []string{k("QP_FIRST")}},
 		{"qp-middle", "note=" + k("QP_MIDDLE1") + "&card_number=" + p("QP_MIDDLE") + "&other=" + k("QP_MIDDLE2"),
 			"note=" + k("QP_MIDDLE1") + "&other=" + k("QP_MIDDLE2"), p("QP_MIDDLE"), []string{k("QP_MIDDLE1"), k("QP_MIDDLE2")}},
-		// The ";" reading selects the parameter after the ";"; the "&" reading
-		// selects nothing here, and the union is what goes.
-		{"qp-semicolon-separated", "note=" + k("QP_SEMI") + ";card_number=" + p("QP_SEMI"), "",
-			p("QP_SEMI"), []string{k("QP_SEMI")}},
 	}
 	for _, one := range positions {
 		cases = append(cases, t20iCase{name: one.name, pieces: []string{t20iRequest("GET", "/t20i/"+one.name+"?"+one.query, nil, "")},

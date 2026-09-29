@@ -433,7 +433,11 @@ func (r *slotRun) apply(c *reconstruct.Connection, slot config.EffectiveSlot) bo
 						r.removeBody(m, where, DispositionRemovedUndecidable)
 						break
 					}
-					body, matched := removeParameters(string(m.Body), a.Names)
+					body, matched, undecidable := removeParameters(string(m.Body), a.Names)
+					if undecidable {
+						r.removeBody(m, where, DispositionRemovedUndecidable)
+						break
+					}
 					r.spliced(m, []byte(body), matched, config.FormFieldPrefix, where)
 				}
 			case config.RemoveQuery:
@@ -447,7 +451,13 @@ func (r *slotRun) apply(c *reconstruct.Connection, slot config.EffectiveSlot) bo
 			case config.RemoveQueryParameters:
 				if side == 0 {
 					if path, query, has := strings.Cut(m.Target, "?"); has {
-						kept, matched := removeParameters(query, a.Names)
+						kept, matched, undecidable := removeParameters(query, a.Names)
+						if undecidable {
+							m.Target = path
+							where.Field, where.Disposition = config.TargetQueryField, DispositionRemovedUndecidable
+							r.evidence.add(where)
+							break
+						}
 						m.Target = path + "?" + kept
 						for _, name := range matched {
 							where.Field = config.QueryFieldPrefix + name

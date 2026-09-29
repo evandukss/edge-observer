@@ -134,6 +134,10 @@ func versionTwoExclusion(exclusion PolicyExclusion, m *record.Message) (bool, er
 		if m.Kind != "request" || (field.Kind == config.TargetQueryField && strings.Contains(m.Target, "?")) {
 			return false, errors.New("query or form evidence contradicts its message")
 		}
+		// A parameter operation that cannot decide a query removes all of it.
+		if field.Kind == config.TargetQueryField && exclusion.Disposition == DispositionRemovedUndecidable {
+			want = DispositionRemovedUndecidable
+		}
 	case config.HeaderFieldPrefix:
 		if err := absentHeader(m, exclusion.Section, field.Header); err != nil {
 			return false, err

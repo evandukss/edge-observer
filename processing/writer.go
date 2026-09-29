@@ -31,10 +31,11 @@ const (
 	// DispositionValuesRemoved is a body's bytes removed with its derived
 	// structure (member names, nesting and value kinds) kept.
 	DispositionValuesRemoved = "values_removed"
-	// DispositionRemovedUndecidable is a whole body removed because a field
-	// operation could not decide what it held: not strictly valid JSON within
-	// the bounds for a JSON field operation, or not admitted as urlencoded for
-	// a form field operation.
+	// DispositionRemovedUndecidable is a whole body or query removed because a
+	// field operation could not decide what it held: not strictly valid JSON
+	// within the bounds for a JSON field operation, not admitted as urlencoded
+	// for a form field operation, or a malformed percent escape for a form or
+	// query parameter operation.
 	DispositionRemovedUndecidable = "removed_undecidable"
 )
 

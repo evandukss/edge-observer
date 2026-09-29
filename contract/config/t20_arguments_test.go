@@ -47,13 +47,12 @@ func TestT20ArgumentRules(t *testing.T) {
 			`{"messages":["request"],"pointers":["/a"],"value":"` + long(config.MaxJSONValueBytes+1, "x") + `"}`,
 		}},
 		{config.RemoveFormFields, `{"names":["Card_Number-1!","` + long(config.MaxParameterNameBytes, "n") + `"]}`, []string{
-			`{}`, `{"names":[]}`, `{"names":[""]}`, `{"names":["card.number"]}`, `{"names":["card number"]}`,
-			`{"names":["card[number]"]}`, `{"names":["card]"]}`, `{"names":["card+number"]}`, `{"names":["card%5B"]}`,
-			`{"names":["a=b"]}`, `{"names":["a&b"]}`, `{"names":["a;b"]}`, `{"names":["né"]}`, `{"names":["a\tb"]}`,
+			`{}`, `{"names":[]}`, `{"names":[""]}`, `{"names":["card number"]}`,
+			`{"names":["n\u00e9"]}`, `{"names":["a\tb"]}`,
 			`{"names":["` + long(config.MaxParameterNameBytes+1, "n") + `"]}`, `{"names":["a","a"]}`,
 			`{"names":["a"],"messages":["request"]}`,
 		}},
-		{config.RemoveQueryParameters, `{"names":["card_number","CARD_NUMBER"]}`, []string{`{"names":["card.number"]}`, `{"names":"card"}`}},
+		{config.RemoveQueryParameters, `{"names":["card_number","CARD_NUMBER"]}`, []string{`{"names":"card"}`}},
 	} {
 		t.Run(tc.implementation, func(t *testing.T) {
 			c := processingConfiguration(t)
@@ -117,8 +116,8 @@ func TestT20ExclusionFieldForms(t *testing.T) {
 		})
 	}
 	for _, field := range []string{
-		"message.body.json", "message.body.jsoncard", "message.body.json/a~2", "message.query.", "message.query.card.number",
-		"message.form.card[number]", "message.target", "message.body.value", "message.headers.Authorization", "message.start_line",
+		"message.body.json", "message.body.jsoncard", "message.body.json/a~2", "message.query.",
+		"message.target", "message.body.value", "message.headers.Authorization", "message.start_line",
 	} {
 		t.Run("refused:"+field, func(t *testing.T) {
 			c := processingConfiguration(t)

@@ -47,9 +47,10 @@ The worker writes `observer.approved/2`. Each entry names the exchange index,
 |---|---|---|
 | `message.headers.<name>` | `removed` | a header or trailer was removed; `section` is `headers` or `trailers` |
 | `message.body` | `removed` | `remove-body`, or `reduce-body-to-structure` with no structure derived, removed a body with bytes |
-| `message.body` | `removed_undecidable` | a field operation removed a body with bytes whole: not strictly valid JSON within the bounds, or a request body not admitted as urlencoded |
+| `message.body` | `removed_undecidable` | a field operation removed a body with bytes whole: not strictly valid JSON within the bounds, a request body not admitted as urlencoded, or an admitted body holding a malformed percent escape |
 | `message.body.values` | `values_removed` | `reduce-body-to-structure` removed the bytes of a body whose structure was derived |
 | `message.target.query` | `removed` | `remove-query` removed a query; the target had a `?` |
+| `message.target.query` | `removed_undecidable` | `remove-query-parameters` removed a query whole because it held a malformed percent escape |
 | `message.query.<name>` | `removed` | a query parameter matched a configured name |
 | `message.form.<name>` | `removed` | an admitted urlencoded request body parameter matched a configured name |
 | `message.body.json<pointer>` | `removed` | a JSON member or element matched the configured pointer, written as configured |
@@ -127,12 +128,14 @@ Both reading and rendering validate these structural requirements:
   or trailers and the header cannot also be present there; no other entry has a
   section. `message.target.query`, `message.query.<name>` and
   `message.form.<name>` entries are on a request, and after a
-  `message.target.query` entry its target has no `?`. A `message.body` entry
-  requires an empty `body.kept` and structure state `removed`, and a structure
-  state `removed` requires such an entry. A `message.body.values` entry requires
-  an empty `body.kept` and structure state `derived` or `removed`. Parameter
-  names and pointers follow the configuration's name and pointer rules
+  `message.target.query` entry, `removed` or `removed_undecidable`, its target
+  has no `?`. A `message.body` entry requires an empty `body.kept` and structure
+  state `removed`, and a structure state `removed` requires such an entry. A
+  `message.body.values` entry requires an empty `body.kept` and structure state
+  `derived` or `removed`. Parameter names and pointers follow the
+  configuration's name and pointer rules
   ([CONFIG.md](../contract/config/CONFIG.md)).
+
 
 Unknown JSON members are ignored by the typed decoder. These are structural
 readability checks, not a re-execution of capture policy. The text renderer

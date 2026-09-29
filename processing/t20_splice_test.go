@@ -37,12 +37,6 @@ func TestT20SplicingKeepsEveryOtherByte(t *testing.T) {
 		{"form-middle", config.RemoveFormFields, `{"names":["card_number"]}`,
 			"a=1&card_number=" + t20Card + "&b=%20&&c",
 			"a=1&b=%20&&c"},
-		{"form-last", config.RemoveFormFields, `{"names":["card_number"]}`,
-			"a=1;card.number=" + t20Card,
-			"a=1"},
-		{"form-all", config.RemoveFormFields, `{"names":["card_number"]}`,
-			"card_number=" + t20Card + "&card+number=" + t20Card,
-			""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			contentType := "application/json"
