@@ -19,6 +19,7 @@ var argumentMembers = map[string][]string{
 	ReplaceJSONValues:     {"messages", "pointers", "value"},
 	RemoveFormFields:      {"names"},
 	RemoveQueryParameters: {"names"},
+	RequestBodyFields:     {"names", "pointers", "masks"},
 }
 
 func compileArguments(implementation string, raw json.RawMessage) (*Arguments, error) {
@@ -29,6 +30,10 @@ func compileArguments(implementation string, raw json.RawMessage) (*Arguments, e
 		Messages []string `json:"messages"`
 		Pointers []string `json:"pointers"`
 		Names    []string `json:"names"`
+		Masks    []struct {
+			Pointer string  `json:"pointer"`
+			Value   *string `json:"value"`
+		} `json:"masks"`
 	}
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, fmt.Errorf("configuration must be an argument object")
@@ -80,8 +85,13 @@ func compileArguments(implementation string, raw json.RawMessage) (*Arguments, e
 		args.Messages = messages
 	}
 	if slices.Contains(defined, "pointers") {
-		if len(given.Pointers) == 0 || len(given.Pointers) > MaxFieldSelectors {
-			return nil, fmt.Errorf("pointers must contain between 1 and %d pointers", MaxFieldSelectors)
+		// request-body-fields may carry masks in place of removals.
+		least := 1
+		if implementation == RequestBodyFields {
+			least = 0
+		}
+		if len(given.Pointers) < least || len(given.Pointers) > MaxFieldSelectors {
+			return nil, fmt.Errorf("pointers must contain between %d and %d pointers", least, MaxFieldSelectors)
 		}
 		for i, pointer := range given.Pointers {
 			if err := ValidPointer(pointer); err != nil {
@@ -107,7 +117,34 @@ func compileArguments(implementation string, raw json.RawMessage) (*Arguments, e
 			args.Names = append(args.Names, name)
 		}
 	}
+	if slices.Contains(defined, "masks") {
+		if len(given.Masks) > MaxFieldSelectors {
+			return nil, fmt.Errorf("masks must contain at most %d masks", MaxFieldSelectors)
+		}
+		for i, mask := range given.Masks {
+			if err := ValidPointer(mask.Pointer); err != nil {
+				return nil, fmt.Errorf("masks[%d].pointer: %w", i, err)
+			}
+			if slices.ContainsFunc(args.Masks, func(m JSONMask) bool { return m.Pointer == mask.Pointer }) {
+				return nil, fmt.Errorf("mask pointers must be distinct")
+			}
+			if mask.Value == nil {
+				return nil, fmt.Errorf("masks[%d].value is required and must be a string", i)
+			}
+			if len(*mask.Value) > MaxJSONValueBytes {
+				return nil, fmt.Errorf("masks[%d].value exceeds %d bytes", i, MaxJSONValueBytes)
+			}
+			if !printable(*mask.Value) {
+				return nil, fmt.Errorf("masks[%d].value must contain only printable ASCII", i)
+			}
+			args.Masks = append(args.Masks, JSONMask{Pointer: mask.Pointer, Value: *mask.Value})
+		}
+	}
 	switch implementation {
+	case RequestBodyFields:
+		if len(args.Pointers)+len(args.Masks) == 0 {
+			return nil, fmt.Errorf("pointers and masks must hold at least one JSON rule between them")
+		}
 	case ReplaceHeaderValues:
 		if given.Value == nil {
 			return nil, fmt.Errorf("value is required and must be a string")

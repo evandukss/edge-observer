@@ -163,7 +163,7 @@ func covers(slot EffectiveSlot, field ExclusionField) []string {
 		// Not reduce-body-to-structure: it keeps member names, and a JSON
 		// member name can carry a form parameter, as in {"&card_number=4111":1}.
 		if (slot.Implementation == RemoveBody && slices.Contains(a.Messages, MessageRequest)) ||
-			(slot.Implementation == RemoveFormFields && slices.Contains(a.Names, field.Name)) {
+			((slot.Implementation == RemoveFormFields || slot.Implementation == RequestBodyFields) && slices.Contains(a.Names, field.Name)) {
 			return []string{MessageRequest}
 		}
 	case TargetQueryField:
@@ -178,11 +178,17 @@ func covers(slot EffectiveSlot, field ExclusionField) []string {
 		if slot.Implementation == RemoveBody || slot.Implementation == ReduceBodyToStructure {
 			return a.Messages
 		}
-		if slot.Implementation == RemoveJSONFields {
+		if slot.Implementation == RemoveJSONFields || slot.Implementation == RequestBodyFields {
+			// request-body-fields selects the request only, and its masks
+			// replace values, which satisfies no removal.
+			messages := a.Messages
+			if slot.Implementation == RequestBodyFields {
+				messages = []string{MessageRequest}
+			}
 			want := PointerTokens(field.Pointer)
 			for _, pointer := range a.Pointers {
 				if tokens := PointerTokens(pointer); len(tokens) <= len(want) && slices.Equal(tokens, want[:len(tokens)]) {
-					return a.Messages
+					return messages
 				}
 			}
 		}

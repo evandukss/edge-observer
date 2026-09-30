@@ -26,6 +26,19 @@ const (
 	RemoveFormFields      = "remove-form-fields"
 	RemoveQueryParameters = "remove-query-parameters"
 
+	// RequestBodyFields is the one operation on request bodies when form rules
+	// and JSON request rules both apply, since remove-form-fields and
+	// remove-json-fields each remove the other's bodies whole. It reads a
+	// request body by the grammar the body and every Content-Type field allow:
+	// strictly valid JSON with no Content-Type naming a form media type goes to
+	// the JSON rules; strictly valid JSON under a form media type is removed
+	// whole as undecidable; a body that is not strictly valid JSON and is
+	// admitted as urlencoded, as remove-form-fields admits it, goes to the form
+	// rules; anything else is removed whole as undecidable. It never decides
+	// less for a body than either grammar's operation decides alone. Response
+	// bodies are not touched.
+	RequestBodyFields = "request-body-fields"
+
 	MaxProcessingBytes     = 256 * 1024
 	MaxProcessingPacks     = 8
 	MaxProcessingPipelines = 16
@@ -96,13 +109,25 @@ const (
 // RFC 6901 JSON pointers as configured; a "*" token also matches every array
 // element. Names are parameter names as configured. For replace-json-values,
 // Value is the string written, as a JSON string, in place of each matched value.
+//
+// For request-body-fields, Names are the form names removed, Pointers the JSON
+// members removed, and Masks the JSON members whose value is replaced, each
+// with its own value. Removal is applied before masking.
 type Arguments struct {
-	Headers  []string `json:"headers,omitempty"`
-	Value    string   `json:"value,omitempty"`
-	Length   int      `json:"length,omitempty"`
-	Messages []string `json:"messages,omitempty"`
-	Pointers []string `json:"pointers,omitempty"`
-	Names    []string `json:"names,omitempty"`
+	Headers  []string   `json:"headers,omitempty"`
+	Value    string     `json:"value,omitempty"`
+	Length   int        `json:"length,omitempty"`
+	Messages []string   `json:"messages,omitempty"`
+	Pointers []string   `json:"pointers,omitempty"`
+	Names    []string   `json:"names,omitempty"`
+	Masks    []JSONMask `json:"masks,omitempty"`
+}
+
+// JSONMask replaces the value of every JSON member or element Pointer matches
+// with Value, written as a JSON string.
+type JSONMask struct {
+	Pointer string `json:"pointer"`
+	Value   string `json:"value"`
 }
 
 // ProcessingPlan is the sole execution form. A nil plan cannot activate.
@@ -268,7 +293,7 @@ func CompileProcessing(configuration []byte, manifests []Supplied) (*ProcessingP
 
 func processingAvailable() Available {
 	var builtins []Component
-	for _, name := range []string{RemoveHeaders, ReplaceHeaderValues, TruncateHeaderValues, RemoveBody, ReduceBodyToStructure, RemoveQuery, RemoveJSONFields, ReplaceJSONValues, RemoveFormFields, RemoveQueryParameters} {
+	for _, name := range []string{RemoveHeaders, ReplaceHeaderValues, TruncateHeaderValues, RemoveBody, ReduceBodyToStructure, RemoveQuery, RemoveJSONFields, ReplaceJSONValues, RemoveFormFields, RemoveQueryParameters, RequestBodyFields} {
 		builtins = append(builtins, Component{
 			Interface: ComponentVersion, Name: name, Version: "1", Role: RoleProcessor, Execution: ExecutionBuiltin,
 			Input: Consumes{Types: []string{"reconstruction"}, Delivery: DeliveryRecord}, Output: Output{Records: []string{"reconstruction"}},
@@ -332,6 +357,7 @@ func (p *ProcessingPlan) Pipelines() []EffectivePipeline {
 				arguments.Messages = slices.Clone(arguments.Messages)
 				arguments.Pointers = slices.Clone(arguments.Pointers)
 				arguments.Names = slices.Clone(arguments.Names)
+				arguments.Masks = slices.Clone(arguments.Masks)
 				slot.Arguments = &arguments
 			}
 		}
