@@ -408,7 +408,7 @@ type activation struct {
 	MemoryAssurance string             `json:"memory_assurance,omitempty"`
 }
 
-func activated(session string, pid int, at time.Time, a account.Account) activation {
+func activated(session string, pid int, at time.Time, a account.Account, posture protected.Posture) activation {
 	available := probe.Capability{}
 	if a.Capability != nil {
 		available = *a.Capability
@@ -416,7 +416,7 @@ func activated(session string, pid int, at time.Time, a account.Account) activat
 	return activation{
 		Record: "activation-completed", Version: recordVersion, Session: session, PID: pid, At: at,
 		Policy: a.Policy, Features: features{Requested: a.Build, Available: available},
-		Capture: a.Capturing, Coverage: coverageOf(a),
+		Capture: a.Capturing, Coverage: coverageOf(a), PayloadPosture: &posture,
 	}
 }
 

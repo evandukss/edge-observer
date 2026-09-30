@@ -63,9 +63,11 @@ type ParticipantState struct {
 // domain: a positive finite memory.max and zero memory.swap.max/current.
 // Cgroup paths use the observer's namespace and must be absolute and clean.
 // Participants must be identified by pid AND start time and lie outside the
-// envelope and all its descendants. An unreadable member is not an absence.
-// Dumpable must be zero. Core limits and core_pattern are not alternatives to
-// non-dumpability and impose no additional acceptance condition.
+// envelope and all its descendants. An unreadable member is not an absence. An
+// exited one, whose entry is gone or whose pid carries another start, is
+// counted in ParticipantsExited rather than read. Dumpable must be zero. Core
+// limits and core_pattern are not alternatives to non-dumpability and impose
+// no additional acceptance condition.
 //
 // The memory assurance requires entry into the isolated bounded no-swap cgroup
 // BEFORE exec, with membership and limits fixed throughout capture. These
@@ -166,7 +168,8 @@ func VerifyActive(gate *probe.DeliveryGate, participants []process.Process) (Pos
 
 // CheckPosture judges complete readings, in gate, membership, memory, swap,
 // core, participant order. MemoryMax zero or MaxUint64 denotes no finite cap.
-// SwapMax MaxUint64 denotes max. Empty participant evidence refuses activation.
+// SwapMax MaxUint64 denotes max. Empty participant evidence refuses activation,
+// as no_participant_running where every participant had exited.
 // This is an initial-activation check and requires a fresh gate.
 // Reading failures are returned before this function with Unreadable set and
 // Check naming the attempted condition. Refusals from these complete readings
@@ -223,6 +226,9 @@ func checkPosture(gate *probe.DeliveryGate, posture Posture, fresh bool) error {
 		return refuse(CoreDumps, fmt.Sprintf("payload process dumpability must be zero, read %d", posture.Dumpable))
 	}
 	if len(posture.Participants) == 0 {
+		if posture.ParticipantsExited > 0 {
+			return refuse(NoParticipantRunning, fmt.Sprintf("no selected process was running at activation: all %d had exited when their posture was read", posture.ParticipantsExited))
+		}
 		return refuse(ParticipantOutsideEnvelope, "no participant identities were verified outside the envelope")
 	}
 	for _, participant := range posture.Participants {

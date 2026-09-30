@@ -429,8 +429,7 @@ func start(path string, stdout io.Writer) (err error) {
 
 	activatedAt := time.Now()
 	current := running.snapshot(account.Live, activatedAt)
-	record := activated(session, os.Getpid(), activatedAt, current)
-	record.PayloadPosture = &running.payloadPosture
+	record := activated(session, os.Getpid(), activatedAt, current, running.payloadPosture)
 	record.MemoryAssurance = "Current payload-holder membership and limits verified. Memory containment is conditional on entering the isolated bounded no-swap cgroup before exec and keeping membership and limits fixed through capture. These readings do not establish that no allocation predates entry."
 	record.Follows = running.follows(activatedAt)
 	if err := log.write(record); err != nil {

@@ -1,7 +1,9 @@
 package activation
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -103,11 +105,14 @@ func readPostureUsing(participants []process.Process, reads postureReads) (Postu
 			return refuse(ParticipantOutsideEnvelope, false, fmt.Errorf("participant pid %d has no complete start identity", expected.PID))
 		}
 		actual, err := reads.state(int(expected.PID))
+		if exited(err) || (err == nil && actual.StartTime != expected.StartTime) {
+			// The selected process no longer exists, so it cannot be inside the
+			// envelope. A reused pid carries a later process's start.
+			posture.ParticipantsExited++
+			continue
+		}
 		if err != nil {
 			return refuse(ParticipantOutsideEnvelope, true, err)
-		}
-		if actual.StartTime != expected.StartTime {
-			return refuse(ParticipantOutsideEnvelope, false, fmt.Errorf("participant pid %d now has start %d, expected %d", expected.PID, actual.StartTime, expected.StartTime))
 		}
 		posture.Participants = append(posture.Participants, actual)
 	}
@@ -123,6 +128,13 @@ func readPostureUsing(participants []process.Process, reads postureReads) (Postu
 		return refuse(PayloadMembership, false, fmt.Errorf("payload process identity or cgroup changed while verifying posture"))
 	}
 	return posture, nil
+}
+
+// exited is positive evidence that a process is gone: its entry is absent at
+// open (ENOENT), or a handle opened before it was reaped reads ESRCH. A zombie
+// still has its entry. Any other failure says nothing about existence.
+func exited(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH)
 }
 
 func processState(pid int) (ParticipantState, error) {
