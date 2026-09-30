@@ -282,9 +282,14 @@ body, and the evidence says `removed_undecidable`.
 A removed run of parameters goes with exactly one adjacent `&`: the one after it, or the one before
 it where the run is last. Empty parameters and every other byte are kept.
 
-**One body grammar per pipeline.** A pipeline whose effective slots hold `remove-form-fields`
-together with `remove-json-fields` or `replace-json-values` is refused (`body_grammar_conflict`),
-because each removes the other's bodies whole. Two pipelines is how an operator gets both.
+**One request-body grammar per pipeline.** A pipeline whose effective slots hold `remove-form-fields`
+together with a `remove-json-fields` or `replace-json-values` that selects the request is refused
+(`body_grammar_conflict`), because each removes the other's request bodies whole; so is
+`request-body-fields` beside either. `request-body-fields` is the one operation that reads request
+bodies by both grammars: strictly valid JSON under no form media type goes to the JSON rules, a body
+that is not strictly valid JSON and is admitted as urlencoded goes to the form rules, and every other
+request body with bytes, strictly valid JSON under a form media type included, is removed whole as
+undecidable.
 
 **Not covered**, and no operation here reaches it:
 

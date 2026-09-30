@@ -90,9 +90,10 @@ const (
 	InvalidTransformParameters     Reason = "invalid_transform_parameters"
 	ExclusionNotEnforced           Reason = "exclusion_not_enforced"
 	ExclusionFailureActionMismatch Reason = "exclusion_failure_action_mismatch"
-	// BodyGrammarConflict refuses a pipeline holding both a JSON field
-	// operation and a form field operation: each removes the other's bodies
-	// whole, so an operator who needs both writes two pipelines.
+	// BodyGrammarConflict refuses a pipeline in which two slots read request
+	// bodies by different grammars: a JSON field operation selecting the
+	// request beside a form field operation, or request-body-fields beside
+	// either. Each removes what the other reads whole.
 	BodyGrammarConflict Reason = "body_grammar_conflict"
 )
 
@@ -274,8 +275,8 @@ func CompileProcessing(configuration []byte, manifests []Supplied) (*ProcessingP
 				s.Arguments = args
 			}
 		}
-		if jsonSlot, formSlot := bodyGrammars(p.Slots); jsonSlot != "" && formSlot != "" {
-			one.add("pipeline:"+p.Name, BodyGrammarConflict, "slot %s reads bodies as JSON and slot %s as urlencoded; each removes the other's bodies whole, so they need two pipelines", jsonSlot, formSlot)
+		if first, second := bodyGrammars(p.Slots); first != "" {
+			one.add("pipeline:"+p.Name, BodyGrammarConflict, "slots %s and %s read request bodies by different grammars, and each removes what the other reads whole, so they need two pipelines", first, second)
 		}
 		for _, sink := range p.Sinks {
 			fanout[p.Input]++
@@ -315,22 +316,38 @@ func processingAvailable() Available {
 	}
 }
 
-// bodyGrammars names the first slot reading bodies as JSON and the first
-// reading them as urlencoded, either empty where there is none.
-func bodyGrammars(slots []EffectiveSlot) (jsonSlot, formSlot string) {
+// bodyGrammars names two slots that read request bodies by different grammars,
+// or two empty names where no two do. A JSON field operation selecting the
+// request and a form field operation each remove the other's bodies whole, and
+// request-body-fields reads by both, so it shares a pipeline with neither. A
+// JSON field operation selecting only the response reads no request body.
+func bodyGrammars(slots []EffectiveSlot) (first, second string) {
+	var jsonSlot, formSlot, bothSlot string
 	for _, s := range slots {
 		switch s.Implementation {
 		case RemoveJSONFields, ReplaceJSONValues:
-			if jsonSlot == "" {
+			if jsonSlot == "" && s.Arguments != nil && slices.Contains(s.Arguments.Messages, MessageRequest) {
 				jsonSlot = s.Name
 			}
 		case RemoveFormFields:
 			if formSlot == "" {
 				formSlot = s.Name
 			}
+		case RequestBodyFields:
+			if bothSlot == "" {
+				bothSlot = s.Name
+			}
 		}
 	}
-	return jsonSlot, formSlot
+	switch {
+	case jsonSlot != "" && formSlot != "":
+		return jsonSlot, formSlot
+	case bothSlot != "" && jsonSlot != "":
+		return bothSlot, jsonSlot
+	case bothSlot != "" && formSlot != "":
+		return bothSlot, formSlot
+	}
+	return "", ""
 }
 
 // processingFindings reports runtime-profile decisions over the composed
