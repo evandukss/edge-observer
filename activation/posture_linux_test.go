@@ -62,7 +62,6 @@ func TestPostureReadingClassifiesEachRefusal(t *testing.T) {
 		{"dumpability", CoreDumps, true, "unavailable"},
 		{"participant_io", ParticipantOutsideEnvelope, true, "unavailable"},
 		{"incomplete_participant", ParticipantOutsideEnvelope, false, "no complete start identity"},
-		{"changed_participant", ParticipantOutsideEnvelope, false, "expected"},
 		{"changed_payload", PayloadMembership, false, "changed while verifying posture"},
 	} {
 		t.Run(test.site, func(t *testing.T) {
@@ -127,8 +126,6 @@ func TestPostureReadingClassifiesEachRefusal(t *testing.T) {
 				reads.dumpable = func() (int, error) { return 0, unavailable }
 			case "incomplete_participant":
 				participants[0].StartTime = 0
-			case "changed_participant":
-				participants[0].StartTime++
 			default:
 				t.Fatalf("unhandled fault %q", test.site)
 			}

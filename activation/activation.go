@@ -27,6 +27,9 @@ const (
 	CoreDumps                  Check = "core_dumps"
 	PayloadMembership          Check = "payload_membership"
 	ParticipantOutsideEnvelope Check = "participant_outside_envelope"
+	// NoParticipantRunning refuses a start at which every selected process had
+	// exited by the time its posture was read.
+	NoParticipantRunning Check = "no_participant_running"
 	// PostureUnreadable labels unavailable evidence in Refusal.Error; the
 	// refusal's Check retains the particular condition that could not be read.
 	PostureUnreadable Check = "posture_unreadable"
@@ -61,9 +64,11 @@ type ParticipantState struct {
 // domain: a positive finite memory.max and zero memory.swap.max/current.
 // Cgroup paths use the observer's namespace and must be absolute and clean.
 // Participants must be identified by pid AND start time and lie outside the
-// envelope and all its descendants. An unreadable member is not an absence.
-// Dumpable must be zero. Core limits and core_pattern are not alternatives to
-// non-dumpability and impose no additional acceptance condition.
+// envelope and all its descendants. An unreadable member is not an absence. An
+// exited one, whose entry is gone or whose pid carries another start, is
+// counted in ParticipantsExited rather than read. Dumpable must be zero. Core
+// limits and core_pattern are not alternatives to non-dumpability and impose
+// no additional acceptance condition.
 //
 // The memory assurance requires entry into the isolated bounded no-swap cgroup
 // BEFORE exec, with membership and limits fixed throughout capture. These
@@ -87,6 +92,10 @@ type Posture struct {
 	CoreHard     uint64             `json:"core_hard,omitempty"`
 	CorePattern  string             `json:"core_pattern,omitempty"`
 	Participants []ParticipantState `json:"participants"`
+	// ParticipantsExited counts supplied participants that had exited when read:
+	// the entry was gone, or the pid carried a different start. They are left
+	// out of Participants.
+	ParticipantsExited int `json:"participants_exited"`
 }
 
 // Capture is shared with the serial processing worker. Both capture
@@ -160,7 +169,8 @@ func VerifyActive(gate *probe.DeliveryGate, participants []process.Process) (Pos
 
 // CheckPosture judges complete readings, in gate, membership, memory, swap,
 // core, participant order. MemoryMax zero or MaxUint64 denotes no finite cap.
-// SwapMax MaxUint64 denotes max. Empty participant evidence refuses activation.
+// SwapMax MaxUint64 denotes max. Empty participant evidence refuses activation,
+// as no_participant_running where every participant had exited.
 // This is an initial-activation check and requires a fresh gate.
 // Reading failures are returned before this function with Unreadable set and
 // Check naming the attempted condition. Refusals from these complete readings
@@ -184,7 +194,8 @@ type Judgment struct {
 // Judge judges complete readings against every envelope condition start
 // refuses on, in the order start checks them: membership, memory, swap, core
 // dumps, then the participants: one judgment when every participant is outside
-// the envelope, or one per participant that is not. start refuses on the first
+// the envelope, or one per participant that is not, or no_participant_running
+// where none was read because every one had exited. start refuses on the first
 // judgment that is not met
 // (checkPosture); preflight names every one (Envelope). The delivery gate is not
 // an envelope condition and is not judged here.
@@ -212,6 +223,10 @@ func Judge(posture Posture) []Judgment {
 		fmt.Sprintf("payload process dumpability must be zero, read %d", posture.Dumpable))
 
 	if len(posture.Participants) == 0 {
+		if posture.ParticipantsExited > 0 {
+			judge(NoParticipantRunning, false, "", fmt.Sprintf("no selected process was running at activation: all %d had exited when their posture was read", posture.ParticipantsExited))
+			return judged
+		}
 		judge(ParticipantOutsideEnvelope, false, "", "no participant identities were verified outside the envelope")
 		return judged
 	}
@@ -251,11 +266,15 @@ func judged(posture Posture, err error) []Judgment {
 }
 
 func verify(gate *probe.DeliveryGate, participants []process.Process, fresh bool) (Posture, error) {
+	return verifyReading(gate, participants, fresh, KernelReadings().reads())
+}
+
+func verifyReading(gate *probe.DeliveryGate, participants []process.Process, fresh bool, reads postureReads) (Posture, error) {
 	posture := Posture{PID: os.Getpid()}
 	if err := checkGate(gate, posture.PID, fresh); err != nil {
 		return posture, err
 	}
-	posture, err := readPosture(participants)
+	posture, err := readPostureUsing(participants, reads)
 	if err != nil {
 		return posture, err
 	}

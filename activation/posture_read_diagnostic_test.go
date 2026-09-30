@@ -215,13 +215,10 @@ func postureReadDiagnosticChild(t *testing.T, mode string, classify bool) {
 		}
 		if classify && mode != "compliant" {
 			check, detail := ExecutionMemory, "memory.max"
-			if mode == "missing_participant" {
-				check, detail = ParticipantOutsideEnvelope, "/proc/2147483647/stat"
+			if mode == "missing_participant" || mode == "changed_participant" {
+				check, detail = NoParticipantRunning, "had exited"
 			}
-			if mode == "changed_participant" {
-				check, detail = ParticipantOutsideEnvelope, "expected"
-			}
-			unreadable := mode == "missing_memory_file" || mode == "missing_participant"
+			unreadable := mode == "missing_memory_file"
 			if refusal.Check != check || refusal.Unreadable != unreadable || !strings.Contains(refusal.Detail, detail) {
 				t.Errorf("%s classification: Check=%s Unreadable=%t Detail=%q; want Check=%s Unreadable=%t detail containing %q", operation, refusal.Check, refusal.Unreadable, refusal.Detail, check, unreadable, detail)
 			}

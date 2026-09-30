@@ -106,6 +106,20 @@ func TestNoParticipantEvidenceIsNotMet(t *testing.T) {
 	}
 }
 
+// Every selected process had exited before its posture was read: preflight
+// names it as start refuses it, and not as a participant inside the envelope.
+func TestEveryParticipantHavingExitedIsJudgedAsNoneRunning(t *testing.T) {
+	posture := envelopeReading()
+	posture.Participants = nil
+	posture.ParticipantsExited = 2
+
+	failing := unmet(activation.Judge(posture))
+
+	if got := checks(failing); !slices.Equal(got, []activation.Check{activation.NoParticipantRunning}) {
+		t.Fatalf("not met: %v, want only no_participant_running", got)
+	}
+}
+
 // start's check is Judge's first unmet judgment: the same condition and the
 // same words, for every fault alone and for faults together. This is what
 // makes preflight's answer start's.
@@ -119,6 +133,10 @@ func TestStartRefusesOnTheFirstJudgmentThatIsNotMet(t *testing.T) {
 		"dumpable":           func(p *activation.Posture) { p.Dumpable = 1 },
 		"participant_inside": func(p *activation.Posture) { p.Participants[0].Cgroup = p.Cgroup },
 		"no_participants":    func(p *activation.Posture) { p.Participants = nil },
+		"every_participant_exited": func(p *activation.Posture) {
+			p.Participants = nil
+			p.ParticipantsExited = 2
+		},
 		"memory_and_participant": func(p *activation.Posture) {
 			p.MemoryMax = 0
 			p.Participants[1].Cgroup = p.Cgroup

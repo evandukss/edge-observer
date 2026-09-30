@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/evandukss/edge-observer/account"
+	protected "github.com/evandukss/edge-observer/activation"
 	"github.com/evandukss/edge-observer/admission"
 	"github.com/evandukss/edge-observer/attachment"
 	"github.com/evandukss/edge-observer/policy"
@@ -196,7 +197,7 @@ func TestTheActivationRecordSaysWhatStateTheObserverIsIn(t *testing.T) {
 	live.Attached(account.Live, "0123456789abcdef", []attachment.Observed{{PID: 10, Requested: 9, Confirmed: 9,
 		Outcome: attachment.Attached}}, probe.Capability{Backend: probe.BPF, Program: "full", Payload: true})
 
-	content, err := json.Marshal(activated("0123456789abcdef", 4242, at, live))
+	content, err := json.Marshal(activated("0123456789abcdef", 4242, at, live, protected.Posture{}))
 	if err != nil {
 		t.Fatalf("encode the activation record: %v", err)
 	}
