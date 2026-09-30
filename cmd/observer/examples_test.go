@@ -106,7 +106,8 @@ func TestEveryExampleConfigurationIsRunByTheProgram(t *testing.T) {
 		"content-filter-is-not-approval.config.json",
 		"no-extension.config.json",
 	}
-	notConfigurations := []string{"index.json", "packs/reversed-masking.json", "runtime.json"}
+	notConfigurations := []string{"configuration.json", "index.json", "packs/credentials.json", "packs/reversed-masking.json",
+		"runtime.json"}
 
 	var configurations, others []string
 	err := fs.WalkDir(config.Examples, "examples", func(at string, entry fs.DirEntry, err error) error {
