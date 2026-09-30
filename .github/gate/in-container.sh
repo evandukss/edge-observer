@@ -212,7 +212,7 @@ archive)
 				refuse "archive: the program did not build"
 			;;
 		observer.config.json)
-			cp contract/config/examples/no-extension.config.json "$stage/$member"
+			cp contract/config/examples/no-rules.config.json "$stage/$member"
 			;;
 		COMMIT)
 			printf '%s\n' "$commit" >"$stage/COMMIT"

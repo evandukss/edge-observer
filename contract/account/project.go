@@ -193,7 +193,6 @@ func Project(source observed.Account, supply Supply) (Account, error) {
 		Configuration: Configuration{Block: Block{State: Carried}, References: []ConfigurationReference{{
 			Document: "policy", Revision: source.Policy.Revision, Generation: strconv.Itoa(source.Policy.Generation),
 		}}},
-		Pipelines: Pipelines{Block: Block{State: NotCarried}},
 	}
 
 	scope, err := scopeOf(source)
@@ -226,11 +225,10 @@ func Project(source observed.Account, supply Supply) (Account, error) {
 			Aggregate: &ProcessingAggregate{
 				GateReason: string(p.GateReason), ProcessingFailures: decimalOf(p.ProcessingFailures),
 				OutputFailures: decimalOf(p.OutputFailures), Authorized: decimalOf(p.Authorized),
-				Written: decimalOf(p.Written), StoppedPipelines: append([]string{}, p.StoppedPipelines...),
+				Written: decimalOf(p.Written),
 			},
 		}
 	}
-	a.Requirements = Requirements{Block: Block{State: NotCarried}}
 	return a, nil
 }
 
@@ -340,10 +338,11 @@ func scopeParts(source observed.Account) (Scope, error) {
 	scope := Scope{
 		Block: Block{State: Carried},
 		Requested: Requested{Block: Block{State: Carried}, Controls: []Control{
-			{Block: Block{State: Carried}, Control: ObservationScope, Document: "policy",
-				Revision: source.Policy.Revision, Member: "targets"},
-			{Block: Block{State: NotCarried}, Control: TrafficScope},
-			{Block: Block{State: NotCarried}, Control: RetentionAndExport},
+			{Block: Block{State: Carried}, Control: Watch, Document: "policy",
+				Revision: source.Policy.Revision, Member: Watch},
+			{Block: Block{State: Carried}, Control: Ignore, Document: "policy",
+				Revision: source.Policy.Revision, Member: Ignore},
+			{Block: Block{State: NotCarried}, Control: WriteContent},
 		}},
 		Targets: []Target{}, Exclusions: []Exclusion{}, Limits: nonNil(source.Limits),
 		Filters: Filters{Block: Block{State: NotCarried}},

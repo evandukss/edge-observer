@@ -26,7 +26,7 @@ func TestT24ParameterNamesMatchExactlyAsSent(t *testing.T) {
 			[]string{t20Other, "T24KEEP5"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			plan := t20Plan(t, pipeline("exchanges", t20Slot("rule", tc.implementation, `{"names":["card_number"]}`)))
+			plan := t20Plan(t, tc.implementation, `{"names":["card_number"]}`)
 			var got string
 			var a processing.Artifact
 			var text string
@@ -53,8 +53,8 @@ func TestT24ParameterNamesMatchExactlyAsSent(t *testing.T) {
 // so the whole query or body goes; a well-formed escape beside the same rule
 // is the control that the rule is otherwise live.
 func TestT24MalformedEscapeRemovesTheWholePart(t *testing.T) {
-	query := t20Plan(t, pipeline("exchanges", t20Slot("rule", config.RemoveQueryParameters, `{"names":["card_number"]}`)))
-	form := t20Plan(t, pipeline("exchanges", t20Slot("rule", config.RemoveFormFields, `{"names":["card_number"]}`)))
+	query := t20Plan(t, config.RemoveQueryParameters, `{"names":["card_number"]}`)
+	form := t20Plan(t, config.RemoveFormFields, `{"names":["card_number"]}`)
 
 	t.Run("query-control", func(t *testing.T) {
 		a, _, text := t20Exchange(t, query, t20Get("/pay?note=%41&card_number="+t20Card), goodResponse)
@@ -101,7 +101,7 @@ func TestT24MalformedEscapeRemovesTheWholePart(t *testing.T) {
 // A configured name carrying . or [] removes exactly that parameter: the
 // literal name, not another the application might read as the same.
 func TestT24NamesWithDotsAndBracketsMatchLiterally(t *testing.T) {
-	plan := t20Plan(t, pipeline("exchanges", t20Slot("rule", config.RemoveQueryParameters, `{"names":["card.number","items[]"]}`)))
+	plan := t20Plan(t, config.RemoveQueryParameters, `{"names":["card.number","items[]"]}`)
 	a, _, text := t20Exchange(t, plan,
 		t20Get("/pay?card.number="+t20Card+"&card_number=T24KEEP6&items%5B%5D=4000000000000002&items=T24KEEP7&note="+t20Other), goodResponse)
 	t20Absent(t, text, t20Card)

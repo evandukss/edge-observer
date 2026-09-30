@@ -127,3 +127,25 @@ func TestTheContractSurfacesAreClosed(t *testing.T) {
 		t.Fatalf("a reference planted outside the surfaces came back %+v", reached)
 	}
 }
+
+// The earlier draft is refused by the version it names, beside the example
+// account at this draft, which reads.
+func TestAnAccountAtTheEarlierDraftIsRefusedByName(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("..", "examples", "bundle", "account.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, findings, _ := readAccount("account.json", content); len(findings) != 0 {
+		t.Fatalf("wiring, not the property: the example account at %s is refused: %+v", Version, findings)
+	}
+	earlier := strings.Replace(string(content), `"account": "`+Version+`"`, `"account": "observer.account/1-draft"`, 1)
+	if earlier == string(content) {
+		t.Fatal("wiring, not the property: the example account names no version to replace")
+	}
+	_, findings, _ := readAccount("account.json", []byte(earlier))
+	if len(findings) != 1 || findings[0].Reason != UnknownAccountVersion ||
+		!strings.Contains(findings[0].Detail, "observer.account/1-draft") {
+		t.Fatalf("an account at the earlier draft was refused with %+v, want %s naming observer.account/1-draft",
+			findings, UnknownAccountVersion)
+	}
+}

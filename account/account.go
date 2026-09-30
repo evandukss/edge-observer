@@ -258,18 +258,17 @@ type Run struct {
 
 // Processing carries session aggregates, never per-pipeline attribution.
 // Authorized and Written count route records: permission is not completion or
-// durable flush. ProcessingFailures counts affected active durable routes for
-// each batch's processing refusals: all active routes for a batch refusal, or
-// the affected pipeline's routes once for a pipeline refusal. Already-stopped
-// routes do not count again. These are not unique-route, batch or exchange counts;
-// a route may write a useful prefix and also count a refused suffix. OutputFailures
-// counts failed approved writes; neither is policy suppression or capture loss.
+// durable flush. ProcessingFailures counts affected durable routes for each
+// batch's processing refusals: all routes for a batch refusal, or the affected
+// pipeline's routes once for a pipeline refusal. These are not unique-route,
+// batch or exchange counts; a route may write a useful prefix and also count a
+// refused suffix. OutputFailures counts failed approved writes; neither is
+// policy suppression or capture loss.
 // Internal artifact-serialization defects use the terminal error/seal reason,
 // not either counter.
 // GateReason is the current capture-wide invalidation reason, independently of
-// whether a candidate reached authorization. StoppedPipelines names the
-// pipelines stopped by their configured failure action, not a session terminal
-// state. Counts are the last returned worker outcome; the gate is read later.
+// whether a candidate reached authorization. Counts are the last returned
+// worker outcome; the gate is read later.
 // Its presence identifies a session that does not create a raw spool.
 type Processing struct {
 	GateReason         probe.GateReason `json:"gate_reason"`
@@ -277,7 +276,6 @@ type Processing struct {
 	OutputFailures     uint64           `json:"output_failures"`
 	Authorized         uint64           `json:"authorized"`
 	Written            uint64           `json:"written"`
-	StoppedPipelines   []string         `json:"stopped_pipelines"`
 }
 
 // Plan is the account of a policy resolved and not attached. inspect, where
@@ -363,7 +361,6 @@ func (a *Account) Ran(at time.Time, run Run) {
 	a.Processing = nil
 	if run.Processing != nil {
 		copy := *run.Processing
-		copy.StoppedPipelines = append([]string{}, copy.StoppedPipelines...)
 		a.Processing = &copy
 	}
 }
@@ -603,7 +600,7 @@ func Render(to io.Writer, a Account, local bool) {
 		}
 	}
 	for _, exclusion := range a.Exclusions {
-		say("exclusion  %d: %d matched, %d denied with their subtrees", exclusion.Number, len(exclusion.Roots), len(exclusion.Denied))
+		say("ignore     %d: %d matched, %d denied with their subtrees", exclusion.Number, len(exclusion.Roots), len(exclusion.Denied))
 	}
 	for _, limit := range a.Limits {
 		say("limit      %s", limit)
@@ -721,9 +718,6 @@ func Render(to io.Writer, a Account, local bool) {
 		say("approved   %d route records authorized, %d written", p.Authorized, p.Written)
 		if p.GateReason != "" {
 			say("release    refused: %s", p.GateReason)
-		}
-		if len(p.StoppedPipelines) != 0 {
-			say("pipelines  stopped: %s", strings.Join(p.StoppedPipelines, ", "))
 		}
 	}
 }

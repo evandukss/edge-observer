@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/evandukss/edge-observer/contract/config"
-	cp "github.com/evandukss/edge-observer/contract/policy"
 	"github.com/evandukss/edge-observer/processing"
 )
 
@@ -23,47 +22,6 @@ const (
 	t20Other = "T20OTHER5b9d"
 )
 
-// t20Requirement is one mandatory exclusion on the account sink.
-func t20Requirement(field string) cp.Requirement {
-	return cp.Requirement{ID: "exclude", Target: cp.Target{Kind: "sink", Name: "account"}, Operation: "transform_field",
-		Parameters: map[string]any{"field": field, "transformation": "remove"}, FailureAction: cp.DropAndAccount}
-}
-
-// t20Compile compiles pipelines into the no-extension configuration with the
-// given requirements as its policy.
-func t20Compile(t *testing.T, requirements []cp.Requirement, pipelines ...config.Pipeline) (*config.ProcessingPlan, []config.Finding) {
-	t.Helper()
-	raw, err := config.Examples.ReadFile("examples/no-extension.config.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var c config.Configuration
-	if err := json.Unmarshal(raw, &c); err != nil {
-		t.Fatal(err)
-	}
-	c.Pipelines = pipelines
-	for n := range c.Pipelines {
-		if c.Pipelines[n].Slots == nil {
-			c.Pipelines[n].Slots = []config.Slot{}
-		}
-	}
-	c.Packs, c.Subscribers = nil, nil
-	c.Sinks = []config.Sink{{Name: "account", Kind: "local_account"}}
-	c.Policy = nil
-	if len(requirements) > 0 {
-		document, err := json.Marshal(cp.Document{Vocabulary: cp.Vocabulary, Requirements: requirements})
-		if err != nil {
-			t.Fatal(err)
-		}
-		c.Policy = []json.RawMessage{document}
-	}
-	raw, err = json.Marshal(c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return config.CompileProcessing(raw, nil)
-}
-
 // t20Exchange runs one exchange through one pipeline and returns its artifact,
 // its approved line and the public text rendering, in which bodies are decoded.
 // The guards fail as WIRING before any property is asserted.
@@ -76,11 +34,16 @@ func t20Exchange(t *testing.T, plan *config.ProcessingPlan, request, response st
 	w, store := worker(t, plan, out)
 	enqueue(t, store, batch(t, 1, request, response))
 	o := drain(t, w)
-	if o.Written != 1 || o.ProcessingFailures != 0 || len(out.artifacts) != 1 || out.artifacts[0].Reconstruction == nil || len(out.artifacts[0].Reconstruction.Exchanges) != 1 {
+	if o.ProcessingFailures != 0 {
+		t.Fatalf("wiring, not the property: the exchange did not reach approved output, so nothing below measured removal: %+v", o)
+	}
+	counted(t, o, out, 1, 1)
+	exchanges, lines := out.routed(config.ExchangesPipeline)
+	if exchanges[0].Reconstruction == nil || len(exchanges[0].Reconstruction.Exchanges) != 1 {
 		t.Fatalf("wiring, not the property: the exchange did not reach approved output, so nothing below measured removal: %+v", o)
 	}
 	var text bytes.Buffer
-	if err := processing.RenderArtifact(&text, out.artifacts[0]); err != nil {
+	if err := processing.RenderArtifact(&text, exchanges[0]); err != nil {
 		t.Fatalf("wiring, not the property: the approved artifact cannot be rendered: %v", err)
 	}
 	if !strings.Contains(request, "X-Keep: "+t20Keep+"\r\n") {
@@ -89,7 +52,7 @@ func t20Exchange(t *testing.T, plan *config.ProcessingPlan, request, response st
 	if !strings.Contains(text.String(), t20Keep) {
 		t.Fatalf("wiring, not the property: the permitted request header is not in the rendered output, so an absence below would measure nothing\n%s", text.String())
 	}
-	return out.artifacts[0], out.lines[0], text.String()
+	return exchanges[0], lines[0], text.String()
 }
 
 // t20Body is a message's retained body, decoded.
@@ -122,11 +85,6 @@ func t20Response(contentType, body string) string {
 	return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n%s", contentType, len(body), body)
 }
 
-// t20Slot is a slot whose failure action is drop_and_account.
-func t20Slot(name, implementation, arguments string) config.Slot {
-	return slot(name, implementation, arguments)
-}
-
 // t20Absent fails on the property when the protected value is anywhere in the
 // public rendering, which carries the target, the headers and decoded bodies.
 func t20Absent(t *testing.T, text, value string) {
@@ -145,13 +103,78 @@ func t20Kept(t *testing.T, text, value string) {
 	}
 }
 
-// t20Plan compiles pipelines with no policy, and fails as wiring when the
-// fixture configuration is refused.
-func t20Plan(t *testing.T, pipelines ...config.Pipeline) *config.ProcessingPlan {
+// t20Op is one operation, as the implementation and arguments it compiles to.
+type t20Op struct{ implementation, arguments string }
+
+func t20Of(implementation, arguments string) t20Op { return t20Op{implementation, arguments} }
+
+// t20Plan is the plan of a configuration writing one operation as the rule a
+// user writes for it. The case fails as wiring unless the exchanges pipeline
+// holds that operation and no other.
+func t20Plan(t *testing.T, implementation, arguments string) *config.ProcessingPlan {
 	t.Helper()
-	plan, findings := t20Compile(t, nil, pipelines...)
-	if plan == nil {
-		t.Fatalf("wiring, not the property: the fixture configuration was refused: %+v", findings)
+	var a struct {
+		Headers  []string `json:"headers"`
+		Value    string   `json:"value"`
+		Messages []string `json:"messages"`
+		Pointers []string `json:"pointers"`
+		Names    []string `json:"names"`
+	}
+	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
+		t.Fatalf("fixture: %s arguments %s: %v", implementation, arguments, err)
+	}
+	byMessage := func(value func() any) map[string]any {
+		out := map[string]any{}
+		for _, message := range a.Messages {
+			out[message] = value()
+		}
+		return out
+	}
+	var rules map[string]any
+	switch implementation {
+	case config.RemoveHeaders:
+		rules = map[string]any{"remove": map[string]any{"headers": a.Headers}}
+	case config.RemoveBody:
+		rules = map[string]any{"remove": map[string]any{"bodies": a.Messages}}
+	case config.ReduceBodyToStructure:
+		rules = map[string]any{"remove": map[string]any{"body_values": a.Messages}}
+	case config.RemoveQuery:
+		rules = map[string]any{"remove": map[string]any{"query_string": true}}
+	case config.RemoveQueryParameters:
+		rules = map[string]any{"remove": map[string]any{"query": a.Names}}
+	case config.RemoveFormFields:
+		rules = map[string]any{"remove": map[string]any{"form": a.Names}}
+	case config.RemoveJSONFields:
+		rules = map[string]any{"remove": map[string]any{"json": byMessage(func() any { return a.Pointers })}}
+	case config.ReplaceJSONValues:
+		rules = map[string]any{"mask": map[string]any{"json": byMessage(func() any {
+			values := map[string]any{}
+			for _, pointer := range a.Pointers {
+				values[pointer] = a.Value
+			}
+			return values
+		})}}
+	default:
+		t.Fatalf("fixture: no rule a user writes compiles to %s alone", implementation)
+	}
+	encoded, err := json.Marshal(rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := rulesPlan(t, string(encoded[1:len(encoded)-1]))
+	for _, p := range plan.Pipelines() {
+		if p.Name != config.ExchangesPipeline {
+			continue
+		}
+		if len(p.Slots) == 0 {
+			t.Fatalf("wiring, not the property: %s compiled to no operation", implementation)
+		}
+		for _, slot := range p.Slots {
+			if slot.Implementation != implementation {
+				t.Fatalf("wiring, not the property: %s compiled beside %s, so the case would not measure it alone",
+					implementation, slot.Implementation)
+			}
+		}
 	}
 	return plan
 }

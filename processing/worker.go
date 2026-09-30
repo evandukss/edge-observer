@@ -5,7 +5,6 @@ package processing
 import (
 	"context"
 	"errors"
-	"slices"
 
 	"github.com/evandukss/edge-observer/connection"
 	"github.com/evandukss/edge-observer/contract/config"
@@ -30,7 +29,7 @@ type Output interface {
 
 // Options is fixed before capture admission. Plan, Intake, Gate and Output must
 // be non-nil, and PolicyRevision must be nonempty. Plan must be produced by
-// config.CompileProcessing; its detached views are taken once at construction.
+// config.Compile; its detached views are taken once at construction.
 // No raw configuration, exclusion revalidation or policy resolution occurs here.
 // Limits uses reconstruct's defaults for zero fields; negative fields refuse.
 type Options struct {
@@ -61,7 +60,7 @@ type Options struct {
 // output failures, and does not multiply exchanges by the number of routes.
 // ProcessingFailures counts affected active durable routes for each batch's
 // processing refusals: a batch refusal counts every active route, and a pipeline
-// refusal counts that pipeline's routes once. Already-stopped routes are excluded.
+// refusal counts that pipeline's routes once.
 // This is not a count of unique routes, batches or exchanges. A route can write
 // a useful prefix and also count a refusal of its suffix. OutputFailures counts
 // failed approved writes. Neither counts capture loss or policy suppression;
@@ -79,7 +78,6 @@ type Outcome struct {
 	OutputFailures     uint64
 	Pending            int
 	GateReason         probe.GateReason
-	StoppedPipelines   []string
 }
 
 // Finalization is supplied only after capture authority has been withdrawn,
@@ -103,7 +101,6 @@ type Worker struct {
 	batches   map[batchKey]*batch
 	order     []batchKey
 	completed map[batchKey]bool
-	stopped   map[string]bool
 	outcome   Outcome
 	terminal  error
 	finished  bool
@@ -120,7 +117,7 @@ func New(options Options) (*Worker, error) {
 			return nil, ErrOptions
 		}
 	}
-	return &Worker{options: options, pipelines: options.Plan.Pipelines(), routes: options.Plan.Routes(), batches: make(map[batchKey]*batch), completed: make(map[batchKey]bool), stopped: make(map[string]bool), outcome: Outcome{Withheld: connection.Counted(0)}}, nil
+	return &Worker{options: options, pipelines: options.Plan.Pipelines(), routes: options.Plan.Routes(), batches: make(map[batchKey]*batch), completed: make(map[batchKey]bool), outcome: Outcome{Withheld: connection.Counted(0)}}, nil
 }
 
 // Drain takes currently queued entries and processes ready closed batches.
@@ -158,8 +155,8 @@ func New(options Options) (*Worker, error) {
 //
 // Pipelines execute in compiled order on separate input copies, and slots in
 // their compiled order, including zero-slot pipelines. Connection inputs receive
-// metadata only. All output follows the compiled Routes. A slot failure follows
-// its resolved OnFailure; stop_pipeline persists for the rest of this worker.
+// metadata only. All output follows the compiled Routes. A slot failure drops
+// that pipeline's output for the batch and is counted.
 // Every removal - a header, a body, a body's values, a query, a parameter or
 // a JSON member - is recorded in Artifact.PolicyExclusions with its exchange,
 // request/response, field and disposition, once per entry and without its
@@ -230,7 +227,6 @@ func (w *Worker) snapshot() Outcome {
 		o.GateReason = reason
 	}
 	o.Pending = len(w.batches)
-	o.StoppedPipelines = slices.Clone(o.StoppedPipelines)
 	return o
 }
 

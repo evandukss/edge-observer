@@ -35,7 +35,7 @@ func TestProcessingAggregatePreservesDistinctFactsAndCaptureLoss(t *testing.T) {
 				}
 				facts := map[string]any{
 					"gate_reason": reason, "processing_failures": 3, "output_failures": 2,
-					"authorized": 11, "written": 5, "stopped_pipelines": []string{"privacy"},
+					"authorized": 11, "written": 5,
 				}
 				encoded, err := json.Marshal(facts)
 				if err != nil {
@@ -64,7 +64,7 @@ func TestProcessingAggregatePreservesDistinctFactsAndCaptureLoss(t *testing.T) {
 				}
 				want := map[string]any{
 					"gate_reason": reason, "processing_failures": "3", "output_failures": "2",
-					"authorized": "11", "written": "5", "stopped_pipelines": []any{"privacy"},
+					"authorized": "11", "written": "5",
 				}
 				if got["state"] != string(Carried) || !reflect.DeepEqual(got["aggregate"], want) {
 					t.Fatalf("ruled aggregate missing or dispositions conflated: %s", encoded)

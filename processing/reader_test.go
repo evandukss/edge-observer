@@ -10,6 +10,7 @@ import (
 	"testing"
 	"testing/fstest"
 
+	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/processing"
 )
 
@@ -18,12 +19,11 @@ import (
 func readableArtifact(t *testing.T) ([]byte, processing.Artifact) {
 	t.Helper()
 	var out outputLog
-	w, store := worker(t, workerPlan(t, pipeline("exchanges")), &out)
+	w, store := worker(t, rulesPlan(t, ""), &out)
 	enqueue(t, store, batch(t, 1, "GET /public HTTP/1.1\r\nX-Public: useful\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\npublic-body"))
-	if result := drain(t, w); result.Written != 1 || len(out.lines) != 1 {
-		t.Fatalf("producer did not write the useful control: %+v", result)
-	}
-	return out.lines[0], out.artifacts[0]
+	counted(t, drain(t, w), &out, 1, 1)
+	exchanges, lines := out.routed(config.ExchangesPipeline)
+	return lines[0], exchanges[0]
 }
 
 func artifactFS(data []byte) fstest.MapFS {

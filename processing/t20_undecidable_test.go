@@ -1,6 +1,7 @@
 package processing_test
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -40,7 +41,7 @@ func t20RemovedWhole(t *testing.T, a processing.Artifact, message, disposition s
 }
 
 func TestT20UncertaintyRemovesMore(t *testing.T) {
-	jsonRule := t20Slot("card", config.RemoveJSONFields, `{"messages":["request"],"pointers":["/card"]}`)
+	jsonRule := t20Of(config.RemoveJSONFields, `{"messages":["request"],"pointers":["/card"]}`)
 	valid := `{"other":"` + t20Other + `","card":"` + t20Card + `"}`
 	deep := strings.Repeat(`{"a":`, config.MaxJSONFieldDepth) + `"` + t20Card + `"` + strings.Repeat("}", config.MaxJSONFieldDepth)
 	for _, tc := range []struct {
@@ -57,14 +58,14 @@ func TestT20UncertaintyRemovesMore(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// The success control: the same rule on a valid body removes the
 			// member and keeps its neighbour, so the rule is live.
-			a, _, text := t20Exchange(t, t20Plan(t, pipeline("exchanges", jsonRule)), t20Post("/pay", "application/json", valid), goodResponse)
+			a, _, text := t20Exchange(t, t20Plan(t, jsonRule.implementation, jsonRule.arguments), t20Post("/pay", "application/json", valid), goodResponse)
 			t20Absent(t, text, t20Card)
 			t20Kept(t, text, t20Other)
 			if entries := t20Evidence(a, "request", config.JSONFieldPrefix+"/card"); len(entries) != 1 || entries[0].Disposition != processing.DispositionRemoved {
 				t.Fatalf("PROPERTY: the control's member removal is not evidenced: %+v", a.PolicyExclusions)
 			}
 
-			a, _, text = t20Exchange(t, t20Plan(t, pipeline("exchanges", jsonRule)), t20Post("/pay", "application/json", tc.body), goodResponse)
+			a, _, text = t20Exchange(t, t20Plan(t, jsonRule.implementation, jsonRule.arguments), t20Post("/pay", "application/json", tc.body), goodResponse)
 			t20Absent(t, text, t20Card)
 			t20RemovedWhole(t, a, "request", processing.DispositionRemovedUndecidable)
 		})
@@ -77,8 +78,8 @@ func TestT20UncertaintyRemovesMore(t *testing.T) {
 		// deeper, and its string values at exactly MaxJSONFieldDepth.
 		atBound := strings.Repeat(`{"a":`, config.MaxJSONFieldDepth-2) + `{"card":"` + t20Card + `","other":"` + t20Other + `"}` + strings.Repeat("}", config.MaxJSONFieldDepth-2)
 		pointer := strings.Repeat("/a", config.MaxJSONFieldDepth-2) + "/card"
-		rule := t20Slot("card", config.RemoveJSONFields, `{"messages":["request"],"pointers":["`+pointer+`"]}`)
-		a, _, text := t20Exchange(t, t20Plan(t, pipeline("exchanges", rule)), t20Post("/pay", "application/json", atBound), goodResponse)
+		rule := t20Of(config.RemoveJSONFields, `{"messages":["request"],"pointers":["`+pointer+`"]}`)
+		a, _, text := t20Exchange(t, t20Plan(t, rule.implementation, rule.arguments), t20Post("/pay", "application/json", atBound), goodResponse)
 		t20Absent(t, text, t20Card)
 		t20Kept(t, text, t20Other)
 		if len(t20Evidence(a, "request", config.BodyField)) != 0 {
@@ -88,12 +89,12 @@ func TestT20UncertaintyRemovesMore(t *testing.T) {
 }
 
 func TestT20FormAdmissionIsPositive(t *testing.T) {
-	form := t20Slot("card", config.RemoveFormFields, `{"names":["card_number"]}`)
+	form := t20Of(config.RemoveFormFields, `{"names":["card_number"]}`)
 	body := "other=" + t20Other + "&card_number=" + t20Card
 	multipart := "--XB\r\nContent-Disposition: form-data; name=\"card_number\"\r\n\r\n" + t20Card + "\r\n--XB--\r\n"
 
 	t.Run("urlencoded-admitted", func(t *testing.T) {
-		a, _, text := t20Exchange(t, t20Plan(t, pipeline("exchanges", form)), t20Post("/pay", "Application/X-WWW-Form-Urlencoded ; charset=UTF-8", body), goodResponse)
+		a, _, text := t20Exchange(t, t20Plan(t, form.implementation, form.arguments), t20Post("/pay", "Application/X-WWW-Form-Urlencoded ; charset=UTF-8", body), goodResponse)
 		t20Absent(t, text, t20Card)
 		t20Kept(t, text, t20Other)
 		if entries := t20Evidence(a, "request", config.FormFieldPrefix+"card_number"); len(entries) != 1 || entries[0].Disposition != processing.DispositionRemoved {
@@ -107,38 +108,28 @@ func TestT20FormAdmissionIsPositive(t *testing.T) {
 		{"json-labelled", t20Post("/pay", "application/json", `{"card_number":"`+t20Card+`"}`)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			a, _, text := t20Exchange(t, t20Plan(t, pipeline("exchanges", form)), tc.request, goodResponse)
+			a, _, text := t20Exchange(t, t20Plan(t, form.implementation, form.arguments), tc.request, goodResponse)
 			t20Absent(t, text, t20Card)
 			t20RemovedWhole(t, a, "request", processing.DispositionRemovedUndecidable)
 		})
 	}
 
-	// Body rules read Content-Type as parsed. A header operation before the
-	// body rule changes what is written, never what the body rule admits.
-	t.Run("relabelled-multipart-is-still-removed", func(t *testing.T) {
-		relabel := t20Slot("relabel", config.ReplaceHeaderValues, `{"headers":["content-type"],"value":"application/x-www-form-urlencoded"}`)
-		a, _, text := t20Exchange(t, t20Plan(t, pipeline("exchanges", relabel, form)), t20Post("/pay", "multipart/form-data; boundary=XB", multipart), goodResponse)
-		if !strings.Contains(text, "application/x-www-form-urlencoded") {
-			t.Fatalf("wiring, not the property: the relabelling slot did not reach the output\n%s", text)
-		}
-		t20Absent(t, text, t20Card)
-		t20RemovedWhole(t, a, "request", processing.DispositionRemovedUndecidable)
-	})
-	t.Run("relabelled-urlencoded-is-still-admitted", func(t *testing.T) {
-		relabel := t20Slot("relabel", config.ReplaceHeaderValues, `{"headers":["content-type"],"value":"multipart/form-data; boundary=XB"}`)
-		a, _, text := t20Exchange(t, t20Plan(t, pipeline("exchanges", relabel, form)), t20Post("/pay", "application/x-www-form-urlencoded", body), goodResponse)
-		if !strings.Contains(text, "multipart/form-data; boundary=XB") {
-			t.Fatalf("wiring, not the property: the relabelling slot did not reach the output\n%s", text)
-		}
-		t20Absent(t, text, t20Card)
-		t20Kept(t, text, t20Other)
-		if len(t20Evidence(a, "request", config.BodyField)) != 0 {
-			t.Fatalf("PROPERTY: an urlencoded body relabelled by a header slot was removed whole: %+v", a.PolicyExclusions)
-		}
-	})
+	// Body rules read Content-Type as parsed: a header removed before the form
+	// rule does not make the body admissible.
 	t.Run("removed-content-type-does-not-admit", func(t *testing.T) {
-		strip := t20Slot("strip", config.RemoveHeaders, `{"headers":["content-type"]}`)
-		a, _, text := t20Exchange(t, t20Plan(t, pipeline("exchanges", strip, form)), t20Post("/pay", "multipart/form-data; boundary=XB", multipart), goodResponse)
+		plan := rulesPlan(t, `"remove": {"headers": ["content-type"], "form": ["card_number"]}`)
+		var order []string
+		for _, p := range plan.Pipelines() {
+			if p.Name == config.ExchangesPipeline {
+				for _, slot := range p.Slots {
+					order = append(order, slot.Implementation)
+				}
+			}
+		}
+		if !slices.Equal(order, []string{config.RemoveHeaders, config.RemoveFormFields}) {
+			t.Fatalf("wiring, not the property: the plan runs %v, so the header is not removed before the form rule reads it", order)
+		}
+		a, _, text := t20Exchange(t, plan, t20Post("/pay", "multipart/form-data; boundary=XB", multipart), goodResponse)
 		t20Absent(t, text, t20Card)
 		t20RemovedWhole(t, a, "request", processing.DispositionRemovedUndecidable)
 	})

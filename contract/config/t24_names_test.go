@@ -14,15 +14,17 @@ import (
 func TestT24ParameterNameGrammar(t *testing.T) {
 	for _, implementation := range []string{config.RemoveFormFields, config.RemoveQueryParameters} {
 		t.Run(implementation, func(t *testing.T) {
-			c := processingConfiguration(t)
-			c.Pipelines[0].Slots = []config.Slot{headerSlot("rule", implementation, `{"names":["card.number","items[]","a;b","a&b=c","100%","x+y","!~"]}`)}
-			plan := acceptedProcessing(t, c)
-			if got := plan.Pipelines()[0].Slots[0].Arguments.Names; len(got) != 7 || got[0] != "card.number" || got[1] != "items[]" {
+			arguments, err := config.CompileArguments(implementation, json.RawMessage(`{"names":["card.number","items[]","a;b","a&b=c","100%","x+y","!~"]}`))
+			if err != nil {
+				t.Fatalf("PROPERTY: the names were refused: %v", err)
+			}
+			if got := arguments.Names; len(got) != 7 || got[0] != "card.number" || got[1] != "items[]" {
 				t.Fatalf("PROPERTY: the names did not resolve as written: %q", got)
 			}
 			for _, refused := range []string{`{"names":["card number"]}`, `{"names":[" card"]}`, `{"names":["n\u00e9"]}`, `{"names":["a\tb"]}`, `{"names":["a\u007fb"]}`} {
-				c.Pipelines[0].Slots[0].Configuration = json.RawMessage(refused)
-				refusedProcessing(t, c, config.InvalidBuiltinArguments)
+				if _, err := config.CompileArguments(implementation, json.RawMessage(refused)); err == nil {
+					t.Errorf("PROPERTY: %s accepted %s", implementation, refused)
+				}
 			}
 		})
 	}

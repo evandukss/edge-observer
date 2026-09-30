@@ -27,44 +27,44 @@ func TestT20EvidenceDistinguishesEveryState(t *testing.T) {
 	json := `{"card":"` + t20Card + `"}`
 	for _, tc := range []struct {
 		name      string
-		slots     []config.Slot
+		op        t20Op
 		request   string
 		response  string
 		entries   [][4]string // message, field, section, disposition
 		structure string      // of the request
 		kept      bool        // request body bytes kept
 	}{
-		{"removed-by-policy", []config.Slot{t20Slot("r", config.RemoveBody, `{"messages":["request","response"]}`)},
+		{"removed-by-policy", t20Of(config.RemoveBody, `{"messages":["request","response"]}`),
 			t20Post("/pay", "application/json", json), t20Response("application/json", json),
 			[][4]string{{"request", config.BodyField, "", processing.DispositionRemoved}, {"response", config.BodyField, "", processing.DispositionRemoved}}, record.StructureRemoved, false},
-		{"values-removed", []config.Slot{t20Slot("r", config.ReduceBodyToStructure, `{"messages":["request"]}`)},
+		{"values-removed", t20Of(config.ReduceBodyToStructure, `{"messages":["request"]}`),
 			t20Post("/pay", "application/json", json), goodResponse,
 			[][4]string{{"request", config.BodyValuesField, "", processing.DispositionValuesRemoved}}, record.StructureDerived, false},
-		{"reduced-without-structure", []config.Slot{t20Slot("r", config.ReduceBodyToStructure, `{"messages":["request"]}`)},
+		{"reduced-without-structure", t20Of(config.ReduceBodyToStructure, `{"messages":["request"]}`),
 			t20Post("/pay", "text/plain", "card "+t20Card), goodResponse,
 			[][4]string{{"request", config.BodyField, "", processing.DispositionRemoved}}, record.StructureRemoved, false},
-		{"removed-undecidable", []config.Slot{t20Slot("r", config.RemoveJSONFields, `{"messages":["request"],"pointers":["/card"]}`)},
+		{"removed-undecidable", t20Of(config.RemoveJSONFields, `{"messages":["request"],"pointers":["/card"]}`),
 			t20Post("/pay", "application/json", json+","), goodResponse,
 			[][4]string{{"request", config.BodyField, "", processing.DispositionRemovedUndecidable}}, record.StructureRemoved, false},
-		{"no-body", []config.Slot{t20Slot("r", config.RemoveBody, `{"messages":["request"]}`)},
+		{"no-body", t20Of(config.RemoveBody, `{"messages":["request"]}`),
 			t20Get("/pay"), goodResponse, nil, record.StructureNone, false},
-		{"kept", []config.Slot{t20Slot("r", config.RemoveBody, `{"messages":["response"]}`)},
+		{"kept", t20Of(config.RemoveBody, `{"messages":["response"]}`),
 			t20Post("/pay", "application/json", `{"other":"`+t20Other+`"}`), goodResponse,
 			[][4]string{{"response", config.BodyField, "", processing.DispositionRemoved}}, record.StructureDerived, true},
-		{"query-removed", []config.Slot{t20Slot("r", config.RemoveQuery, `{}`)},
+		{"query-removed", t20Of(config.RemoveQuery, `{}`),
 			t20Get("/pay?card=" + t20Card), goodResponse,
 			[][4]string{{"request", config.TargetQueryField, "", processing.DispositionRemoved}}, record.StructureNone, false},
-		{"no-query", []config.Slot{t20Slot("r", config.RemoveQuery, `{}`)},
+		{"no-query", t20Of(config.RemoveQuery, `{}`),
 			t20Get("/pay"), goodResponse, nil, record.StructureNone, false},
-		{"header-removed", []config.Slot{t20Slot("r", config.RemoveHeaders, `{"headers":["authorization"]}`)},
+		{"header-removed", t20Of(config.RemoveHeaders, `{"headers":["authorization"]}`),
 			"GET /pay HTTP/1.1\r\nX-Keep: " + t20Keep + "\r\nAuthorization: " + t20Card + "\r\n\r\n", goodResponse,
 			[][4]string{{"request", config.HeaderFieldPrefix + "authorization", "headers", processing.DispositionRemoved}}, record.StructureNone, false},
-		{"parameter-removed", []config.Slot{t20Slot("r", config.RemoveQueryParameters, `{"names":["card"]}`)},
+		{"parameter-removed", t20Of(config.RemoveQueryParameters, `{"names":["card"]}`),
 			t20Get("/pay?card=" + t20Card), goodResponse,
 			[][4]string{{"request", config.QueryFieldPrefix + "card", "", processing.DispositionRemoved}}, record.StructureNone, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			a, _, text := t20Exchange(t, t20Plan(t, pipeline("exchanges", tc.slots...)), tc.request, tc.response)
+			a, _, text := t20Exchange(t, t20Plan(t, tc.op.implementation, tc.op.arguments), tc.request, tc.response)
 			t20Absent(t, text, t20Card)
 			if a.Version != processing.ArtifactVersion || processing.ArtifactVersion != "observer.approved/2" {
 				t.Fatalf("PROPERTY: the artifact is %q, not observer.approved/2", a.Version)
@@ -110,7 +110,7 @@ func TestT20EvidenceDistinguishesEveryState(t *testing.T) {
 // messages, and still reads a version 1 artifact under version 1's rules.
 func TestT20ReaderChecksVersionTwoEvidence(t *testing.T) {
 	json := `{"card":"` + t20Card + `"}`
-	plan := t20Plan(t, pipeline("exchanges", t20Slot("r", config.RemoveBody, `{"messages":["request"]}`)))
+	plan := t20Plan(t, config.RemoveBody, `{"messages":["request"]}`)
 	valid, _, _ := t20Exchange(t, plan, t20Post("/pay?q=1", "application/json", json), goodResponse)
 	render := func(a processing.Artifact) error { return processing.RenderArtifact(&bytes.Buffer{}, a) }
 	if len(valid.PolicyExclusions) != 1 || valid.PolicyExclusions[0].Field != config.BodyField ||
@@ -171,12 +171,11 @@ func TestT20ReaderChecksVersionTwoEvidence(t *testing.T) {
 
 	t.Run("version-one-still-read", func(t *testing.T) {
 		out := &outputLog{}
-		w, store := worker(t, t20Plan(t, pipeline("exchanges", t20Slot("r", config.RemoveHeaders, `{"headers":["authorization"]}`))), out)
+		w, store := worker(t, t20Plan(t, config.RemoveHeaders, `{"headers":["authorization"]}`), out)
 		enqueue(t, store, batch(t, 1, "GET / HTTP/1.1\r\nAuthorization: x\r\n\r\n", goodResponse))
-		if o := drain(t, w); o.Written != 1 {
-			t.Fatalf("wiring, not the property: %+v", o)
-		}
-		a := out.artifacts[0]
+		counted(t, drain(t, w), out, 1, 1)
+		exchanges, _ := out.routed(config.ExchangesPipeline)
+		a := exchanges[0]
 		a.Version = processing.ArtifactVersion1
 		a.PolicyExclusions = []processing.PolicyExclusion{{Exchange: 0, Message: "request", Section: "headers", Name: "authorization"}}
 		var text bytes.Buffer

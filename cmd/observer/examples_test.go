@@ -96,11 +96,10 @@ func target(document map[string]any, name, exe string, args ...string) {
 // Every example configuration is one this program runs: a dry run over it,
 // with the examples' packs installed beside it, prints a plan. A configuration
 // is a document at observer.config/1; the examples directory holds nothing
-// else but the documents listed.
+// else but its packs.
 func TestEveryExampleConfigurationIsRunByTheProgram(t *testing.T) {
 	runs := []string{"no-rules.config.json", "observer.config.json"}
-	notConfigurations := []string{"configuration-only-pack.config.json", "content-filter-is-not-approval.config.json",
-		"index.json", "no-extension.config.json", "packs/credentials.json", "packs/reversed-masking.json", "runtime.json"}
+	notConfigurations := []string{"packs/credentials.json"}
 
 	var configurations, others []string
 	err := fs.WalkDir(config.Examples, "examples", func(at string, entry fs.DirEntry, err error) error {

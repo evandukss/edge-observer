@@ -8,13 +8,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/processing"
 )
 
 func TestWriterSharesEncodedAllowanceAcrossRecordTypes(t *testing.T) {
-	remove := slot("remove", config.RemoveHeaders, `{"headers":["authorization"]}`)
-	plan := workerPlan(t, pipeline("exchanges", remove), config.Pipeline{Name: "metadata", Input: "connection", Sinks: []string{"account"}})
+	plan := rulesPlan(t, `"remove": {"headers": ["authorization"]}`)
 	b := batch(t, 1, "GET / HTTP/1.1\r\nAuthorization: protected-value\r\nX-Public: original\r\n\r\n", goodResponse)
 	var reference outputLog
 	w, store := worker(t, plan, &reference)
@@ -112,7 +110,9 @@ func TestApprovedBytesCannotChangeAuthorizedLine(t *testing.T) {
 	t.Cleanup(func() { _ = writer.Close() })
 	var expected []byte
 	output := outputFunc(func(ctx context.Context, a processing.Approved) error {
-		expected = a.Bytes()
+		// Every approved line, in the order written: the exchange, then the
+		// connection's record.
+		expected = append(expected, a.Bytes()...)
 		copy := a.Bytes()
 		if len(copy) == 0 {
 			t.Fatal("approved line missing")
@@ -120,10 +120,10 @@ func TestApprovedBytesCannotChangeAuthorizedLine(t *testing.T) {
 		copy[0] = '!'
 		return writer.WriteApproved(ctx, a)
 	})
-	w, store := worker(t, workerPlan(t, pipeline("exchanges")), output)
+	w, store := worker(t, rulesPlan(t, ""), output)
 	enqueue(t, store, batch(t, 1, goodRequest, goodResponse))
-	if o := drain(t, w); o.Written != 1 {
-		t.Fatalf("write control: %+v", o)
+	if o := drain(t, w); o.Written != 2 {
+		t.Fatalf("write control, the exchange and the connection's record: %+v", o)
 	}
 	stored, err := os.ReadFile(filepath.Join(dir, processing.ArtifactName))
 	if err != nil || len(expected) == 0 || !bytes.Equal(stored, expected) {

@@ -111,7 +111,6 @@ var represented = map[string]string{
 	".processing.output_failures":     "processing.aggregate.output_failures",
 	".processing.authorized":          "processing.aggregate.authorized",
 	".processing.written":             "processing.aggregate.written",
-	".processing.stopped_pipelines[]": "processing.aggregate.stopped_pipelines[]",
 
 	".seal.stopped": "seal.stopped.value", ".seal.sealed": "seal.sealed.value",
 	".seal.withdrawal.at": "seal.withdrawal.at.value", ".seal.withdrawal.instances": "seal.withdrawal.instances",

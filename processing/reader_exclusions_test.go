@@ -17,12 +17,10 @@ import (
 func TestApprovedReaderDistinguishesAllFourExclusionWireForms(t *testing.T) {
 	empty, _ := readableArtifact(t)
 	var out outputLog
-	remove := slot("remove", config.RemoveHeaders, `{"headers":["authorization"]}`)
-	w, store := worker(t, workerPlan(t, pipeline("exchanges", remove)), &out)
+	w, store := worker(t, rulesPlan(t, `"remove": {"headers": ["authorization"]}`), &out)
 	enqueue(t, store, batch(t, 1, "GET /public HTTP/1.1\r\nAuthorization: source-value\r\nX-Public: useful\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\npublic-body"))
-	if result := drain(t, w); result.Written != 1 || len(out.lines) != 1 {
-		t.Fatalf("populated control did not reach the writer: %+v", result)
-	}
+	counted(t, drain(t, w), &out, 1, 1)
+	_, lines := out.routed(config.ExchangesPipeline)
 	var members map[string]json.RawMessage
 	if err := json.Unmarshal(empty, &members); err != nil {
 		t.Fatal(err)
@@ -50,7 +48,7 @@ func TestApprovedReaderDistinguishesAllFourExclusionWireForms(t *testing.T) {
 		want []processing.PolicyExclusion
 		text string
 	}{
-		{"populated", out.lines[0], `[{"exchange":0,"message":"request","field":"message.headers.authorization","section":"headers","disposition":"removed"}]`, []processing.PolicyExclusion{{Exchange: 0, Message: "request", Field: "message.headers.authorization", Section: "headers", Disposition: "removed"}}, excluded},
+		{"populated", lines[0], `[{"exchange":0,"message":"request","field":"message.headers.authorization","section":"headers","disposition":"removed"}]`, []processing.PolicyExclusion{{Exchange: 0, Message: "request", Field: "message.headers.authorization", Section: "headers", Disposition: "removed"}}, excluded},
 		{"literal-empty-array", empty, "[]", []processing.PolicyExclusion{}, none},
 		{"absent-legacy-key", append(absent, '\n'), "", nil, unavailable},
 		{"literal-null-after-public-round-trip", append(null, '\n'), "null", nil, unavailable},

@@ -43,7 +43,7 @@ func TestT20SplicingKeepsEveryOtherByte(t *testing.T) {
 			if tc.implementation == config.RemoveFormFields {
 				contentType = "application/x-www-form-urlencoded"
 			}
-			plan := t20Plan(t, pipeline("exchanges", t20Slot("rule", tc.implementation, tc.arguments)))
+			plan := t20Plan(t, tc.implementation, tc.arguments)
 			a, _, text := t20Exchange(t, plan, t20Post("/pay", contentType, tc.body), goodResponse)
 			t20Absent(t, text, t20Card)
 			if got := t20Body(t, a, "request"); got != tc.want {
@@ -62,7 +62,7 @@ func TestT20QuerySplicingKeepsEveryOtherByte(t *testing.T) {
 		{"whole-query-empty", config.RemoveQuery, `{}`, "/p/a?", "/p/a"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			plan := t20Plan(t, pipeline("exchanges", t20Slot("rule", tc.implementation, tc.arguments)))
+			plan := t20Plan(t, tc.implementation, tc.arguments)
 			a, _, text := t20Exchange(t, plan, t20Get(tc.target), goodResponse)
 			t20Absent(t, text, t20Card)
 			if got := a.Reconstruction.Exchanges[0].Request.Message.Target; got != tc.want {

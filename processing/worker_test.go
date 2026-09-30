@@ -40,52 +40,6 @@ func (o *outputLog) WriteApproved(_ context.Context, a processing.Approved) erro
 	return nil
 }
 
-func workerPlan(t *testing.T, pipelines ...config.Pipeline) *config.ProcessingPlan {
-	t.Helper()
-	raw, err := config.Examples.ReadFile("examples/no-extension.config.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var c config.Configuration
-	if err := json.Unmarshal(raw, &c); err != nil {
-		t.Fatal(err)
-	}
-	c.Pipelines = pipelines
-	for n := range c.Pipelines {
-		if c.Pipelines[n].Slots == nil {
-			c.Pipelines[n].Slots = []config.Slot{}
-		}
-	}
-	c.Policy, c.Packs, c.Subscribers = nil, nil, nil
-	c.Sinks = nil
-	seenSinks := make(map[string]bool)
-	for _, p := range pipelines {
-		for _, name := range p.Sinks {
-			if !seenSinks[name] {
-				c.Sinks = append(c.Sinks, config.Sink{Name: name, Kind: "local_account"})
-				seenSinks[name] = true
-			}
-		}
-	}
-	raw, err = json.Marshal(c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan, findings := config.CompileProcessing(raw, nil)
-	if plan == nil || len(findings) != 0 {
-		t.Fatalf("fixture compiler refused: %+v", findings)
-	}
-	return plan
-}
-
-func pipeline(name string, slots ...config.Slot) config.Pipeline {
-	return config.Pipeline{Name: name, Input: "reconstruction", Slots: slots, Sinks: []string{"account"}}
-}
-
-func slot(name, implementation, args string) config.Slot {
-	return config.Slot{Name: name, Implementation: implementation, Configuration: json.RawMessage(args), OnFailure: config.OnFailureDropAndAccount}
-}
-
 func worker(t *testing.T, plan *config.ProcessingPlan, output processing.Output) (*processing.Worker, *intake.Store) {
 	t.Helper()
 	store, err := intake.New(1 << 20)
@@ -206,34 +160,9 @@ func field(t *testing.T, a processing.Artifact, name string) string {
 const goodRequest = "GET / HTTP/1.1\r\nX-Public: original\r\n\r\n"
 const goodResponse = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"
 
-func TestWorkerExecutesCompiledOrderOnIndependentCopies(t *testing.T) {
-	replace := slot("replace", config.ReplaceHeaderValues, `{"headers":["x-public"],"value":"abcdef"}`)
-	truncate := slot("truncate", config.TruncateHeaderValues, `{"headers":["x-public"],"length":3}`)
-	plan := workerPlan(t, pipeline("unchanged"), pipeline("short", replace, truncate), pipeline("long", truncate, replace))
-	out := &outputLog{}
-	w, store := worker(t, plan, out)
-	enqueue(t, store, batch(t, 1, goodRequest, goodResponse))
-	got := drain(t, w)
-	if got.Written != 3 || len(out.artifacts) != 3 {
-		t.Fatalf("three compiled routes must emit: %+v", got)
-	}
-	for n, want := range []string{"original", "abc", "abcdef"} {
-		if value := field(t, out.artifacts[n], "x-public"); value != want {
-			t.Errorf("route %d value %q want %q", n, value, want)
-		}
-		if out.artifacts[n].PolicyRevision != "fixture-policy" || out.artifacts[n].Version != processing.ArtifactVersion {
-			t.Error("artifact provenance missing")
-		}
-	}
-	if st := store.Stats(); st.Bytes != 0 || st.Leased != 0 {
-		t.Fatalf("completed batch retains intake: %+v", st)
-	}
-}
-
 func TestWorkerConnectionRouteContainsOnlyMetadata(t *testing.T) {
-	metadata := config.Pipeline{Name: "metadata", Input: "connection", Sinks: []string{"account"}}
 	out := &outputLog{}
-	w, store := worker(t, workerPlan(t, pipeline("exchanges"), metadata), out)
+	w, store := worker(t, rulesPlan(t, ""), out)
 	enqueue(t, store, batch(t, 1, goodRequest, goodResponse))
 	drain(t, w)
 	if len(out.artifacts) != 2 {
@@ -242,7 +171,7 @@ func TestWorkerConnectionRouteContainsOnlyMetadata(t *testing.T) {
 	if field(t, out.artifacts[0], "x-public") != "original" {
 		t.Fatal("reconstruction control lost permitted value")
 	}
-	if out.artifacts[1].Route.Pipeline != "metadata" || out.artifacts[1].Reconstruction != nil {
+	if out.artifacts[1].Route.Pipeline != config.ConnectionsPipeline || out.artifacts[1].Reconstruction != nil {
 		t.Fatal("metadata exception carried reconstruction")
 	}
 	if strings.Contains(string(out.lines[1]), "original") || strings.Contains(string(out.lines[1]), "reconstruction") {
@@ -252,7 +181,7 @@ func TestWorkerConnectionRouteContainsOnlyMetadata(t *testing.T) {
 
 func TestWorkerWaitsForOutstandingFragmentAfterRetirement(t *testing.T) {
 	out := &outputLog{}
-	w, store := worker(t, workerPlan(t, pipeline("exchanges")), out)
+	w, store := worker(t, rulesPlan(t, ""), out)
 	b := batch(t, 1, goodRequest, goodResponse)
 	if err := store.Connection(b.records[0]); err != nil {
 		t.Fatal(err)
@@ -268,14 +197,15 @@ func TestWorkerWaitsForOutstandingFragmentAfterRetirement(t *testing.T) {
 		t.Fatal(err)
 	}
 	o = drain(t, w)
-	if o.Pending != 0 || o.Written != 1 || len(out.artifacts) != 1 {
+	if o.Pending != 0 {
 		t.Fatalf("late callback did not settle positive control: %+v", o)
 	}
+	counted(t, o, out, 1, 1)
 }
 
 func TestWorkerFinalizationKeepsDecidablePrefixAndWithholdsTail(t *testing.T) {
 	out := &outputLog{}
-	w, store := worker(t, workerPlan(t, pipeline("exchanges")), out)
+	w, store := worker(t, rulesPlan(t, ""), out)
 	b := batch(t, 1, goodRequest+"GET /later HTTP/1.1\r\nAuthorization: unfinished", goodResponse)
 	b.records[0].How, b.records[0].Ended = connection.StillOpen, time.Time{}
 	enqueue(t, store, b)
@@ -283,51 +213,38 @@ func TestWorkerFinalizationKeepsDecidablePrefixAndWithholdsTail(t *testing.T) {
 		t.Fatalf("live batch prematurely emitted: %+v", o)
 	}
 	o, err := w.Finish(context.Background(), processing.Finalization{Withdrawn: true, Drained: true})
-	if err != nil || o.Written != 1 || o.Pending != 0 {
+	if err != nil || o.Pending != 0 {
 		t.Fatalf("prefix and tail: %+v %v", o, err)
 	}
-	if len(out.artifacts) != 1 || field(t, out.artifacts[0], "x-public") != "original" {
+	counted(t, o, out, 1, 1)
+	exchanges, lines := out.routed(config.ExchangesPipeline)
+	if field(t, exchanges[0], "x-public") != "original" {
 		t.Fatal("decidable prefix lost")
 	}
 	expectWithheld(t, o, connection.Uncounted("reconstruction_incomplete"))
-	if strings.Contains(string(out.lines[0]), "unfinished") || strings.Contains(string(out.lines[0]), "/later") {
+	if strings.Contains(string(lines[0]), "unfinished") || strings.Contains(string(lines[0]), "/later") {
 		t.Fatal("undecidable tail persisted")
 	}
-	if out.artifacts[0].Connection.Ending.How != "still_open" {
-		t.Fatalf("capture end became close: %+v", out.artifacts[0].Connection.Ending)
+	if exchanges[0].Connection.Ending.How != "still_open" {
+		t.Fatalf("capture end became close: %+v", exchanges[0].Connection.Ending)
 	}
 }
 
-func TestWorkerProcessingFailureHonorsResolvedAction(t *testing.T) {
-	for _, action := range []string{config.OnFailureDropAndAccount, config.OnFailureStopPipeline} {
-		t.Run(action, func(t *testing.T) {
-			s := slot("remove", config.RemoveHeaders, `{"headers":["authorization"]}`)
-			s.OnFailure = action
-			out := &outputLog{}
-			w, store := worker(t, workerPlan(t, pipeline("exchanges", s)), out)
-			enqueue(t, store, batch(t, 1, goodRequest, goodResponse))
-			if o := drain(t, w); o.Written != 1 {
-				t.Fatalf("independent decidable control: %+v", o)
-			}
-			enqueue(t, store, batch(t, 2, "GET / HTTP/1.1\r\nBad : field\r\n\r\n", goodResponse))
-			o := drain(t, w)
-			if o.ProcessingFailures != 1 || o.Written != 1 {
-				t.Fatalf("parse fault was not classified: %+v", o)
-			}
-			enqueue(t, store, batch(t, 3, goodRequest, goodResponse))
-			o = drain(t, w)
-			want := uint64(2)
-			if action == config.OnFailureStopPipeline {
-				want = 1
-				if len(o.StoppedPipelines) != 1 {
-					t.Fatal("stop action not recorded")
-				}
-			}
-			if o.Written != want {
-				t.Fatalf("action %s: %+v", action, o)
-			}
-		})
+// A processing failure drops the output it concerns, is counted, and the
+// pipeline goes on with the next batch.
+func TestWorkerProcessingFailureDropsAndAccounts(t *testing.T) {
+	out := &outputLog{}
+	w, store := worker(t, rulesPlan(t, `"remove": {"headers": ["authorization"]}`), out)
+	enqueue(t, store, batch(t, 1, goodRequest, goodResponse))
+	counted(t, drain(t, w), out, 1, 1)
+	enqueue(t, store, batch(t, 2, "GET / HTTP/1.1\r\nBad : field\r\n\r\n", goodResponse))
+	o := drain(t, w)
+	if o.ProcessingFailures != 1 {
+		t.Fatalf("parse fault was not classified: %+v", o)
 	}
+	counted(t, o, out, 1, 2)
+	enqueue(t, store, batch(t, 3, goodRequest, goodResponse))
+	counted(t, drain(t, w), out, 2, 3)
 }
 
 func TestWorkerOutputFailureIsNotDeliveryAndIsTerminal(t *testing.T) {
@@ -336,24 +253,24 @@ func TestWorkerOutputFailureIsNotDeliveryAndIsTerminal(t *testing.T) {
 	failure := errors.New("constructed output failure")
 	output := outputFunc(func(ctx context.Context, a processing.Approved) error {
 		calls++
-		if calls == 2 {
+		// The third write is the second batch's exchange: the first batch
+		// writes its exchange and its connection record.
+		if calls == 3 {
 			return failure
 		}
 		return out.WriteApproved(ctx, a)
 	})
-	w, store := worker(t, workerPlan(t, pipeline("exchanges")), output)
+	w, store := worker(t, rulesPlan(t, ""), output)
 	enqueue(t, store, batch(t, 1, goodRequest, goodResponse))
-	if o := drain(t, w); o.Written != 1 {
-		t.Fatalf("write control: %+v", o)
-	}
+	counted(t, drain(t, w), &out, 1, 1)
 	enqueue(t, store, batch(t, 2, goodRequest, goodResponse))
 	o, err := w.Drain(context.Background())
-	if err == nil || o.OutputFailures != 1 || o.Written != 1 || calls != 2 {
+	if err == nil || o.OutputFailures != 1 || o.Written != 2 || calls != 3 {
 		t.Fatalf("fault boundary: %+v %v calls=%d", o, err, calls)
 	}
 	enqueue(t, store, batch(t, 3, goodRequest, goodResponse))
 	_, _ = w.Drain(context.Background())
-	if calls != 2 || len(out.artifacts) != 1 {
+	if calls != 3 || len(out.artifacts) != 2 {
 		t.Fatal("output retried or falsely counted delivered")
 	}
 }
@@ -387,7 +304,7 @@ func TestWorkerReportsIndeterminateSuffixAfterUsefulPrefix(t *testing.T) {
 	for _, name := range []string{"gap-at-boundary", "gap-inside-message", "short-payload", "unterminated-message", "placement-at-boundary"} {
 		t.Run(name, func(t *testing.T) {
 			out := &outputLog{}
-			plan := workerPlan(t, pipeline("exchanges"), config.Pipeline{Name: "metadata", Input: "connection", Sinks: []string{"account"}})
+			plan := rulesPlan(t, "")
 			w, store := worker(t, plan, out)
 			enqueue(t, store, batch(t, 1, goodRequest, goodResponse))
 			if o := drain(t, w); o.Written != 2 || len(out.lines) != 2 {

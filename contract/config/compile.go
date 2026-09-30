@@ -343,7 +343,7 @@ func generate(file File, m *merged) (*ProcessingPlan, []Finding) {
 			var args *Arguments
 			if args, err = compileArguments(implementation, raw); err == nil {
 				slots = append(slots, EffectiveSlot{Name: name, Implementation: implementation, Configuration: raw,
-					OnFailure: OnFailureDropAndAccount, Arguments: args, SelectedBy: strings.Join(documents, ",")})
+					Arguments: args, SelectedBy: strings.Join(documents, ",")})
 				return
 			}
 		}
@@ -475,19 +475,19 @@ func generate(file File, m *merged) (*ProcessingPlan, []Finding) {
 			"the rules compiled to %d operations, above the %d the reader's limits allow; this is an observer "+
 				"defect, not the configuration's error", len(slots), MaxCompiledSlots)}}
 	}
-	if jsonSlot, formSlot := bodyGrammars(slots); jsonSlot != "" && formSlot != "" {
-		return nil, []Finding{{Document: "configuration", Subject: formSlot, Reason: InternalDefect, Detail: fmt.Sprintf(
-			"the internal layer refuses %s beside %s on one route (%s); this is an observer limitation, not the "+
-				"configuration's error", jsonSlot, formSlot, BodyGrammarConflict)}}
+	if first, second := bodyGrammars(slots); first != "" {
+		return nil, []Finding{{Document: "configuration", Subject: second, Reason: InternalDefect, Detail: fmt.Sprintf(
+			"the internal layer refuses %s beside %s on one route (%s); this is an observer defect, not the "+
+				"configuration's error", first, second, BodyGrammarConflict)}}
 	}
 
 	if file.WriteContent {
 		plan.resolved.Pipelines = append(plan.resolved.Pipelines, EffectivePipeline{Name: ExchangesPipeline,
-			Input: ReconstructionInput, Slots: slots, Sinks: []string{AccountSink}, DeclaredBy: "configuration"})
+			Input: ReconstructionInput, Slots: slots, Sinks: []string{AccountSink}})
 		plan.routes = append(plan.routes, DurableRoute{Pipeline: ExchangesPipeline, Sink: AccountSink, Kind: LocalAccountKind})
 	}
 	plan.resolved.Pipelines = append(plan.resolved.Pipelines, EffectivePipeline{Name: ConnectionsPipeline,
-		Input: ConnectionInput, Slots: []EffectiveSlot{}, Sinks: []string{AccountSink}, DeclaredBy: "configuration"})
+		Input: ConnectionInput, Slots: []EffectiveSlot{}, Sinks: []string{AccountSink}})
 	plan.routes = append(plan.routes, DurableRoute{Pipeline: ConnectionsPipeline, Sink: AccountSink, Kind: LocalAccountKind})
 
 	plan.exclusions = exclusionsOf(m)
@@ -539,8 +539,7 @@ func groupByValue(entries []entry) []valueGroup {
 func exclusionsOf(m *merged) []Exclusion {
 	var out []Exclusion
 	add := func(at origin, field, header string, messages ...string) {
-		out = append(out, Exclusion{Declaration: at.String(), Field: field, Header: header, Messages: messages,
-			FailureAction: OnFailureDropAndAccount})
+		out = append(out, Exclusion{Declaration: at.String(), Field: field, Header: header, Messages: messages})
 	}
 	for _, one := range m.removeHeaders.entries {
 		add(one.origin, HeaderFieldPrefix+one.name, one.name, MessageRequest)

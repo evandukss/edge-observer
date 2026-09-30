@@ -75,16 +75,16 @@ func TestRemoveHeadersRecordsNamedPolicyExclusions(t *testing.T) {
 		{"request", "trailers"}, {"response", "trailers"},
 	} {
 		t.Run(location.message+"-"+location.section, func(t *testing.T) {
-			remove := slot("remove", config.RemoveHeaders, `{"headers":["authorization","x-secret","x-never"]}`)
-			again := remove
-			again.Name = "remove-again"
 			out := &outputLog{}
-			w, store := worker(t, workerPlan(t, pipeline("removed", remove, again)), out)
+			w, store := worker(t, rulesPlan(t, `"remove": {"headers": ["authorization", "x-secret", "x-never"]}`), out)
 			enqueue(t, store, batch(t, 1, goodRequest, goodResponse))
-			if o := drain(t, w); o.Written != 1 || o.ProcessingFailures != 0 || o.OutputFailures != 0 || field(t, out.artifacts[0], "x-public") != "original" {
+			o := drain(t, w)
+			counted(t, o, out, 1, 1)
+			exchanges, lines := out.routed(config.ExchangesPipeline)
+			if o.ProcessingFailures != 0 || o.OutputFailures != 0 || field(t, exchanges[0], "x-public") != "original" {
 				t.Fatalf("useful never-present control did not reach output: %+v", o)
 			}
-			if exclusions, _ := policyExclusions(t, out.lines[0]); len(exclusions) != 0 {
+			if exclusions, _ := policyExclusions(t, lines[0]); len(exclusions) != 0 {
 				t.Fatal("configured-but-absent fields acquired removal evidence")
 			}
 			t.Log("useful control reached with no selected source field present")
@@ -102,11 +102,13 @@ func TestRemoveHeadersRecordsNamedPolicyExclusions(t *testing.T) {
 				response = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTrailer: Authorization, X-Secret\r\n\r\n2\r\nOK\r\n0\r\n" + fields + "\r\n"
 			}
 			enqueue(t, store, batch(t, 2, request, response))
-			o := drain(t, w)
-			if o.Written != 2 || o.Batches != 2 || o.ProcessingFailures != 0 || o.OutputFailures != 0 || field(t, out.artifacts[1], "x-public") != "original" {
+			o = drain(t, w)
+			counted(t, o, out, 2, 2)
+			exchanges, lines = out.routed(config.ExchangesPipeline)
+			if o.Batches != 2 || o.ProcessingFailures != 0 || o.OutputFailures != 0 || field(t, exchanges[1], "x-public") != "original" {
 				t.Fatalf("field-removal batch did not reach useful output: %+v", o)
 			}
-			e := out.artifacts[1].Reconstruction.Exchanges[0]
+			e := exchanges[1].Reconstruction.Exchanges[0]
 			message := e.Request.Message
 			if location.message == "response" {
 				message = e.Response.Message
@@ -119,64 +121,19 @@ func TestRemoveHeadersRecordsNamedPolicyExclusions(t *testing.T) {
 				}
 			}
 			for _, value := range []string{"remove-first", "remove-second", "remove-repeat"} {
-				if bytes.Contains(out.lines[1], []byte(value)) {
+				if bytes.Contains(lines[1], []byte(value)) {
 					t.Fatal("removed value remained in the approved line")
 				}
 			}
 			t.Logf("RemoveHeaders reached %s/%s: useful output remains; both names and all three original values removed", location.message, location.section)
-			requirePolicyExclusions(t, out.lines[1], []exclusionWire{
+			requirePolicyExclusions(t, lines[1], []exclusionWire{
 				{Exchange: 0, Message: location.message, Field: "message.headers.authorization", Section: location.section, Disposition: "removed"},
 				{Exchange: 0, Message: location.message, Field: "message.headers.x-secret", Section: location.section, Disposition: "removed"},
 			})
 			// This explicit-empty assertion is intentionally after the new
 			// evidence assertion: the old producer reaches removal before red.
-			requirePolicyExclusions(t, out.lines[0], nil)
-			t.Log("named evidence and explicit empty control both reached; repeated removals and absent names add nothing")
+			requirePolicyExclusions(t, lines[0], nil)
+			t.Log("named evidence and explicit empty control both reached; absent names add nothing")
 		})
 	}
-}
-
-func TestPolicyExclusionsFollowRetainedPipelineMessages(t *testing.T) {
-	remove := slot("remove", config.RemoveHeaders, `{"headers":["authorization","x-secret","x-suffix"]}`)
-	replace := slot("replace", config.ReplaceHeaderValues, `{"headers":["authorization","x-secret"],"value":"changed"}`)
-	truncate := slot("truncate", config.TruncateHeaderValues, `{"headers":["authorization","x-secret"],"length":3}`)
-	metadata := config.Pipeline{Name: "metadata", Input: "connection", Sinks: []string{"account"}}
-	out := &outputLog{}
-	w, store := worker(t, workerPlan(t, pipeline("removed", remove), pipeline("replaced", replace), pipeline("truncated", truncate), metadata), out)
-	request := "GET /first HTTP/1.1\r\nX-Public: original\r\nAuthorization: first-source\r\n\r\n" + goodRequest + "GET /suffix HTTP/1.1\r\nX-Suffix: withheld-marker-value"
-	response := goodResponse + "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nX-Secret: second-source\r\n\r\nOK"
-	enqueue(t, store, batch(t, 1, request, response))
-	o := drain(t, w)
-	if o.Written != 4 || o.ProcessingFailures != 3 || o.OutputFailures != 0 || len(out.artifacts) != 4 {
-		t.Fatalf("independent pipeline prefix controls did not reach output: %+v", o)
-	}
-	for i, expected := range []string{"", "changed", "fir"} {
-		a := out.artifacts[i]
-		if a.Reconstruction == nil || len(a.Reconstruction.Exchanges) != 2 || a.ReconstructionTruncation == nil {
-			t.Fatalf("pipeline %s did not retain two exchanges and report the suffix", a.Route.Pipeline)
-		}
-		first := a.Reconstruction.Exchanges[0].Request.Message
-		if value, present := namedField(first.Headers, "x-public"); !present || value != "original" {
-			t.Fatal("retained prefix lost its permitted field")
-		}
-		value, present := namedField(first.Headers, "authorization")
-		if (i == 0 && present) || (i != 0 && (!present || value != expected)) {
-			t.Fatalf("pipeline %s did not reach its configured operation", a.Route.Pipeline)
-		}
-		if bytes.Contains(out.lines[i], []byte("withheld-marker-value")) || bytes.Contains(out.lines[i], []byte("x-suffix")) {
-			t.Fatal("undecidable suffix entered the retained artifact")
-		}
-	}
-	if out.artifacts[3].Reconstruction != nil || out.artifacts[3].ReconstructionTruncation != nil {
-		t.Fatal("metadata control received a reconstruction")
-	}
-	t.Log("three independent operations reached two retained exchanges beside metadata; incomplete suffix withheld")
-	requirePolicyExclusions(t, out.lines[0], []exclusionWire{
-		{Exchange: 0, Message: "request", Field: "message.headers.authorization", Section: "headers", Disposition: "removed"},
-		{Exchange: 1, Message: "response", Field: "message.headers.x-secret", Section: "headers", Disposition: "removed"},
-	})
-	for _, index := range []int{1, 2, 3} {
-		requirePolicyExclusions(t, out.lines[index], nil)
-	}
-	t.Log("exclusion identity follows exchange and message; replacement, truncation and metadata have explicit empty evidence")
 }

@@ -1,5 +1,5 @@
 {
-  "account": "observer.account/1-draft",
+  "account": "observer.account/2-draft",
   "session": "dummy-session",
   "moment": "sealed",
   "at": {
@@ -13,13 +13,10 @@
       "state": "not_carried"
     },
     "contracts": [
-      "observer.account/1-draft",
+      "observer.account/2-draft",
       "observer.record/1-draft"
     ],
     "configuration": {
-      "state": "not_carried"
-    },
-    "pipelines": {
       "state": "not_carried"
     }
   },
@@ -57,9 +54,6 @@
     "state": "not_carried"
   },
   "processing": {
-    "state": "not_carried"
-  },
-  "requirements": {
     "state": "not_carried"
   },
   "seal": {

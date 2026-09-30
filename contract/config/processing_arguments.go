@@ -1,8 +1,11 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 )
@@ -20,6 +23,21 @@ var argumentMembers = map[string][]string{
 	RemoveFormFields:      {"names"},
 	RemoveQueryParameters: {"names"},
 	RequestBodyFields:     {"names", "pointers", "masks"},
+}
+
+// decode reads one argument object into its type, refusing anything after it.
+// Members are checked against argumentMembers by exact name below, since the
+// decoder matches a member name in another case.
+func decode(content []byte, into any) error {
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(into); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("something follows the argument object, and it is one value")
+	}
+	return nil
 }
 
 func compileArguments(implementation string, raw json.RawMessage) (*Arguments, error) {

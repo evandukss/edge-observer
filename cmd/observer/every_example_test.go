@@ -46,7 +46,7 @@ func moduleRoot(t *testing.T) string {
 // examplesFloor is the fewest example files the walk must find before its
 // result means anything: the count when set, held as a floor so later
 // examples need no edit here.
-const examplesFloor = 14
+const examplesFloor = 10
 
 // executor is the program an examples directory describes, run over that
 // directory through a filesystem that records every file opened. It returns
@@ -62,15 +62,16 @@ type executor struct {
 // executes it. A directory with examples no entry names is refused.
 var executors = []executor{
 	{"contract/config/examples", "observer dry-run over every *.config.json", dryRunEvery},
-	{"contract/config/examples", "the configuration check over every example index.json lists", checkAsIndexed},
 	{"contract/config/examples", "the reader over every observer.config/1 example, with the packs it enables", compileEveryFile},
 	{"contract/examples/bundle", "the account validator over the dummy bundle", checkDocumentBundle},
-	{"contract", "the configuration and policy checks over standalone declarations", checkDocumentDeclarations},
 }
 
 // notExecuted is every example file deliberately executed by nothing, each
 // with why.
-var notExecuted = map[string]string{}
+var notExecuted = map[string]string{
+	"contract/examples/policy.json": "the policy-document vocabulary it illustrates has no reader left; it is " +
+		"deleted with contract/policy, which a test still being converted names",
+}
 
 // isExample: a directory named examples on the path, or "example" in the name.
 // Go source is the program, not an example.
@@ -332,64 +333,6 @@ func compileEveryFile(examples fs.FS) map[string]error {
 	})
 	if err != nil {
 		failures[""] = err
-	}
-	return failures
-}
-
-// strictly decodes a document, refusing members its type lacks.
-func strictly(content []byte, into any) error {
-	decoder := json.NewDecoder(bytes.NewReader(content))
-	decoder.DisallowUnknownFields()
-	return decoder.Decode(into)
-}
-
-// checkAsIndexed runs the configuration check over every example the index
-// lists, with its manifests and the example runtime, requiring the stated
-// outcome.
-func checkAsIndexed(examples fs.FS) map[string]error {
-	whole := func(err error) map[string]error { return map[string]error{"": err} }
-	content, err := fs.ReadFile(examples, "index.json")
-	if err != nil {
-		return whole(err)
-	}
-	var index []struct {
-		Name          string         `json:"name"`
-		Purpose       string         `json:"purpose"`
-		Configuration string         `json:"configuration"`
-		Manifests     []string       `json:"manifests"`
-		Outcome       config.Outcome `json:"outcome"`
-	}
-	if err := strictly(content, &index); err != nil {
-		return map[string]error{"index.json": err}
-	}
-	runtime, err := fs.ReadFile(examples, "runtime.json")
-	if err != nil {
-		return whole(err)
-	}
-	var available config.Available
-	if err := strictly(runtime, &available); err != nil {
-		return map[string]error{"runtime.json": err}
-	}
-	failures := map[string]error{}
-	for _, one := range index {
-		configuration, err := fs.ReadFile(examples, one.Configuration)
-		if err != nil {
-			failures["index.json"] = errors.Join(failures["index.json"], err)
-			continue
-		}
-		in := config.Input{Configuration: configuration, Available: available}
-		for _, manifest := range one.Manifests {
-			content, err := fs.ReadFile(examples, manifest)
-			if err != nil {
-				failures["index.json"] = errors.Join(failures["index.json"], err)
-				continue
-			}
-			in.Manifests = append(in.Manifests, config.Supplied{Name: strings.TrimSuffix(path.Base(manifest), ".json"), Content: content})
-		}
-		if result := config.Check(in); result.Outcome != one.Outcome {
-			failures[one.Configuration] = fmt.Errorf("%s checks as %q where the index says %q: %+v %+v",
-				one.Name, result.Outcome, one.Outcome, result.Structural, result.Composition)
-		}
 	}
 	return failures
 }

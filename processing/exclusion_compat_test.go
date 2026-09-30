@@ -12,15 +12,17 @@ import (
 // Supplementary representation check added after the five producer reds were
 // captured. It is not red-first evidence or the independent public-reader test.
 func TestPolicyExclusionEvidencePreservesAvailability(t *testing.T) {
-	remove := slot("remove", config.RemoveHeaders, `{"headers":["authorization"]}`)
 	out := &outputLog{}
-	w, store := worker(t, workerPlan(t, pipeline("removed", remove)), out)
+	w, store := worker(t, rulesPlan(t, `"remove": {"headers": ["authorization"]}`), out)
 	enqueue(t, store, batch(t, 1, goodRequest, goodResponse))
 	enqueue(t, store, batch(t, 2, "GET / HTTP/1.1\r\nX-Public: original\r\nAuthorization: excluded-source\r\n\r\n", goodResponse))
-	if o := drain(t, w); o.Written != 2 || o.ProcessingFailures != 0 || o.OutputFailures != 0 || len(out.lines) != 2 {
+	o := drain(t, w)
+	if o.ProcessingFailures != 0 || o.OutputFailures != 0 {
 		t.Fatalf("availability controls did not reach both outputs: %+v", o)
 	}
-	for _, a := range out.artifacts {
+	counted(t, o, out, 2, 2)
+	exchanges, lines := out.routed(config.ExchangesPipeline)
+	for _, a := range exchanges {
 		if field(t, a, "x-public") != "original" {
 			t.Fatal("availability control lost permitted output")
 		}
@@ -30,7 +32,7 @@ func TestPolicyExclusionEvidencePreservesAvailability(t *testing.T) {
 	// Derive an older representation by removing only the new member from a
 	// valid artifact. This checks compatibility, not an old producer execution.
 	var legacy map[string]json.RawMessage
-	if err := json.Unmarshal(out.lines[0], &legacy); err != nil {
+	if err := json.Unmarshal(lines[0], &legacy); err != nil {
 		t.Fatal(err)
 	}
 	delete(legacy, "policy_exclusions")
@@ -44,8 +46,8 @@ func TestPolicyExclusionEvidencePreservesAvailability(t *testing.T) {
 		want []processing.PolicyExclusion
 		wire string
 	}{
-		{"populated", out.lines[1], []processing.PolicyExclusion{{Exchange: 0, Message: "request", Field: "message.headers.authorization", Section: "headers", Disposition: "removed"}}, `[{"exchange":0,"message":"request","field":"message.headers.authorization","section":"headers","disposition":"removed"}]`},
-		{"new-empty", out.lines[0], []processing.PolicyExclusion{}, "[]"},
+		{"populated", lines[1], []processing.PolicyExclusion{{Exchange: 0, Message: "request", Field: "message.headers.authorization", Section: "headers", Disposition: "removed"}}, `[{"exchange":0,"message":"request","field":"message.headers.authorization","section":"headers","disposition":"removed"}]`},
+		{"new-empty", lines[0], []processing.PolicyExclusion{}, "[]"},
 		{"old-absent", oldLine, nil, ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {

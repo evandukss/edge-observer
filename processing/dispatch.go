@@ -41,7 +41,7 @@ func (w *Worker) process(ctx context.Context, b *batch) error {
 	refused := connection.Counted(0)
 	needsParse := false
 	for _, p := range w.pipelines {
-		if p.Input == "reconstruction" && !w.stopped[p.Name] {
+		if p.Input == "reconstruction" {
 			needsParse = true
 		}
 	}
@@ -79,9 +79,6 @@ func (w *Worker) process(ctx context.Context, b *batch) error {
 		w.withhold(refused)
 	}
 	for _, p := range w.pipelines {
-		if w.stopped[p.Name] {
-			continue
-		}
 		artifact := Artifact{Version: ArtifactVersion, PolicyRevision: w.options.PolicyRevision, Connection: metadata, PolicyExclusions: []PolicyExclusion{}}
 		switch p.Input {
 		case "connection":
@@ -93,7 +90,7 @@ func (w *Worker) process(ctx context.Context, b *batch) error {
 			failed := false
 			for _, slot := range p.Slots {
 				if !run.apply(&processed, slot) {
-					w.failure(p.Name, slot.OnFailure)
+					w.countProcessingFailure(p.Name)
 					failed = true
 					break
 				}
@@ -104,7 +101,7 @@ func (w *Worker) process(ctx context.Context, b *batch) error {
 			if len(processed.Exchanges) != 0 {
 				projected, _, err := record.FromReconstruction(reconstruct.Reconstruction{Connections: []reconstruct.Connection{processed}}, nil)
 				if err != nil {
-					w.failure(p.Name, firstAction(p))
+					w.countProcessingFailure(p.Name)
 					continue
 				}
 				run.mark(&projected[0], processed)
@@ -116,7 +113,7 @@ func (w *Worker) process(ctx context.Context, b *batch) error {
 				}
 			}
 		default:
-			w.failure(p.Name, firstAction(p))
+			w.countProcessingFailure(p.Name)
 			continue
 		}
 		if p.Input == "connection" || artifact.Reconstruction != nil {
@@ -131,9 +128,9 @@ func (w *Worker) process(ctx context.Context, b *batch) error {
 			}
 		}
 		if p.Input == "reconstruction" && (!refused.Known || refused.Value != 0) {
-			// The first slot cannot accept an undecidable message. Nothing
-			// later can repair that missing input; its resolved action applies.
-			w.failure(p.Name, firstAction(p))
+			// The first slot cannot accept an undecidable message, and nothing
+			// later can repair that missing input.
+			w.countProcessingFailure(p.Name)
 		}
 	}
 	return nil
@@ -235,27 +232,12 @@ func messageStop(m *reconstruct.Message) (string, uint64) {
 	return "unpaired_exchange", m.Offset
 }
 
-func firstAction(p config.EffectivePipeline) string {
-	if len(p.Slots) == 0 {
-		return config.OnFailureDropAndAccount
-	}
-	return p.Slots[0].OnFailure
-}
-
-func (w *Worker) failure(name, action string) {
-	w.countProcessingFailure(name)
-	if action == config.OnFailureStopPipeline && !w.stopped[name] {
-		w.stopped[name] = true
-		w.outcome.StoppedPipelines = append(w.outcome.StoppedPipelines, name)
-	}
-}
-
-// A batch refusal affects all active routes; a pipeline refusal affects only
-// that pipeline's routes. Count before applying its stop action, so the failure
-// that stops a route counts once and later batches do not count it again.
+// A batch refusal affects every route; a pipeline refusal affects only that
+// pipeline's routes. A failure drops the output it concerns and is counted;
+// the pipeline goes on with the next batch.
 func (w *Worker) countProcessingFailure(pipeline string) {
 	for _, route := range w.routes {
-		if !w.stopped[route.Pipeline] && (pipeline == "" || route.Pipeline == pipeline) {
+		if pipeline == "" || route.Pipeline == pipeline {
 			w.outcome.ProcessingFailures++
 		}
 	}

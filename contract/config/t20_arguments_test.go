@@ -55,61 +55,66 @@ func TestT20ArgumentRules(t *testing.T) {
 		{config.RemoveQueryParameters, `{"names":["card_number","CARD_NUMBER"]}`, []string{`{"names":"card"}`}},
 	} {
 		t.Run(tc.implementation, func(t *testing.T) {
-			c := processingConfiguration(t)
-			c.Pipelines[0].Slots = []config.Slot{headerSlot("rule", tc.implementation, tc.accepted)}
-			plan := acceptedProcessing(t, c)
-			if plan.Pipelines()[0].Slots[0].Arguments == nil {
-				t.Fatal("PROPERTY: an accepted slot carries no compiled arguments")
+			if arguments, err := config.CompileArguments(tc.implementation, json.RawMessage(tc.accepted)); err != nil || arguments == nil {
+				t.Fatalf("PROPERTY: the accepted arguments compiled to %+v, %v", arguments, err)
 			}
 			for _, refused := range tc.refused {
-				c.Pipelines[0].Slots[0].Configuration = json.RawMessage(refused)
-				refusedProcessing(t, c, config.InvalidBuiltinArguments)
+				if _, err := config.CompileArguments(tc.implementation, json.RawMessage(refused)); err == nil {
+					t.Errorf("PROPERTY: %s accepted %s", tc.implementation, refused)
+				}
 			}
 		})
 	}
 }
 
-func TestT20ArgumentsResolve(t *testing.T) {
-	c := processingConfiguration(t)
-	c.Pipelines[0].Slots = []config.Slot{
-		headerSlot("body", config.RemoveBody, `{"messages":["response","request"]}`),
-		headerSlot("json", config.ReplaceJSONValues, `{"messages":["response"],"pointers":["/b","/a"],"value":"v"}`),
-		headerSlot("query", config.RemoveQueryParameters, `{"names":["b","a"]}`),
+// compiled is the plan a configuration writing these rules compiles to.
+func compiled(t *testing.T, rules string) *config.ProcessingPlan {
+	t.Helper()
+	c, findings := config.Compile([]byte(`{"version": "observer.config/1", "output": "/var/lib/observer", `+
+		`"watch": [{"name": "api", "exe": "/usr/bin/php"}], `+rules+`}`), nil)
+	if len(findings) > 0 {
+		t.Fatalf("wiring, not the property: the rules were refused: %+v", findings)
 	}
-	slots := acceptedProcessing(t, c).Pipelines()[0].Slots
+	return c.Plan
+}
+
+func TestT20ArgumentsResolve(t *testing.T) {
+	rules := `"remove": {"query": ["b", "a"], "bodies": ["response", "request"]}, ` +
+		`"mask": {"json": {"response": {"/b": "v", "/a": "v"}}}`
+	slots := compiled(t, rules).Pipelines()[0].Slots
+	if len(slots) != 3 {
+		t.Fatalf("wiring, not the property: the rules compiled to %d operations, want 3", len(slots))
+	}
 	for i, want := range []config.Arguments{
+		{Names: []string{"b", "a"}},
 		{Messages: []string{"request", "response"}},
 		{Messages: []string{"response"}, Pointers: []string{"/b", "/a"}, Value: "v"},
-		{Names: []string{"b", "a"}},
 	} {
 		if !reflect.DeepEqual(*slots[i].Arguments, want) {
 			t.Fatalf("PROPERTY: slot %s resolved to %+v, want %+v", slots[i].Name, *slots[i].Arguments, want)
 		}
 	}
 	// A view is detached: changing it changes no later view.
-	slots[1].Arguments.Pointers[0] = "/changed"
-	slots[2].Arguments.Names[0] = "changed"
-	again := acceptedProcessing(t, c).Pipelines()[0].Slots
-	if again[1].Arguments.Pointers[0] != "/b" || again[2].Arguments.Names[0] != "b" {
+	slots[0].Arguments.Names[0] = "changed"
+	slots[2].Arguments.Pointers[0] = "/changed"
+	again := compiled(t, rules).Pipelines()[0].Slots
+	if again[0].Arguments.Names[0] != "b" || again[2].Arguments.Pointers[0] != "/b" {
 		t.Fatal("wiring, not the property: a fresh compile did not give fresh arguments")
 	}
 }
 
 func TestT20ExclusionFieldForms(t *testing.T) {
-	accepted := map[string]config.Slot{
-		"message.body":                headerSlot("r", config.RemoveBody, `{"messages":["request","response"]}`),
-		"message.body.values":         headerSlot("r", config.ReduceBodyToStructure, `{"messages":["request","response"]}`),
-		"message.target.query":        headerSlot("r", config.RemoveQuery, `{}`),
-		"message.query.card_number":   headerSlot("r", config.RemoveQueryParameters, `{"names":["card_number"]}`),
-		"message.form.card_number":    headerSlot("r", config.RemoveFormFields, `{"names":["card_number"]}`),
-		"message.body.json/card/~1/*": headerSlot("r", config.RemoveJSONFields, `{"messages":["request","response"],"pointers":["/card"]}`),
+	accepted := map[string]string{
+		"message.body":                `"remove": {"bodies": ["request"]}`,
+		"message.body.values":         `"remove": {"body_values": ["request"]}`,
+		"message.target.query":        `"remove": {"query_string": true}`,
+		"message.query.card_number":   `"remove": {"query": ["card_number"]}`,
+		"message.form.card_number":    `"remove": {"form": ["card_number"]}`,
+		"message.body.json/card/~1/*": `"remove": {"json": {"request": ["/card/~1/*"]}}`,
 	}
-	for field, slot := range accepted {
+	for field, rules := range accepted {
 		t.Run(field, func(t *testing.T) {
-			c := processingConfiguration(t)
-			c.Pipelines[0].Slots = []config.Slot{slot}
-			c.Policy = []json.RawMessage{exclusionPolicy(t, field, "remove", nil)}
-			plan := acceptedProcessing(t, c)
+			plan := compiled(t, rules)
 			if len(plan.Exclusions()) != 1 || plan.Exclusions()[0].Field != field || plan.Exclusions()[0].Header != "" {
 				t.Fatalf("PROPERTY: the exclusion did not resolve to its field: %+v", plan.Exclusions())
 			}
@@ -120,10 +125,9 @@ func TestT20ExclusionFieldForms(t *testing.T) {
 		"message.target", "message.body.value", "message.headers.Authorization", "message.start_line",
 	} {
 		t.Run("refused:"+field, func(t *testing.T) {
-			c := processingConfiguration(t)
-			c.Pipelines[0].Slots = []config.Slot{headerSlot("r", config.RemoveBody, `{"messages":["request","response"]}`)}
-			c.Policy = []json.RawMessage{exclusionPolicy(t, field, "remove", nil)}
-			refusedProcessing(t, c, config.UnsupportedTransform)
+			if _, err := config.ParseExclusionField(field); err == nil {
+				t.Errorf("PROPERTY: %s is accepted as an exclusion field", field)
+			}
 		})
 	}
 }

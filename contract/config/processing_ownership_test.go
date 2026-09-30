@@ -19,7 +19,7 @@ func TestProcessingPlanViewsCannotChangeCompiledValues(t *testing.T) {
 		{"exclusion", func(p *config.ProcessingPlan) { p.Exclusions()[0].Header = "cookie" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := acceptedProcessing(t, protectedProcessing(t))
+			p := compiled(t, `"remove": {"headers": ["authorization"]}`)
 			tc.change(p)
 			pipe := p.Pipelines()[0]
 			if pipe.Input != "reconstruction" || pipe.Sinks[0] != "account" || pipe.Slots[0].Implementation != config.RemoveHeaders || pipe.Slots[0].Arguments.Headers[0] != "authorization" || p.Routes()[0].Sink != "account" || p.Exclusions()[0].Header != "authorization" {
@@ -27,16 +27,4 @@ func TestProcessingPlanViewsCannotChangeCompiledValues(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestProcessingEnabledExternalComponentRefusal(t *testing.T) {
-	c := processingConfiguration(t)
-	p := processingPack()
-	p.Components = []config.Component{independentProcessor("external", config.ExecutionExternal)}
-	p.Components[0].Input.Types = []string{"reconstruction"}
-	p.Components[0].Output.Records = []string{"reconstruction"}
-	// Supplying this structurally valid pack alone does not enable its code.
-	acceptedProcessing(t, c, p)
-	c.Packs = []string{p.Name}
-	refusedProcessing(t, c, config.UnsupportedComponent, p)
 }

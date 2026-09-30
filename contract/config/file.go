@@ -18,6 +18,17 @@ const (
 	ChildrenNone     = "none"
 )
 
+// The limits a configuration may omit, as values.
+const (
+	DefaultApprovedOutputBoundMiB int64 = 64
+	DefaultStateEverySeconds      int64 = 30
+	// DefaultAdmittedEventLimit chooses a finite diagnostic population with a
+	// nominal 64 MiB intake allowance at the decoder's current payload ceiling.
+	// It is not measured headroom or an execution-memory budget, and remains
+	// independent of the approved durable-output allowance.
+	DefaultAdmittedEventLimit int64 = 16384
+)
+
 // LogStdout is the log value that sends the log to standard output alone. It is
 // the default.
 const LogStdout = "stdout"
@@ -184,4 +195,28 @@ type Truncate struct {
 type NamedLength struct {
 	Name   string
 	Length int
+}
+
+// Match names instances by the conditions the observer's admission reads. At
+// least one is present.
+type Match struct {
+	Exe       string    `json:"exe,omitempty"`
+	Args      *[]string `json:"args,omitempty"`
+	Cgroup    string    `json:"cgroup,omitempty"`
+	PID       *PIDGuard `json:"pid,omitempty"`
+	Port      *int      `json:"port,omitempty"`
+	Interface string    `json:"interface,omitempty"`
+}
+
+// PIDGuard names one process instance, not a pid number.
+type PIDGuard struct {
+	PID   int32  `json:"pid"`
+	Start uint64 `json:"start"`
+	Boot  string `json:"boot"`
+}
+
+// Library is one approved library build.
+type Library struct {
+	BuildID string            `json:"build_id"`
+	Symbols map[string]uint64 `json:"symbols"`
 }

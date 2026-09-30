@@ -149,9 +149,6 @@ func TestT18TheAdmissionLimitEndsTheSessionUnderItsReasonAndKeepsOnlyWhatWasDeci
 			if admitted := t18Admitted(sealed); admitted != limit {
 				t.Errorf("%d events were admitted, want exactly the allowance %d: seen %+v", admitted, limit, sealed.Seen)
 			}
-			if sealed.Processing != nil && len(sealed.Processing.StoppedPipelines) != 0 {
-				t.Errorf("the limit is reported as a pipeline stop: %v", sealed.Processing.StoppedPipelines)
-			}
 			if slices.ContainsFunc(targets, func(one string) bool { return strings.HasPrefix(one, "/?asked=t18-undecided-") }) {
 				t.Errorf("exchanges undecided when the limit was reached were written: %s", targets)
 			}
@@ -336,9 +333,6 @@ func TestT18AFullVolatileIntakeEndsTheSessionUnderAStatedReason(t *testing.T) {
 		t.Errorf("FINDING: the session ended when the volatile intake refused %d records, and its account states no "+
 			"reason: gate %+v, seal complete %v because %q", sealed.Seen.Rejected, sealed.Processing,
 			sealed.Seal != nil && sealed.Seal.Complete, because)
-	}
-	if sealed.Processing != nil && len(sealed.Processing.StoppedPipelines) != 0 {
-		t.Errorf("the intake's exhaustion is reported as a pipeline stop: %v", sealed.Processing.StoppedPipelines)
 	}
 	files := t18Files(t, s.directory(c))
 	slices.Sort(files)

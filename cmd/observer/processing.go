@@ -106,12 +106,11 @@ func (d *daemon) processingSnapshot() *account.Processing {
 	if d.output == nil {
 		return nil
 	}
-	state := account.Processing{StoppedPipelines: []string{}}
+	state := account.Processing{}
 	if r := d.processing; r != nil {
 		r.mutex.Lock()
 		state.ProcessingFailures, state.OutputFailures = r.outcome.ProcessingFailures, r.outcome.OutputFailures
 		state.Authorized, state.Written = r.outcome.Authorized, r.outcome.Written
-		state.StoppedPipelines = append(state.StoppedPipelines, r.outcome.StoppedPipelines...)
 		r.mutex.Unlock()
 	}
 	state.GateReason = d.gate.Snapshot().Reason
