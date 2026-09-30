@@ -91,7 +91,7 @@ func TestTheContractSurfacesAreClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	contracts := filepath.Dir(here)
-	surfaces := []string{"account", "config", "policy", "record"}
+	surfaces := []string{"account", "config", "record"}
 	for _, surface := range surfaces {
 		if _, err := os.Stat(filepath.Join(contracts, surface)); err != nil {
 			t.Fatalf("wiring, not the property: the %s surface is not beside this one: %v", surface, err)
@@ -99,7 +99,7 @@ func TestTheContractSurfacesAreClosed(t *testing.T) {
 	}
 
 	closure := CheckClosure(os.DirFS(contracts))
-	if closure.Files < 30 {
+	if closure.Files < 15 {
 		t.Fatalf("wiring, not the property: the closure check read %d contract files", closure.Files)
 	}
 	if closure.Outcome != Closed {
@@ -115,7 +115,7 @@ func TestTheContractSurfacesAreClosed(t *testing.T) {
 		t.Fatalf("the copied surfaces came back %+v against %+v", moved, closure)
 	}
 
-	planted := filepath.Join(copied, "policy", "VOCABULARY.md")
+	planted := filepath.Join(copied, "config", "CONFIG.md")
 	content, err := os.ReadFile(planted)
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +131,7 @@ func TestTheContractSurfacesAreClosed(t *testing.T) {
 // The earlier draft is refused by the version it names, beside the example
 // account at this draft, which reads.
 func TestAnAccountAtTheEarlierDraftIsRefusedByName(t *testing.T) {
-	content, err := os.ReadFile(filepath.Join("..", "examples", "bundle", "account.json"))
+	content, err := os.ReadFile(filepath.Join(up, "examples", "bundle", "account.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -46,7 +46,7 @@ func moduleRoot(t *testing.T) string {
 // examplesFloor is the fewest example files the walk must find before its
 // result means anything: the count when set, held as a floor so later
 // examples need no edit here.
-const examplesFloor = 10
+const examplesFloor = 9
 
 // executor is the program an examples directory describes, run over that
 // directory through a filesystem that records every file opened. It returns
@@ -68,10 +68,7 @@ var executors = []executor{
 
 // notExecuted is every example file deliberately executed by nothing, each
 // with why.
-var notExecuted = map[string]string{
-	"contract/examples/policy.json": "the policy-document vocabulary it illustrates has no reader left; it is " +
-		"deleted with contract/policy, which a test still being converted names",
-}
+var notExecuted = map[string]string{}
 
 // isExample: a directory named examples on the path, or "example" in the name.
 // Go source is the program, not an example.

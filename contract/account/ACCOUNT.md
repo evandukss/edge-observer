@@ -531,6 +531,5 @@ neither.
 ## What this contract does not carry
 
 - The records themselves - the record contracts'.
-- Why a declaration has its disposition beyond the policy vocabulary's own reason - `contract/policy`.
 - The configuration's content: only references to it.
 - Any argument of any process.

@@ -174,8 +174,7 @@ and process before authorized output; capture callbacks themselves hold no recon
 `contract/` holds the published formats as documents, with Go code that encodes and checks each one.
 Where a document and its code disagree, the document is corrected first.
 
-    contract/config       the operator configuration, pack manifest and component interface
-    contract/policy       the policy-declaration vocabulary, and how a declaration is judged
+    contract/config       the configuration and the pack a user writes, and the plan they compile to
     contract/record       the records the observer produces: observation, connection, reconstruction,
                           reassembly
     contract/account      the account of a session, and the bundle that carries it with its records
