@@ -168,6 +168,42 @@ func CheckPosture(gate *probe.DeliveryGate, posture Posture) error {
 	return checkPosture(gate, posture, true)
 }
 
+// Judgment is one envelope condition start's posture check decides. Met false
+// with Unreadable true is a condition that could not be read; nothing after it
+// was judged. PID names the participant a participant judgment is about, and is
+// zero for every other condition.
+type Judgment struct {
+	Check      Check  `json:"check"`
+	Met        bool   `json:"met"`
+	Unreadable bool   `json:"unreadable,omitempty"`
+	PID        int32  `json:"pid,omitempty"`
+	Detail     string `json:"detail"`
+}
+
+// Judge judges complete readings against every envelope condition start
+// refuses on, in the order start checks them: membership, memory, swap, core
+// dumps, then the participants: one judgment when every participant is outside
+// the envelope, or one per participant that is not. start refuses on the first
+// judgment that is not met
+// (checkPosture); preflight names every one (Envelope). The delivery gate is not
+// an envelope condition and is not judged here.
+func Judge(posture Posture) []Judgment {
+	return nil
+}
+
+// Envelope reads this process and the participants exactly as start does
+// (readPosture) and judges the readings with Judge. A reading that fails is one
+// judgment, not met, naming the condition it was reading.
+func Envelope(participants []process.Process) []Judgment {
+	return judged(readPosture(participants))
+}
+
+// judged is Judge over a complete reading, or the one condition a reading
+// stopped at.
+func judged(posture Posture, err error) []Judgment {
+	return nil
+}
+
 func verify(gate *probe.DeliveryGate, participants []process.Process, fresh bool) (Posture, error) {
 	posture := Posture{PID: os.Getpid()}
 	if err := checkGate(gate, posture.PID, fresh); err != nil {

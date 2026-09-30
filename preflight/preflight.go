@@ -145,6 +145,24 @@ type Host struct {
 	// why the kernel refused it. The caller supplies it so this package reaches
 	// no capture code. Running leaves it nil.
 	Loads func() error
+
+	// Envelope judges the execution envelope start activates in - this
+	// process's own cgroup and the selected processes - with start's own check,
+	// and returns one judgment per condition. The caller supplies it
+	// (activation.Envelope) so this package reaches no capture code. Running
+	// leaves it nil.
+	Envelope func(selected []process.Process) []EnvelopeJudgment
+}
+
+// EnvelopeJudgment is one condition start's envelope check decides, as that
+// check judged it. Check is start's own name for the condition, the name its
+// refusal would carry.
+type EnvelopeJudgment struct {
+	Check      string
+	Met        bool
+	Unreadable bool
+	PID        int32
+	Detail     string
 }
 
 // Running is the host this process is on.

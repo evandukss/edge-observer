@@ -47,6 +47,7 @@ func meeting(t *testing.T) *constructed {
 		c.loads++
 		return c.refused
 	}
+	c.host.Envelope = metEnvelope
 	c.write("proc/sys/kernel/arch", "x86_64\n")
 	c.write("proc/sys/kernel/osrelease", "6.1.0-18-amd64\n")
 	c.write("proc/self/status", "Name:\tobserver\nCapInh:\t0000000000000000\nCapPrm:\t"+allCapabilities+

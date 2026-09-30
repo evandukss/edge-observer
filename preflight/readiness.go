@@ -22,6 +22,12 @@ import (
 type Readiness struct {
 	Verdict      Verdict       `json:"verdict"`
 	Requirements []Requirement `json:"requirements"`
+
+	// Envelope is the envelope start activates in, one ExecutionEnvelope
+	// requirement per condition start's check judged. It is apart from
+	// Requirements, which are the host's and the selected processes', and it
+	// decides the verdict with them.
+	Envelope []Requirement `json:"envelope"`
 }
 
 // Verdict is the whole answer.
@@ -107,6 +113,17 @@ const (
 	// from the version the libcrypto mapped beside it states. With no selected
 	// process, one TLSLibrary requirement appears with PID zero, Indeterminate.
 	TLSLibrary = "TLS library"
+
+	// ExecutionEnvelope is one condition of the envelope start activates in,
+	// judged by start's own check (Host.Envelope), one requirement per judgment.
+	// Check carries start's name for the condition and PID the participant a
+	// participant judgment is about.
+	//
+	//   - Host.Envelope is nil                                Indeterminate
+	//   - the condition could not be read                     Indeterminate
+	//   - the condition was judged and holds                  Met
+	//   - the condition was judged and fails                  Missing
+	ExecutionEnvelope = "execution envelope"
 )
 
 // MinimumKernel is the oldest kernel release the observer declares support
@@ -130,9 +147,13 @@ type Requirement struct {
 	// Found is what was read, or why it could not be. Never empty.
 	Found string `json:"found"`
 
-	// PID is the process a TLSLibrary requirement is about, and zero for every
-	// other requirement.
+	// PID is the process a TLSLibrary or participant requirement is about, and
+	// zero for every other requirement.
 	PID int32 `json:"pid,omitempty"`
+
+	// Check is start's name for the condition an ExecutionEnvelope requirement
+	// judges, and empty for every other requirement.
+	Check string `json:"check,omitempty"`
 }
 
 // Assess judges the host and the selected processes against the declared
