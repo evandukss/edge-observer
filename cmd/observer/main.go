@@ -162,7 +162,8 @@ func run(arguments []string, stdout io.Writer) error {
 
 // ready says whether a capture of this configuration can run on this host,
 // before anything attaches. It judges exactly the processes start would attach
-// to, exclusions and refusals applied.
+// to, exclusions and refusals applied, and the envelope it runs in with start's
+// own check: run the same way start will be, it answers for start.
 func ready(path string, text bool, stdout io.Writer) error {
 	read, err := loadProcessing(path)
 	if err != nil {
@@ -182,18 +183,29 @@ func ready(path string, text bool, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// A failure leaves the process dumpable, and the envelope's core_dumps
+	// judgment says so, as it would refuse start.
+	_ = undumpable()
 	host := preflight.Running()
 	host.Loads = attach.Loads
+	host.Envelope = envelopeJudged
 	readiness := preflight.Assess(host, selected, catalog)
+	judged := slices.Concat(readiness.Requirements, readiness.Envelope)
 
+	subject := func(r preflight.Requirement) string {
+		named := r.Name
+		if r.Check != "" {
+			named += " " + r.Check
+		}
+		if r.PID != 0 {
+			named += fmt.Sprintf(", pid %d", r.PID)
+		}
+		return named
+	}
 	if text {
 		_, _ = fmt.Fprintf(stdout, "verdict        %s\n", readiness.Verdict)
-		for _, r := range readiness.Requirements {
-			subject := r.Name
-			if r.PID != 0 {
-				subject += fmt.Sprintf(", pid %d", r.PID)
-			}
-			_, _ = fmt.Fprintf(stdout, "%-14s %s: %s\n", strings.ToUpper(string(r.Status)), subject, r.Found)
+		for _, r := range judged {
+			_, _ = fmt.Fprintf(stdout, "%-14s %s: %s\n", strings.ToUpper(string(r.Status)), subject(r), r.Found)
 		}
 	} else {
 		encoder := json.NewEncoder(stdout)
@@ -206,9 +218,14 @@ func ready(path string, text bool, stdout io.Writer) error {
 		return nil
 	}
 	var named []string
-	for _, r := range readiness.Requirements {
-		if r.Status != preflight.Met {
+	for _, r := range judged {
+		if r.Status == preflight.Met {
+			continue
+		}
+		if r.Check == "" {
 			named = append(named, r.Name+" "+string(r.Status))
+		} else {
+			named = append(named, subject(r)+" "+string(r.Status))
 		}
 	}
 	return fmt.Errorf("%s: %s", readiness.Verdict, strings.Join(named, ", "))
@@ -542,8 +559,8 @@ func begin(read policy.Policy, session string) (*daemon, error) {
 	if read.Processing == nil || read.ProcessingRevision == "" {
 		return nil, &protected.Refusal{Check: protected.ProcessingPlan, PID: os.Getpid(), Detail: "a compiler-produced processing plan and revision are required"}
 	}
-	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
-		return nil, &protected.Refusal{Check: protected.CoreDumps, PID: os.Getpid(), Detail: fmt.Sprintf("set payload-holder dumpability before attach: %v", err)}
+	if err := undumpable(); err != nil {
+		return nil, err
 	}
 	resolution, table, err := resolve(read.Approval)
 	if err != nil {
@@ -656,6 +673,27 @@ func resolve(approval process.Approval) (process.Resolution, process.Table, erro
 		}
 	}
 	return approval.Resolve(host), table, nil
+}
+
+// undumpable makes this process non-dumpable, as the payload holder must be
+// before anything attaches. start does it before its envelope is checked, and
+// preflight before it judges the envelope, so both judge the same process.
+func undumpable() error {
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+		return &protected.Refusal{Check: protected.CoreDumps, PID: os.Getpid(), Detail: fmt.Sprintf("set payload-holder dumpability before attach: %v", err)}
+	}
+	return nil
+}
+
+// envelopeJudged is start's envelope check (activation.Envelope) on this
+// process and the selected ones, in the words preflight reports.
+func envelopeJudged(selected []process.Process) []preflight.EnvelopeJudgment {
+	var judged []preflight.EnvelopeJudgment
+	for _, one := range protected.Envelope(selected) {
+		judged = append(judged, preflight.EnvelopeJudgment{Check: string(one.Check), Met: one.Met,
+			Unreadable: one.Unreadable, PID: one.PID, Detail: one.Detail})
+	}
+	return judged
 }
 
 // selectedAnything refuses a policy none of whose targets selected a process.

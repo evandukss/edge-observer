@@ -158,17 +158,36 @@ A target that selected nothing says why. Fix the target until yours shows the pr
 
 ### 2. Check the host
 
-Attaching needs root, or the capabilities [docs/compatibility.md](docs/compatibility.md) lists. Ask
-first whether this host can run it, as the user that will run it:
+Attaching needs root, or the capabilities [docs/compatibility.md](docs/compatibility.md) lists.
 
-    sudo ./observer preflight observer.config.json --text
+**The observer runs only inside an envelope of its own.** Its process must be in a cgroup (cgroup v2) of
+its own that is a memory domain with a finite `memory.max` and no swap, and every process it watches
+must be outside that cgroup. `start` refuses anywhere else and names the condition. A login shell's
+cgroup has no memory limit and a service's own cgroup holds the service, so neither will do. Launch
+`preflight` and `start` the same way, so that preflight judges the envelope start will run in.
 
-It answers `READY`, or `NOT READY` naming each requirement missing, or `INDETERMINATE` naming what it
-could not read, and exits 0 only on `READY`. It attaches nothing. Do not start on anything but `READY`.
+On a host with systemd, a transient scope is one:
+
+    sudo systemd-run --scope -p MemoryMax=512M -p MemorySwapMax=0 ./observer preflight observer.config.json --text
+
+With containers, the observer runs in a container of its own whose `--memory` and `--memory-swap` are
+equal, sharing the host's pid and cgroup namespaces, and the service it watches runs in another:
+
+    docker run --rm --privileged --pid=host --cgroupns=host --memory=512m --memory-swap=512m \
+        --volume "$PWD:/observer" --workdir /observer <an image with a shell> \
+        ./observer preflight observer.config.json --text
+
+The limit bounds what the observer itself may hold; 512M is an example, not a measured need.
+
+Preflight answers `READY`, or `NOT READY` naming each requirement missing - each envelope condition
+start would refuse on among them, in start's own words - or `INDETERMINATE` naming what it could not
+read, and exits 0 only on `READY`. It attaches nothing. Do not start on anything but `READY`.
 
 ### 3. Run
 
-    sudo ./observer start observer.config.json
+Launched the way preflight was:
+
+    sudo systemd-run --scope -p MemoryMax=512M -p MemorySwapMax=0 ./observer start observer.config.json
 
 It runs in the foreground and prints one JSON record per line; the first says it activated and what it
 attached to. Now use the service you approved so traffic crosses it - nothing is observed on a quiet

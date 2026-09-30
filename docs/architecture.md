@@ -38,10 +38,11 @@ defines what is published about an admitted process: the instance (pid namespace
 admission generation, executable) and the selection (which target admitted it, and why).
 
 **`preflight`** answers whether a capture can run on this host before anything attaches: the kernel,
-the architecture, BTF, the capabilities, whether the kernel takes the program, and each selected
-process's TLS library. It captures nothing and opens no socket. A test over the import graph
-(`preflight/boundary_test.go`) keeps the package from importing any capture, spool or attaching code;
-it is still a mode of the one observer program, which holds all of that.
+the architecture, BTF, the capabilities, whether the kernel takes the program, each selected process's
+TLS library, and the envelope it runs in, judged by the check `start` refuses on (`activation.Judge`),
+which the command hands it as it hands it the program load. It captures nothing and opens no socket. A
+test over the import graph (`preflight/boundary_test.go`) keeps the package from importing any capture,
+spool or attaching code; it is still a mode of the one observer program, which holds all of that.
 
 ## Attaching
 

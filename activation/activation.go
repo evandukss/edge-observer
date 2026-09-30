@@ -2,6 +2,7 @@
 package activation
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -188,7 +189,45 @@ type Judgment struct {
 // (checkPosture); preflight names every one (Envelope). The delivery gate is not
 // an envelope condition and is not judged here.
 func Judge(posture Posture) []Judgment {
-	return nil
+	judged := make([]Judgment, 0, 5)
+	judge := func(check Check, met bool, holds, fails string) {
+		detail := fails
+		if met {
+			detail = holds
+		}
+		judged = append(judged, Judgment{Check: check, Met: met, Detail: detail})
+	}
+	judge(PayloadMembership,
+		posture.PID > 0 && posture.StartTime != 0 && posture.Member && cleanCgroup(posture.Cgroup),
+		fmt.Sprintf("payload pid %d is a member of cgroup %q", posture.PID, posture.Cgroup),
+		"payload process identity and membership in a clean absolute cgroup must be established")
+	judge(ExecutionMemory,
+		(posture.Domain == "domain" || posture.Domain == "domain threaded") && posture.MemoryMax != 0 && posture.MemoryMax != math.MaxUint64,
+		fmt.Sprintf("cgroup %q is a memory domain with memory.max %d", posture.Cgroup, posture.MemoryMax),
+		"the payload holder's cgroup must be a memory domain with a positive finite memory.max")
+	judge(AnonymousSwap, posture.SwapMax == 0 && posture.SwapCurrent == 0,
+		"memory.swap.max and memory.swap.current are both zero",
+		fmt.Sprintf("memory.swap.max and memory.swap.current must both be zero: max=%d current=%d", posture.SwapMax, posture.SwapCurrent))
+	judge(CoreDumps, posture.Dumpable == 0, "payload process dumpability is zero",
+		fmt.Sprintf("payload process dumpability must be zero, read %d", posture.Dumpable))
+
+	if len(posture.Participants) == 0 {
+		judge(ParticipantOutsideEnvelope, false, "", "no participant identities were verified outside the envelope")
+		return judged
+	}
+	inside := false
+	for _, participant := range posture.Participants {
+		if participant.PID <= 0 || participant.StartTime == 0 || int(participant.PID) == posture.PID || !cleanCgroup(participant.Cgroup) || withinCgroup(participant.Cgroup, posture.Cgroup) {
+			inside = true
+			judged = append(judged, Judgment{Check: ParticipantOutsideEnvelope, PID: participant.PID,
+				Detail: fmt.Sprintf("participant pid %d start %d cgroup %q is not an identified process outside payload envelope %q", participant.PID, participant.StartTime, participant.Cgroup, posture.Cgroup)})
+		}
+	}
+	if !inside {
+		judge(ParticipantOutsideEnvelope, true,
+			fmt.Sprintf("%d participants are outside payload envelope %q", len(posture.Participants), posture.Cgroup), "")
+	}
+	return judged
 }
 
 // Envelope reads this process and the participants exactly as start does
@@ -201,7 +240,14 @@ func Envelope(participants []process.Process) []Judgment {
 // judged is Judge over a complete reading, or the one condition a reading
 // stopped at.
 func judged(posture Posture, err error) []Judgment {
-	return nil
+	if err == nil {
+		return Judge(posture)
+	}
+	var refusal *Refusal
+	if errors.As(err, &refusal) {
+		return []Judgment{{Check: refusal.Check, Unreadable: refusal.Unreadable, Detail: refusal.Detail}}
+	}
+	return []Judgment{{Check: PostureUnreadable, Unreadable: true, Detail: err.Error()}}
 }
 
 func verify(gate *probe.DeliveryGate, participants []process.Process, fresh bool) (Posture, error) {
@@ -239,24 +285,11 @@ func checkPosture(gate *probe.DeliveryGate, posture Posture, fresh bool) error {
 	if err := checkGate(gate, posture.PID, fresh); err != nil {
 		return err
 	}
-	if posture.PID <= 0 || posture.StartTime == 0 || !posture.Member || !cleanCgroup(posture.Cgroup) {
-		return refuse(PayloadMembership, "payload process identity and membership in a clean absolute cgroup must be established")
-	}
-	if (posture.Domain != "domain" && posture.Domain != "domain threaded") || posture.MemoryMax == 0 || posture.MemoryMax == math.MaxUint64 {
-		return refuse(ExecutionMemory, "the payload holder's cgroup must be a memory domain with a positive finite memory.max")
-	}
-	if posture.SwapMax != 0 || posture.SwapCurrent != 0 {
-		return refuse(AnonymousSwap, fmt.Sprintf("memory.swap.max and memory.swap.current must both be zero: max=%d current=%d", posture.SwapMax, posture.SwapCurrent))
-	}
-	if posture.Dumpable != 0 {
-		return refuse(CoreDumps, fmt.Sprintf("payload process dumpability must be zero, read %d", posture.Dumpable))
-	}
-	if len(posture.Participants) == 0 {
-		return refuse(ParticipantOutsideEnvelope, "no participant identities were verified outside the envelope")
-	}
-	for _, participant := range posture.Participants {
-		if participant.PID <= 0 || participant.StartTime == 0 || int(participant.PID) == posture.PID || !cleanCgroup(participant.Cgroup) || withinCgroup(participant.Cgroup, posture.Cgroup) {
-			return refuse(ParticipantOutsideEnvelope, fmt.Sprintf("participant pid %d start %d cgroup %q is not an identified process outside payload envelope %q", participant.PID, participant.StartTime, participant.Cgroup, posture.Cgroup))
+	// The same judgment preflight reports (Envelope): start refuses on the first
+	// condition it finds not met, in Judge's order.
+	for _, judgment := range Judge(posture) {
+		if !judgment.Met {
+			return refuse(judgment.Check, judgment.Detail)
 		}
 	}
 	return nil

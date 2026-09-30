@@ -22,6 +22,9 @@ to fail.
                        6.17.0-1022-azure (x86-64)                        observed
     TLS library        OpenSSL 3.x, loaded as a shared library           declared
                        OpenSSL 3.5                                       observed
+    execution envelope a cgroup of its own, a memory domain with a       declared
+                       finite memory.max and no swap, every watched
+                       process outside it
     protocol           HTTP/1.1, with JSON bodies described by shape     reconstructed
                        anything else                                     captured, not reconstructed
 
@@ -29,10 +32,12 @@ to fail.
 
     observer preflight <configuration> [--text]
 
-It judges each requirement below against the host, and the TLS library of every process the
-configuration selects. It answers READY only when every requirement is met, NOT READY naming each one
-missing, or INDETERMINATE when nothing is missing and something could not be read. A requirement it
-cannot establish never counts as met, and it exits 0 only on READY. It attaches nothing.
+It judges each requirement below against the host, the TLS library of every process the configuration
+selects, and the envelope it is itself running in, with the check `start` makes before it activates.
+Run it the way `start` will be run (README, "Check the host"). It answers READY only when every
+requirement is met, NOT READY naming each one missing, or INDETERMINATE when nothing is missing and
+something could not be read. A requirement it cannot establish never counts as met, and it exits 0 only
+on READY. It attaches nothing.
 
 ## Kernel
 

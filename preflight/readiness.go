@@ -17,8 +17,10 @@ import (
 // Readiness answers whether a capture can run on this host for these
 // processes, against the declared support: Linux on x86-64, a kernel of
 // MinimumKernel or newer publishing its BTF, the capabilities attachment
-// needs, and OpenSSL 3.x linked dynamically into every selected process. Each
-// requirement says what was declared, what was found, and whether it is enough.
+// needs, and OpenSSL 3.x linked dynamically into every selected process - and
+// whether start can activate where it is run, in the envelope start's own check
+// judges (Envelope). Each requirement says what was declared, what was found,
+// and whether it is enough.
 type Readiness struct {
 	Verdict      Verdict       `json:"verdict"`
 	Requirements []Requirement `json:"requirements"`
@@ -160,9 +162,9 @@ type Requirement struct {
 // support. selected is exactly the set the observer would attach to, and
 // catalog the catalogue a capture would use, reading host.ProcFS.
 //
-// A zero field of host (empty OS, nil Machine, nil Loads) is a reading not
-// taken: Indeterminate, never Met, unless another reading decides (the
-// kernel's architecture file when Machine is nil).
+// A zero field of host (empty OS, nil Machine, nil Loads, nil Envelope) is a
+// reading not taken: Indeterminate, never Met, unless another reading decides
+// (the kernel's architecture file when Machine is nil).
 func Assess(host Host, selected []process.Process, catalog probe.Catalog) Readiness {
 	capabilities := capabilitiesOf(host)
 	requirements := []Requirement{
@@ -182,7 +184,45 @@ func Assess(host Host, selected []process.Process, catalog probe.Catalog) Readin
 	for _, p := range selected {
 		requirements = append(requirements, tlsLibrary(host, p, catalog))
 	}
-	return Readiness{Verdict: fold(requirements), Requirements: requirements}
+	judged := envelope(host, selected)
+	return Readiness{Verdict: fold(slices.Concat(requirements, judged)), Requirements: requirements, Envelope: judged}
+}
+
+const declaredEnvelope = "what start requires of the process it runs in: a cgroup of its own that is a memory domain " +
+	"with a finite memory.max and no swap, the process not dumpable, and every selected process outside that cgroup"
+
+// envelope is one ExecutionEnvelope requirement per judgment Host.Envelope
+// makes, or one Indeterminate requirement where nothing was judged.
+func envelope(host Host, selected []process.Process) []Requirement {
+	unjudged := func(why string) []Requirement {
+		return []Requirement{{Name: ExecutionEnvelope, Declared: declaredEnvelope, Status: Indeterminate, Found: why}}
+	}
+	if host.Envelope == nil {
+		return unjudged("nothing was given to judge the envelope with")
+	}
+	judgments := host.Envelope(selected)
+	if len(judgments) == 0 {
+		return unjudged("the envelope was judged and no condition came back")
+	}
+	requirements := make([]Requirement, 0, len(judgments))
+	for _, judgment := range judgments {
+		r := Requirement{Name: ExecutionEnvelope, Declared: declaredEnvelope, Check: judgment.Check,
+			PID: judgment.PID, Found: judgment.Detail}
+		switch {
+		case judgment.Met:
+			r.Status = Met
+		case judgment.Unreadable:
+			r.Status = Indeterminate
+			r.Found = "could not be read: " + judgment.Detail
+		default:
+			r.Status = Missing
+		}
+		if r.Found == "" {
+			r.Found = judgment.Check + " was judged and nothing was said about it"
+		}
+		requirements = append(requirements, r)
+	}
+	return requirements
 }
 
 func fold(requirements []Requirement) Verdict {
