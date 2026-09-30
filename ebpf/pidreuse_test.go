@@ -3,6 +3,7 @@
 package ebpf_test
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -193,14 +194,24 @@ func exerciseIndependentPIDReuse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// As coordinateArming serves its listener: one result is sent, every later
+	// call is still answered after staging fails, and a listener that cannot
+	// receive or answer is closed so the trapped calls fail instead of waiting.
 	go func() {
 		var staged result
 		var old reusedIdentity
-		opened, replaced, placed := false, false, false
+		opened, replaced, placed, reported := false, false, false, false
+		report := func(r result) {
+			if !reported {
+				reported = true
+				coordinated <- r
+			}
+		}
 		for {
 			var request seccompNotification
 			if err := notification(listener, &request); err != nil {
-				coordinated <- result{err: err}
+				report(result{err: fmt.Errorf("receive a reuse syscall: %w", err)})
+				_ = unix.Close(listener)
 				return
 			}
 			if request.Data.Number == int32(unix.SYS_PERF_EVENT_OPEN) {
@@ -209,12 +220,18 @@ func exerciseIndependentPIDReuse(t *testing.T) {
 			opensProcfs := false
 			// Adoption's reading, as coordinateArming recognises it: a /proc open
 			// after a probe has been placed.
-			if !opened && placed && request.Data.Number == int32(unix.SYS_OPENAT) {
+			if staged.err == nil && !opened && placed && request.Data.Number == int32(unix.SYS_OPENAT) {
 				var path string
 				path, staged.err = notificationPath(listener, request)
+				if errors.Is(staged.err, unix.ENOENT) {
+					// Interrupted after it was received: the re-issued call is read again.
+					staged.err = nil
+				}
 				opensProcfs = staged.err == nil && path == procfs
 			}
 			switch {
+			case staged.err != nil:
+				// Answered only: nothing is staged after staging has failed.
 			case opensProcfs:
 				staged.afterPlacement = placed
 				old, staged.err = reuseCommand(actor, "T", "old")
@@ -232,16 +249,14 @@ func exerciseIndependentPIDReuse(t *testing.T) {
 					staged.replacement, staged.err = process.Identify(procfs, next.observer)
 				}
 				replaced = true
-				coordinated <- staged
-			}
-			if err := continueNotification(listener, request); err != nil {
-				coordinated <- result{err: err}
-				return
+				report(staged)
 			}
 			if staged.err != nil {
-				if !replaced {
-					coordinated <- staged
-				}
+				report(staged)
+			}
+			if err := continueNotification(listener, request); err != nil {
+				report(result{err: fmt.Errorf("answer a reuse syscall: %w", err)})
+				_ = unix.Close(listener)
 				return
 			}
 		}
@@ -250,6 +265,13 @@ func exerciseIndependentPIDReuse(t *testing.T) {
 		Program: bpf.Full(), Points: append(points(t, root), independentForkPoint(t, root)), Admit: authorise(root),
 	})
 	if err != nil {
+		select {
+		case staged := <-coordinated:
+			if staged.err != nil {
+				t.Fatalf("%v (the reuse listener had failed: %v)", err, staged.err)
+			}
+		default:
+		}
 		t.Fatal(err)
 	}
 	defer func() { _ = session.Close() }()

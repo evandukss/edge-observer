@@ -5,6 +5,7 @@ package ebpf_test
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -377,11 +378,17 @@ func notificationPath(listener int, request seccompNotification) (string, error)
 	return "", fmt.Errorf("the path argument of pid %d is not terminated within %d bytes", request.PID, maximum)
 }
 
+// notification receives the next trapped call. A call interrupted by a signal
+// before it is received is withdrawn and re-issued as a new notification, and
+// the receive woken for the withdrawn one fails with ENOENT, so ENOENT is
+// received again as EINTR is. Returning on it leaves the re-issued call waiting
+// on a listener nobody serves, which reads as the traced thread hanging in
+// whatever call it made.
 func notification(listener int, request *seccompNotification) error {
 	for {
 		_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(listener),
 			unix.SECCOMP_IOCTL_NOTIF_RECV, uintptr(unsafe.Pointer(request)))
-		if errno == unix.EINTR {
+		if errno == unix.EINTR || errno == unix.ENOENT {
 			continue
 		}
 		if errno != 0 {
@@ -391,14 +398,29 @@ func notification(listener int, request *seccompNotification) error {
 	}
 }
 
+// continueNotification lets a trapped call proceed. ENOENT means the call was
+// interrupted after it was received and is re-issued as a new notification, so
+// there is nothing left to answer.
 func continueNotification(listener int, request seccompNotification) error {
 	response := seccompResponse{ID: request.ID, Flags: unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE}
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(listener),
 		unix.SECCOMP_IOCTL_NOTIF_SEND, uintptr(unsafe.Pointer(&response)))
-	if errno != 0 {
+	if errno != 0 && errno != unix.ENOENT {
 		return errno
 	}
 	return nil
+}
+
+// armingAttachFailure puts a failed listener's own error beside Attach's. A
+// listener that cannot receive or answer is closed, which fails every later
+// trapped call with ENOSYS, and Attach then reports that instead of the cause.
+func armingAttachFailure(errs <-chan error, err error) error {
+	select {
+	case cause := <-errs:
+		return fmt.Errorf("%w (the arming listener had failed: %v)", err, cause)
+	default:
+		return err
+	}
 }
 
 type armingChildren struct {
@@ -429,15 +451,27 @@ func coordinateArming(listener int, fixture *armingProcess) armingCoordination {
 		exited:   make(chan struct{}, 1),
 		errors:   make(chan error, 1),
 	}
+	// The first error is kept. After an action fails, every later call is still
+	// answered and no action is taken, so the test reads that error once Attach
+	// returns rather than timing out on a call nobody answers. A listener that
+	// cannot receive or answer is closed instead, which fails the trapped calls.
+	report := func(err error) {
+		select {
+		case coordination.errors <- err:
+		default:
+		}
+	}
 	go func() {
 		windowOpen := false
 		transientExited := false
 		placed := false
+		failed := false
 		var children armingChildren
 		for {
 			var request seccompNotification
 			if err := notification(listener, &request); err != nil {
-				coordination.errors <- fmt.Errorf("receive an arming syscall: %w", err)
+				report(fmt.Errorf("receive an arming syscall: %w", err))
+				_ = unix.Close(listener)
 				return
 			}
 			if request.Data.Number == int32(unix.SYS_PERF_EVENT_OPEN) {
@@ -446,12 +480,18 @@ func coordinateArming(listener int, fixture *armingProcess) armingCoordination {
 
 			var actionErr error
 			opensProcfs := false
-			if request.Data.Number == int32(unix.SYS_OPENAT) && !windowOpen && placed {
+			if !failed && request.Data.Number == int32(unix.SYS_OPENAT) && !windowOpen && placed {
 				var path string
 				path, actionErr = notificationPath(listener, request)
+				if errors.Is(actionErr, unix.ENOENT) {
+					// Interrupted after it was received: the re-issued call is read again.
+					actionErr = nil
+				}
 				opensProcfs = actionErr == nil && path == procfs
 			}
 			switch {
+			case failed:
+				// Answered only: nothing is staged after an action has failed.
 			case opensProcfs:
 				children.afterPlacement = placed
 				children.live, actionErr = fixture.child('L', "live")
@@ -469,12 +509,14 @@ func coordinateArming(listener int, fixture *armingProcess) armingCoordination {
 					coordination.exited <- struct{}{}
 				}
 			}
-
-			if err := continueNotification(listener, request); actionErr == nil {
-				actionErr = err
-			}
 			if actionErr != nil {
-				coordination.errors <- actionErr
+				report(actionErr)
+				failed = true
+			}
+
+			if err := continueNotification(listener, request); err != nil {
+				report(fmt.Errorf("answer an arming syscall: %w", err))
+				_ = unix.Close(listener)
 				return
 			}
 		}
@@ -504,7 +546,7 @@ func exerciseArmingWindow(t *testing.T) {
 		Admit:   authorise(parent),
 	})
 	if err != nil {
-		t.Fatalf("attach while the children fork in the arming interval: %v", err)
+		t.Fatalf("attach while the children fork in the arming interval: %v", armingAttachFailure(coordination.errors, err))
 	}
 	defer func() { _ = session.Close() }()
 

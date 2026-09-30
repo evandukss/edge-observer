@@ -127,6 +127,13 @@ func executionSupervised(t *testing.T, f executionFixture, intervene func(execut
 			response.Error = -int32(refusal)
 		}
 		_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), unix.SECCOMP_IOCTL_NOTIF_SEND, uintptr(unsafe.Pointer(&response)))
+		// ENOENT: the call was interrupted after it was received and is re-issued,
+		// and this loop has already recorded it and run intervene for it, so
+		// serving on would count it twice. The listener is closed by the deferred
+		// Close, so nothing is left waiting.
+		if errno == unix.ENOENT {
+			t.Fatalf("fixture: a trapped %d call was interrupted before its answer, so it would be recorded twice", request.Data.Number)
+		}
 		if errno != 0 {
 			t.Fatal(errno)
 		}

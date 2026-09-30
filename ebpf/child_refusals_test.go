@@ -164,7 +164,7 @@ func exerciseIndependentExitBeforeAdmission(t *testing.T) {
 	coordinated := coordinateArming(listener, actor)
 	session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: append(points(t, parent), independentForkPoint(t, parent)), Admit: authorise(parent)})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal(armingAttachFailure(coordinated.errors, err))
 	}
 	defer func() { _ = session.Close() }()
 	var children armingChildren
