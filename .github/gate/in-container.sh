@@ -83,7 +83,11 @@ attach)
 	prepare_cgroups
 	# One package at a time: both attach probes to real processes on one kernel,
 	# and side by side a short-lived child's traffic goes unreported.
-	go test -count=1 -p 1 -tags attach -timeout 10m -v "${attach_packages[@]}"
+	# The limit is per package. probe/openssl/attach ran 491s locally, and the
+	# GitHub ubuntu-24.04 runner took 1.58 times as long for ebpf (285s against
+	# 180s), which puts it near 776s there: past 10m, which is where it stopped.
+	# 20m leaves about 1.5 times that estimate.
+	go test -count=1 -p 1 -tags attach -timeout 20m -v "${attach_packages[@]}"
 	;;
 
 static)
