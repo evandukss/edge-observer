@@ -96,14 +96,6 @@ const (
 	PackNameMismatch Reason = "pack_name_mismatch"
 )
 
-// Reasons is every reason the reader and the compiler give, as CONFIG.md's
-// Refusals table lists them.
-var Reasons = []Reason{
-	UnknownVersion, Malformed, UnknownKey, DuplicateKey, WrongType, TrailingContent, MissingKey, InvalidValue,
-	LimitExceeded, DuplicateName, RuleConflict, UnknownPack, ConfigurationTooLarge, PackNameInvalid,
-	PackNameMismatch, InternalDefect,
-}
-
 // File is the configuration a user writes, as read.
 type File struct {
 	Output string
@@ -143,7 +135,6 @@ type Limits struct {
 // Pack is a pack as read: rules it adds to the configuration's. It cannot
 // weaken them.
 type Pack struct {
-	Name  string
 	Rules Rules
 }
 

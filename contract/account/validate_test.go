@@ -31,13 +31,25 @@ func requiredBlocks(t *testing.T) []string {
 	return blocks
 }
 
+// requiredBlockPaths is the dotted path of every required block: required wherever
+// its parent is Carried, and refused if absent.
+var requiredBlockPaths = []string{
+	"provenance", "provenance.observer", "provenance.configuration",
+	"scope", "scope.requested", "scope.instances", "scope.overlap", "scope.placement", "scope.coverage",
+	"scope.filters",
+	"capture", "capture.capability", "capture.seen", "capture.loss", "capture.loss.under_way", "capture.admitted",
+	"capture.ordering",
+	"capture.refused", "capture.spool",
+	"reconstruction", "processing", "seal", "seal.recorded",
+}
+
 func TestTheDocumentAndThePackageNameTheSameRequiredBlocks(t *testing.T) {
 	documented := requiredBlocks(t)
 	if len(documented) < 20 {
 		t.Fatalf("wiring, not the property: ACCOUNT.md lists %d required blocks", len(documented))
 	}
-	if !slices.Equal(documented, RequiredBlocks) {
-		t.Fatalf("ACCOUNT.md requires %v and the package %v", documented, RequiredBlocks)
+	if !slices.Equal(documented, requiredBlockPaths) {
+		t.Fatalf("ACCOUNT.md requires %v and the package %v", documented, requiredBlockPaths)
 	}
 }
 

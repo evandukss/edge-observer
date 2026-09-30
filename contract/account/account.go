@@ -55,18 +55,6 @@ const (
 	NotCarried BlockState = "not_carried"
 )
 
-// RequiredBlocks is the dotted path of every required block: required wherever
-// its parent is Carried, and refused if absent.
-var RequiredBlocks = []string{
-	"provenance", "provenance.observer", "provenance.configuration",
-	"scope", "scope.requested", "scope.instances", "scope.overlap", "scope.placement", "scope.coverage",
-	"scope.filters",
-	"capture", "capture.capability", "capture.seen", "capture.loss", "capture.loss.under_way", "capture.admitted",
-	"capture.ordering",
-	"capture.refused", "capture.spool",
-	"reconstruction", "processing", "seal", "seal.recorded",
-}
-
 // Block is the state every block carries.
 type Block struct {
 	State BlockState `json:"state"`

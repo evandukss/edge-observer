@@ -276,6 +276,14 @@ func TestAPackIsReadUnderTheNameItIsEnabledBy(t *testing.T) {
 	refused(t, findings, "pack:credentials", "name", PackNameMismatch)
 }
 
+// reasons is every reason the reader and the compiler give, as CONFIG.md's
+// Refusals table lists them.
+var reasons = []Reason{
+	UnknownVersion, Malformed, UnknownKey, DuplicateKey, WrongType, TrailingContent, MissingKey, InvalidValue,
+	LimitExceeded, DuplicateName, RuleConflict, UnknownPack, ConfigurationTooLarge, PackNameInvalid,
+	PackNameMismatch, InternalDefect,
+}
+
 // CONFIG.md's Refusals table and the reasons the reader and the compiler
 // give are one set.
 func TestTheSpecificationAndTheReasonsAgree(t *testing.T) {
@@ -297,7 +305,7 @@ func TestTheSpecificationAndTheReasonsAgree(t *testing.T) {
 	if len(written) < 10 {
 		t.Fatalf("wiring, not the property: the Refusals table lists %d reasons", len(written))
 	}
-	if !slices.Equal(written, Reasons) {
-		t.Errorf("CONFIG.md lists %v and the package gives %v", written, Reasons)
+	if !slices.Equal(written, reasons) {
+		t.Errorf("CONFIG.md lists %v and the package gives %v", written, reasons)
 	}
 }

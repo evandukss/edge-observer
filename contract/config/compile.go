@@ -21,9 +21,6 @@ const MaxCompiledSlots = 7 + MaxMaskedHeaders + 2*MaxRulePointers + MaxTruncated
 type Compiled struct {
 	File File
 
-	// Packs are the enabled packs, in the configuration's order.
-	Packs []Pack
-
 	Plan *ProcessingPlan
 
 	// ProcessingRevision binds remove, mask, truncate, write_content, the packs
@@ -72,7 +69,6 @@ func Compile(configuration []byte, packs []Supplied) (*Compiled, []Finding) {
 		}
 		pack, failures := ReadPack(packs[at])
 		findings = append(findings, failures...)
-		compiled.Packs = append(compiled.Packs, pack)
 		documents = append(documents, document{name: "pack:" + name, rules: pack.Rules})
 		bytesOf = append(bytesOf, packs[at].Content)
 	}

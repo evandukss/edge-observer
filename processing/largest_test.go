@@ -76,8 +76,8 @@ func TestTheLargestConfigurationCompilesAndWrites(t *testing.T) {
 			if len(findings) != 0 {
 				t.Fatalf("PROPERTY: the largest configuration was refused: %+v", findings)
 			}
-			if len(compiled.Packs) != config.MaxProcessingPacks {
-				t.Fatalf("wiring, not the property: %d packs were read, want %d", len(compiled.Packs), config.MaxProcessingPacks)
+			if len(compiled.File.Packs) != config.MaxProcessingPacks {
+				t.Fatalf("wiring, not the property: %d packs were enabled, want %d", len(compiled.File.Packs), config.MaxProcessingPacks)
 			}
 			var slots []config.EffectiveSlot
 			for _, p := range compiled.Plan.Pipelines() {

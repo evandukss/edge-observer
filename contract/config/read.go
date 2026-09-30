@@ -138,7 +138,6 @@ func ReadPack(supplied Supplied) (Pack, []Finding) {
 			case value != supplied.Name:
 				r.add("name", PackNameMismatch, "the pack names itself %q and is enabled as %q", value, supplied.Name)
 			}
-			pack.Name = value
 		}
 	}
 	pack.Rules = r.rules(root, "")
