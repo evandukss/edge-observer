@@ -47,8 +47,12 @@ func p3t9ProtectedPlan(t *testing.T) *config.ProcessingPlan {
 		t.Fatalf("published protected-plan control does not compile: %+v", findings)
 	}
 	plan := compiled.Plan
-	if len(plan.Routes()) != 1 || len(plan.Exclusions()) != 1 {
-		t.Fatal("compiled protected route/exclusion not witnessed")
+	routes := map[string]int{}
+	for _, route := range plan.Routes() {
+		routes[route.Pipeline]++
+	}
+	if len(routes) != 2 || routes[config.ExchangesPipeline] != 1 || routes[config.ConnectionsPipeline] != 1 || len(plan.Exclusions()) != 1 {
+		t.Fatalf("compiled protected route/exclusion not witnessed: routes by pipeline %v, exclusions %d", routes, len(plan.Exclusions()))
 	}
 	return plan
 }
@@ -58,7 +62,10 @@ func p3t9ProtectedPlan(t *testing.T) *config.ProcessingPlan {
 type p3t9ApprovedBoundary struct {
 	writer *processing.Writer
 	mutex  sync.Mutex
-	calls  int
+	// handed counts the records handed to this output by route.pipeline. The
+	// worker authorizes each record immediately before handing it here, so it
+	// is also the authorized count per route.
+	handed map[string]int
 }
 
 func p3t9ContainsProtected(v any) bool {
@@ -86,8 +93,17 @@ func p3t9ContainsProtected(v any) bool {
 }
 
 func (b *p3t9ApprovedBoundary) WriteApproved(ctx context.Context, a processing.Approved) error {
+	var route struct {
+		Route struct {
+			Pipeline string `json:"pipeline"`
+		} `json:"route"`
+	}
+	_ = json.Unmarshal(a.Bytes(), &route)
 	b.mutex.Lock()
-	b.calls++
+	if b.handed == nil {
+		b.handed = map[string]int{}
+	}
+	b.handed[route.Route.Pipeline]++
 	b.mutex.Unlock()
 	var v any
 	if err := json.Unmarshal(a.Bytes(), &v); err != nil {
@@ -99,7 +115,12 @@ func (b *p3t9ApprovedBoundary) WriteApproved(ctx context.Context, a processing.A
 	return b.writer.WriteApproved(ctx, a)
 }
 
-func (b *p3t9ApprovedBoundary) count() int { b.mutex.Lock(); defer b.mutex.Unlock(); return b.calls }
+// t20iHanded is how many records of this route were handed to the output.
+func (b *p3t9ApprovedBoundary) t20iHanded(pipeline string) int {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	return b.handed[pipeline]
+}
 
 type p3t9ProtectedCapture struct {
 	t              *testing.T
@@ -259,15 +280,51 @@ func (f *p3t9ProtectedCapture) artifacts(want int) ([]processing.Artifact, []byt
 		if err := json.Unmarshal(line, &a); err != nil {
 			f.t.Fatal(err)
 		}
-		if a.Version != processing.ArtifactVersion || a.PolicyRevision != "p3t9-policy" || a.Route.Pipeline != "protected" || a.Route.Sink != "account" || a.Reconstruction == nil {
-			f.t.Fatalf("approved artifact lacks published provenance: %+v", a)
+		switch a.Route.Pipeline {
+		case config.ExchangesPipeline:
+			if a.Version != processing.ArtifactVersion || a.PolicyRevision != "p3t9-policy" || a.Route.Sink != "account" || a.Reconstruction == nil {
+				f.t.Fatalf("approved artifact lacks published provenance: %+v", a)
+			}
+			artifacts = append(artifacts, a)
+		case config.ConnectionsPipeline:
+			if a.Version != processing.ArtifactVersion || a.PolicyRevision != "p3t9-policy" || a.Route.Sink != "account" {
+				f.t.Fatalf("approved connection record lacks published provenance: %+v", a)
+			}
+		default:
+			f.t.Fatalf("approved record on a route that is neither exchanges nor connections: %+v", a.Route)
 		}
-		artifacts = append(artifacts, a)
 	}
-	if len(artifacts) != want || f.boundary.count() != want {
-		f.t.Fatalf("approved population: persisted=%d boundary=%d want=%d", len(artifacts), f.boundary.count(), want)
+	if len(artifacts) != want || f.boundary.t20iHanded(config.ExchangesPipeline) != want {
+		f.t.Fatalf("approved exchanges records: persisted=%d handed to the output=%d want=%d", len(artifacts), f.boundary.t20iHanded(config.ExchangesPipeline), want)
 	}
 	return artifacts, raw
+}
+
+// t20iPersisted is how many records of this route the approved output holds.
+func (f *p3t9ProtectedCapture) t20iPersisted(pipeline string) int {
+	f.t.Helper()
+	raw, err := os.ReadFile(filepath.Join(f.dir, processing.ArtifactName))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	count := 0
+	for _, line := range bytes.Split(bytes.TrimSpace(raw), []byte{'\n'}) {
+		if len(line) == 0 {
+			continue
+		}
+		var route struct {
+			Route struct {
+				Pipeline string `json:"pipeline"`
+			} `json:"route"`
+		}
+		if err := json.Unmarshal(line, &route); err != nil {
+			f.t.Fatal(err)
+		}
+		if route.Route.Pipeline == pipeline {
+			count++
+		}
+	}
+	return count
 }
 
 func p3t9Useful(t *testing.T, a processing.Artifact, target, ending string) {
@@ -313,8 +370,8 @@ func TestP3T9ProtectedWitnessAndMeasuredOutput(t *testing.T) {
 			if f.capture.Stats().Records != 1 || f.store.Stats().Fragments != 1 {
 				t.Fatal("witness prefix did not reach real intake")
 			}
-			if o := f.drain(); o.Pending != 1 || o.Written != 0 {
-				t.Fatalf("live prefix not held by real worker: %+v", o)
+			if o := f.drain(); o.Pending != 1 || f.t20iPersisted(config.ExchangesPipeline) != 0 {
+				t.Fatalf("live prefix not held by real worker: exchanges records persisted %d, %+v", f.t20iPersisted(config.ExchangesPipeline), o)
 			}
 			f.artifacts(0)
 			f.send(9, fragment.Sent, "benign\r\nAuthorization: ", measured, false)
@@ -326,8 +383,9 @@ func TestP3T9ProtectedWitnessAndMeasuredOutput(t *testing.T) {
 				if f.capture.Stats().Closed != 1 {
 					t.Fatal("ordinary Measured=false close below N failed")
 				}
-				if o := f.drain(); o.Written != 1 || o.Authorized != 1 || o.ProcessingFailures != 0 {
-					t.Fatalf("measured closed control did not produce useful output: %+v", o)
+				if o := f.drain(); f.t20iPersisted(config.ExchangesPipeline) != 1 || f.boundary.t20iHanded(config.ExchangesPipeline) != 1 || o.ProcessingFailures != 0 {
+					t.Fatalf("measured closed control did not produce useful output: exchanges records persisted %d, authorized %d, %+v",
+						f.t20iPersisted(config.ExchangesPipeline), f.boundary.t20iHanded(config.ExchangesPipeline), o)
 				}
 				a, _ := f.artifacts(1)
 				p3t9Useful(t, a[0], "/witness", "handle_released")
@@ -342,8 +400,9 @@ func TestP3T9ProtectedWitnessAndMeasuredOutput(t *testing.T) {
 			want := 0
 			if measured {
 				want = 1
-			} else if o.GateReason != probe.GateUnknownLength || o.Authorized != 0 || o.Written != 0 {
-				t.Fatalf("Finish released invalidated witness: %+v", o)
+			} else if o.GateReason != probe.GateUnknownLength || f.boundary.t20iHanded(config.ExchangesPipeline) != 0 || f.t20iPersisted(config.ExchangesPipeline) != 0 {
+				t.Fatalf("Finish released invalidated witness: exchanges records authorized %d, persisted %d, %+v",
+					f.boundary.t20iHanded(config.ExchangesPipeline), f.t20iPersisted(config.ExchangesPipeline), o)
 			}
 			f.artifacts(want)
 		})
@@ -355,8 +414,8 @@ func TestP3T9ProtectedDrainedLimitAndPendingFinish(t *testing.T) {
 		t.Run([]string{"N_minus_1", "N", "N_plus_1"}[count-3], func(t *testing.T) {
 			f := p3t9Protected(t, 4, nil)
 			f.exchange(9, "/limit", false)
-			if o := f.drain(); o.Pending != 1 || o.Written != 0 {
-				t.Fatalf("complete-but-live batch was not pending: %+v", o)
+			if o := f.drain(); o.Pending != 1 || f.t20iPersisted(config.ExchangesPipeline) != 0 {
+				t.Fatalf("complete-but-live batch was not pending: exchanges records persisted %d, %+v", f.t20iPersisted(config.ExchangesPipeline), o)
 			}
 			f.artifacts(0)
 			// Every callback is acknowledged before the next: no queued pressure.
@@ -380,13 +439,15 @@ func TestP3T9ProtectedDrainedLimitAndPendingFinish(t *testing.T) {
 				t.Fatalf("wrong final gate reason: %+v", o)
 			}
 			if count == 5 {
-				if o.Authorized != 0 || o.Written != 0 {
-					t.Fatalf("refused tail became approved at Finish: %+v", o)
+				if f.boundary.t20iHanded(config.ExchangesPipeline) != 0 || f.t20iPersisted(config.ExchangesPipeline) != 0 {
+					t.Fatalf("refused tail became approved at Finish: exchanges records authorized %d, persisted %d, %+v",
+						f.boundary.t20iHanded(config.ExchangesPipeline), f.t20iPersisted(config.ExchangesPipeline), o)
 				}
 				f.artifacts(0)
 			} else {
-				if o.Authorized != 1 || o.Written != 1 {
-					t.Fatalf("below/at-limit pending control did not finalize: %+v", o)
+				if f.boundary.t20iHanded(config.ExchangesPipeline) != 1 || f.t20iPersisted(config.ExchangesPipeline) != 1 {
+					t.Fatalf("below/at-limit pending control did not finalize: exchanges records authorized %d, persisted %d, %+v",
+						f.boundary.t20iHanded(config.ExchangesPipeline), f.t20iPersisted(config.ExchangesPipeline), o)
 				}
 				a, _ := f.artifacts(1)
 				p3t9Useful(t, a[0], "/limit", "still_open")
@@ -421,8 +482,10 @@ func TestP3T9ProtectedWorkerHeldAuthorizationKeepsPriorResult(t *testing.T) {
 							intakeBytes = 8192
 						}
 					}
+					// Each batch now authorizes two records, its exchanges record and
+					// its connection record; the hold is the candidate batch's first.
 					f := p3t9ProtectedWithIntakeLimit(t, limit, intakeBytes, func() {
-						if hold.Load() {
+						if hold.CompareAndSwap(true, false) {
 							close(entered)
 							<-release
 						}
@@ -430,8 +493,9 @@ func TestP3T9ProtectedWorkerHeldAuthorizationKeepsPriorResult(t *testing.T) {
 					// Release before worker.Close even if a test assertion fails.
 					t.Cleanup(unblock)
 					f.exchange(9, "/prior", true)
-					if o := f.drain(); o.Written != 1 || o.Authorized != 1 {
-						t.Fatalf("independently closed prior batch was not approved: %+v", o)
+					if o := f.drain(); f.t20iPersisted(config.ExchangesPipeline) != 1 || f.boundary.t20iHanded(config.ExchangesPipeline) != 1 {
+						t.Fatalf("independently closed prior batch was not approved: exchanges records persisted %d, authorized %d, %+v",
+							f.t20iPersisted(config.ExchangesPipeline), f.boundary.t20iHanded(config.ExchangesPipeline), o)
 					}
 					prior, priorBytes := f.artifacts(1)
 					p3t9Useful(t, prior[0], "/prior", "handle_released")
@@ -563,8 +627,9 @@ func TestP3T9ProtectedWorkerHeldAuthorizationKeepsPriorResult(t *testing.T) {
 					f.artifacts(want)
 					p3t9Reason(t, f.gate, charged, wantReason)
 					o := f.finish()
-					if o.Written != uint64(want) || o.Authorized != uint64(want) || o.GateReason != wantReason {
-						t.Fatalf("candidate authorization/output crossed invalidation: %+v", o)
+					if f.t20iPersisted(config.ExchangesPipeline) != want || f.boundary.t20iHanded(config.ExchangesPipeline) != want || o.GateReason != wantReason {
+						t.Fatalf("candidate authorization/output crossed invalidation: exchanges records persisted %d, authorized %d, want %d, %+v",
+							f.t20iPersisted(config.ExchangesPipeline), f.boundary.t20iHanded(config.ExchangesPipeline), want, o)
 					}
 					a, afterBytes := f.artifacts(want)
 					if !bytes.HasPrefix(afterBytes, priorBytes) || (inject && !bytes.Equal(afterBytes, priorBytes)) {

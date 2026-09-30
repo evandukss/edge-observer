@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -296,7 +297,8 @@ func p3t9ActivationChild(t *testing.T) {
 	if _, err := activation.Verify(c.Gate, []process.Process{peer}); err != nil {
 		t.Fatalf("prepared gate failed initial verification: %v", err)
 	}
-	worker, err := processing.New(processing.Options{Plan: compiled.Processing, PolicyRevision: compiled.Revision, Intake: c.Intake, Gate: c.Gate, Output: writer})
+	handed := &t20iHandedByRoute{next: writer}
+	worker, err := processing.New(processing.Options{Plan: compiled.Processing, PolicyRevision: compiled.Revision, Intake: c.Intake, Gate: c.Gate, Output: handed})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,13 +374,15 @@ func p3t9ActivationChild(t *testing.T) {
 	}
 	c.Recording.Finish(time.Now(), counters.Ordered)
 	out, err := worker.Finish(context.Background(), processing.Finalization{Withdrawn: withdrawn.Complete, Drained: drained.Complete})
-	if err != nil || out.Written != 1 || out.Authorized != 1 || out.GateReason != "" {
-		t.Fatalf("real approved-result control failed: %+v %v", out, err)
+	if err != nil || handed.written(config.ExchangesPipeline) != 1 || handed.handed(config.ExchangesPipeline) != 1 || out.GateReason != "" {
+		t.Fatalf("real approved-result control failed: exchanges records written %d, authorized %d, %+v %v",
+			handed.written(config.ExchangesPipeline), handed.handed(config.ExchangesPipeline), out, err)
 	}
-	if writer.Stats().Written != 1 {
-		t.Fatal("worker result did not reach the concrete writer")
+	persisted := t20iPersistedByRoute(t, os.Getenv("P3T9_ACTIVATION_OUTPUT"))
+	if persisted[config.ExchangesPipeline] != 1 {
+		t.Fatalf("worker result did not reach the concrete writer: exchanges records it holds %d", persisted[config.ExchangesPipeline])
 	}
-	report.Stage, report.Gate, report.ObservedMarker, report.Written = "useful_output", c.Gate.Snapshot(), witness.marker.Load(), out.Written
+	report.Stage, report.Gate, report.ObservedMarker, report.Written = "useful_output", c.Gate.Snapshot(), witness.marker.Load(), uint64(persisted[config.ExchangesPipeline])
 	p3t9ActivationReportToParent(t, report)
 }
 
@@ -388,12 +392,17 @@ func p3t9ActivationArtifact(t *testing.T, dir string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lines := bytes.Split(bytes.TrimSpace(raw), []byte{'\n'})
-	if len(lines) != 1 {
-		t.Fatalf("want one approved artifact, got %d", len(lines))
+	var exchanges [][]byte
+	for _, line := range bytes.Split(bytes.TrimSpace(raw), []byte{'\n'}) {
+		if t20iPipelineOf(t, line) == config.ExchangesPipeline {
+			exchanges = append(exchanges, line)
+		}
+	}
+	if len(exchanges) != 1 {
+		t.Fatalf("want one approved exchanges record, got %d", len(exchanges))
 	}
 	var artifact processing.Artifact
-	if err := json.Unmarshal(lines[0], &artifact); err != nil {
+	if err := json.Unmarshal(exchanges[0], &artifact); err != nil {
 		t.Fatal(err)
 	}
 	if artifact.Version != processing.ArtifactVersion || artifact.PolicyRevision == "" || artifact.Reconstruction == nil || len(artifact.Reconstruction.Exchanges) != 1 {
@@ -598,4 +607,80 @@ func p3t9ActivationRun(t *testing.T, mode string) {
 		}
 	}
 	t.Logf("actual_holder_result: mode=%s evidence=%s", mode, transcript.String())
+}
+
+// t20iHandedByRoute counts, by route.pipeline, the records the worker hands to
+// the concrete writer and the ones the writer accepts. The worker authorizes
+// each record immediately before handing it over, so handed is also the
+// authorized count per route.
+type t20iHandedByRoute struct {
+	next     processing.Output
+	mutex    sync.Mutex
+	counts   map[string]int
+	accepted map[string]int
+}
+
+func (h *t20iHandedByRoute) WriteApproved(ctx context.Context, a processing.Approved) error {
+	var route struct {
+		Route struct {
+			Pipeline string `json:"pipeline"`
+		} `json:"route"`
+	}
+	_ = json.Unmarshal(a.Bytes(), &route)
+	h.mutex.Lock()
+	if h.counts == nil {
+		h.counts, h.accepted = map[string]int{}, map[string]int{}
+	}
+	h.counts[route.Route.Pipeline]++
+	h.mutex.Unlock()
+	err := h.next.WriteApproved(ctx, a)
+	if err == nil {
+		h.mutex.Lock()
+		h.accepted[route.Route.Pipeline]++
+		h.mutex.Unlock()
+	}
+	return err
+}
+
+func (h *t20iHandedByRoute) handed(pipeline string) int {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	return h.counts[pipeline]
+}
+
+func (h *t20iHandedByRoute) written(pipeline string) int {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	return h.accepted[pipeline]
+}
+
+// t20iPipelineOf is the route.pipeline of one approved line.
+func t20iPipelineOf(t *testing.T, line []byte) string {
+	t.Helper()
+	var route struct {
+		Route struct {
+			Pipeline string `json:"pipeline"`
+		} `json:"route"`
+	}
+	if err := json.Unmarshal(line, &route); err != nil {
+		t.Fatalf("an approved line does not decode: %v", err)
+	}
+	return route.Route.Pipeline
+}
+
+// t20iPersistedByRoute is how many records of each route the approved output
+// in directory holds.
+func t20iPersistedByRoute(t *testing.T, directory string) map[string]int {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(directory, processing.ArtifactName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for _, line := range bytes.Split(bytes.TrimSpace(raw), []byte{'\n'}) {
+		if len(line) != 0 {
+			counts[t20iPipelineOf(t, line)]++
+		}
+	}
+	return counts
 }

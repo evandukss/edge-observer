@@ -80,35 +80,47 @@ func TestP3T9BCondition2PublicInspection(t *testing.T) {
 				t.Fatalf("apparatus: copy population: %v %v", entries, err)
 			}
 			path := filepath.Join(directory, processing.ArtifactName)
-			wire, err := os.ReadFile(path)
+			file, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
 			}
+			lines, exchanges := t20iOneRecordPerRoute(t, file)
+			wire := lines[exchanges]
 			var members map[string]json.RawMessage
 			if err := json.Unmarshal(wire, &members); err != nil {
 				t.Fatal(err)
 			}
 			if name == "legacy_absent" || name == "legacy_null" {
-				delete(members, "policy_exclusions")
-				wire, err = json.Marshal(members)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if name == "legacy_null" {
-					// Actual public-type round trip, not a hand-written null.
-					var legacy processing.Artifact
-					if err := json.Unmarshal(wire, &legacy); err != nil {
+				// An artifact written before the member existed lacks it on
+				// every record, the connection record included.
+				for i, line := range lines {
+					var each map[string]json.RawMessage
+					if err := json.Unmarshal(line, &each); err != nil {
 						t.Fatal(err)
 					}
-					if legacy.PolicyExclusions != nil {
-						t.Fatal("apparatus: absent key did not decode nil")
-					}
-					wire, err = json.Marshal(legacy)
+					delete(each, "policy_exclusions")
+					line, err = json.Marshal(each)
 					if err != nil {
 						t.Fatal(err)
 					}
+					if name == "legacy_null" {
+						// Actual public-type round trip, not a hand-written null.
+						var legacy processing.Artifact
+						if err := json.Unmarshal(line, &legacy); err != nil {
+							t.Fatal(err)
+						}
+						if legacy.PolicyExclusions != nil {
+							t.Fatal("apparatus: absent key did not decode nil")
+						}
+						line, err = json.Marshal(legacy)
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					lines[i] = line
 				}
-				if err := os.WriteFile(path, append(wire, '\n'), 0600); err != nil {
+				wire = lines[exchanges]
+				if err := os.WriteFile(path, append(bytes.Join(lines, []byte{'\n'}), '\n'), 0600); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -160,14 +172,13 @@ func TestP3T9BCondition2PublicInspection(t *testing.T) {
 			if err != nil {
 				t.Fatalf("PUBLIC_READ: unexpected refusal: %v\n%s", err, out)
 			}
-			p3t9bAssertOutput(t, name, out, persisted.PolicyRevision)
+			p3t9bAssertOutput(t, name, out, t20iExchangesSection(t, string(out)), persisted.PolicyRevision)
 		})
 	}
 }
 
-func p3t9bAssertOutput(t *testing.T, name string, out []byte, revision string) {
+func p3t9bAssertOutput(t *testing.T, name string, out []byte, text string, revision string) {
 	t.Helper()
-	text := string(out)
 	// Check the whole public output, including account, diagnostics and the
 	// renderer's decoded body section. This is an explicit marker oracle, not
 	// an assertion that every possible encoding or unrelated value is covered.
@@ -310,6 +321,72 @@ func t20iRenderedCount(lines []string, e processing.PolicyExclusion) int {
 	return count
 }
 
+// t20iOneRecordPerRoute is the approved output's lines, which must be exactly
+// one exchanges record and one connections record by route.pipeline, and the
+// index of the exchanges one. A total would absorb a missing exchanges record
+// beside an extra connections record.
+func t20iOneRecordPerRoute(t *testing.T, file []byte) ([][]byte, int) {
+	t.Helper()
+	var lines [][]byte
+	counts := map[string]int{}
+	exchanges := -1
+	for _, line := range bytes.Split(bytes.TrimSpace(file), []byte{'\n'}) {
+		if len(line) == 0 {
+			continue
+		}
+		var route struct {
+			Route struct {
+				Pipeline string `json:"pipeline"`
+			} `json:"route"`
+		}
+		if err := json.Unmarshal(line, &route); err != nil {
+			t.Fatalf("apparatus: an approved line does not decode: %v", err)
+		}
+		counts[route.Route.Pipeline]++
+		if route.Route.Pipeline == config.ExchangesPipeline {
+			exchanges = len(lines)
+		}
+		lines = append(lines, line)
+	}
+	if counts[config.ExchangesPipeline] != 1 {
+		t.Fatalf("apparatus, not the property: the approved output holds %d exchanges records, want 1; records by route %v",
+			counts[config.ExchangesPipeline], counts)
+	}
+	if counts[config.ConnectionsPipeline] != 1 || len(counts) != 2 {
+		t.Fatalf("apparatus: the approved output holds records by route %v, want one exchanges and one connections record", counts)
+	}
+	return lines, exchanges
+}
+
+// t20iExchangesSection is the public text rendering of the exchanges record
+// alone: from its heading to the next record's heading or the end. The
+// connection record is rendered beside it with a disposition of its own.
+func t20iExchangesSection(t *testing.T, text string) string {
+	t.Helper()
+	const heading = "approved artifact  version="
+	var sections []string
+	var current []string
+	in := false
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, heading) {
+			if in {
+				sections = append(sections, strings.Join(current, "\n"))
+			}
+			current, in = nil, strings.Contains(line, `pipeline="`+config.ExchangesPipeline+`"`)
+		}
+		if in {
+			current = append(current, line)
+		}
+	}
+	if in {
+		sections = append(sections, strings.Join(current, "\n"))
+	}
+	if len(sections) != 1 {
+		t.Fatalf("apparatus, not the property: the public text renders %d exchanges records, want 1\n%s", len(sections), text)
+	}
+	return sections[0]
+}
+
 func p3t9bAbsent(t *testing.T, assertion string, out []byte, value string) {
 	t.Helper()
 	for _, representation := range []string{value, base64.StdEncoding.EncodeToString([]byte(value))} {
@@ -397,9 +474,14 @@ func p3t9bProduce(t *testing.T, destination, name string) {
 	if got := f.d.capture.Stats(); got.Transfers != 2 || got.Rejected != 0 {
 		t.Fatalf("apparatus: capture did not accept both supplied transfers: %+v", got)
 	}
-	if got := f.d.output.Stats(); got.Written != 1 || !got.Closed {
+	if got := f.d.output.Stats(); !got.Closed {
 		t.Fatalf("apparatus: useful output not sealed: %+v", got)
 	}
+	written, err := os.ReadFile(filepath.Join(f.d.directory, processing.ArtifactName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t20iOneRecordPerRoute(t, written)
 	for _, file := range []string{sealedName, processing.ArtifactName} {
 		data, err := os.ReadFile(filepath.Join(f.d.directory, file))
 		if err != nil {
@@ -409,7 +491,7 @@ func p3t9bProduce(t *testing.T, destination, name string) {
 			t.Fatal(err)
 		}
 	}
-	fmt.Printf("REACHED case=%s transfers=2 rejected=0 request_bytes=%d response_bytes=%d protected_input=%t suffix_input=%t writer_records=1 sealed=true\n", name, len(request), len(response), strings.Contains(request, p3t9bSecret), strings.Contains(request, p3t9bSuffix))
+	fmt.Printf("REACHED case=%s transfers=2 rejected=0 request_bytes=%d response_bytes=%d protected_input=%t suffix_input=%t exchanges_records=1 connections_records=1 sealed=true\n", name, len(request), len(response), strings.Contains(request, p3t9bSecret), strings.Contains(request, p3t9bSuffix))
 }
 
 func p3t9bConfiguration(t *testing.T, implementation, arguments string) []byte {
