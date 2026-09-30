@@ -271,5 +271,5 @@ func TestAPackIsReadUnderTheNameItIsEnabledBy(t *testing.T) {
 	refused(t, findings, "configuration", "packs[0]", UnknownPack)
 	_, findings = Compile([]byte(withRules(`"packs": ["credentials"]`)),
 		[]Supplied{{Name: "credentials", Content: []byte(`{"version": "observer.pack/1", "name": "other"}`)}})
-	refused(t, findings, "pack:credentials", "name", InvalidValue)
+	refused(t, findings, "pack:credentials", "name", PackNameMismatch)
 }

@@ -101,12 +101,8 @@ func TestT20iRemoveQueryParametersRemovesEveryParameterWithTheConfiguredName(t *
 			}
 			t20iEvidence(t, a, x)
 		}})
-	setup := t20iSetup{
-		pipelines: []map[string]any{t20iPipeline("t20i", []string{"account"},
-			t20iSlot("params", config.RemoveQueryParameters, map[string]any{"names": []string{"card_number"}}))},
-		requirements: []cp.Requirement{t20iRequirement("t20i-query-card", config.QueryFieldPrefix+"card_number")},
-	}
-	t20iAssert(t, t20iRun(t, setup, cases), []string{"t20i"}, cases)
+	setup := t20iSetup{rules: map[string]any{"remove": map[string]any{"query": []string{"card_number"}}}}
+	t20iAssert(t, t20iRun(t, setup, cases), []string{config.ExchangesPipeline}, cases)
 }
 
 // remove-form-fields under message.form.card_number. An admitted urlencoded
@@ -208,12 +204,8 @@ func TestT20iRemoveFormFieldsRemovesEveryParameterWithTheConfiguredName(t *testi
 		whole("ff-trailer-type", []string{t20iChunked("POST", "/t20i/ff-trailer-type", append(slices.Clone(t20iForm), keepHeader), chunks, t20iForm)},
 			len(chunks[0]), "chunked", p("FF_TRAILER")),
 	)
-	setup := t20iSetup{
-		pipelines: []map[string]any{t20iPipeline("t20i", []string{"account"},
-			t20iSlot("form", config.RemoveFormFields, map[string]any{"names": []string{"card_number"}}))},
-		requirements: []cp.Requirement{t20iRequirement("t20i-form-card", config.FormFieldPrefix+"card_number")},
-	}
-	t20iAssert(t, t20iRun(t, setup, cases), []string{"t20i"}, cases)
+	setup := t20iSetup{rules: map[string]any{"remove": map[string]any{"form": []string{"card_number"}}}}
+	t20iAssert(t, t20iRun(t, setup, cases), []string{config.ExchangesPipeline}, cases)
 }
 
 // Body operations read Content-Type from the message as parsed. A slot

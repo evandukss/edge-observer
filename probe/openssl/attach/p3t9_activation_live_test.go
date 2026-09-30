@@ -28,7 +28,6 @@ import (
 	"github.com/evandukss/edge-observer/capture"
 	"github.com/evandukss/edge-observer/connection"
 	"github.com/evandukss/edge-observer/contract/config"
-	cp "github.com/evandukss/edge-observer/contract/policy"
 	"github.com/evandukss/edge-observer/ebpf"
 	"github.com/evandukss/edge-observer/policy"
 	"github.com/evandukss/edge-observer/probe"
@@ -125,26 +124,20 @@ func p3t9ActivationReading(t *testing.T, peer process.Process) activation.Postur
 
 func p3t9ActivationCompiled(t *testing.T, peer process.Process) policy.Policy {
 	t.Helper()
-	raw, err := config.Examples.ReadFile("examples/no-extension.config.json")
+	raw, err := config.Examples.ReadFile("examples/no-rules.config.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cfg config.Configuration
-	if err := json.Unmarshal(raw, &cfg); err != nil {
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
 		t.Fatal(err)
 	}
-	args := append([]string{}, peer.Arguments[1:]...)
-	cfg.ObservationScope.Targets = cfg.ObservationScope.Targets[:1]
-	cfg.ObservationScope.Targets[0].Match = config.Match{Exe: peer.Executable, Args: &args}
-	cfg.Packs, cfg.Subscribers = nil, nil
-	cfg.Sinks = []config.Sink{{Name: "account", Kind: "local_account"}}
-	cfg.Pipelines = []config.Pipeline{{Name: "protected", Input: "reconstruction", Sinks: []string{"account"}, Slots: []config.Slot{{Name: "exclude-auth", Implementation: config.RemoveHeaders, Configuration: json.RawMessage(`{"headers":["authorization"]}`), OnFailure: config.OnFailureDropAndAccount}}}}
-	rule, err := json.Marshal(cp.Document{Vocabulary: cp.Vocabulary, Requirements: []cp.Requirement{{ID: "exclude-auth", Target: cp.Target{Kind: "sink", Name: "account"}, Operation: "transform_field", Parameters: map[string]any{"field": "message.headers.authorization", "transformation": "remove"}, FailureAction: cp.DropAndAccount}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.Policy = []json.RawMessage{rule}
-	raw, err = json.Marshal(cfg)
+	watch := document["watch"].([]any)[:1]
+	one := watch[0].(map[string]any)
+	one["exe"], one["args"] = peer.Executable, append([]string{}, peer.Arguments[1:]...)
+	document["watch"] = watch
+	document["remove"] = map[string]any{"headers": []string{"authorization"}}
+	raw, err = json.Marshal(document)
 	if err != nil {
 		t.Fatal(err)
 	}

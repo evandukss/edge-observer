@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/evandukss/edge-observer/contract/config"
-	cp "github.com/evandukss/edge-observer/contract/policy"
 	"github.com/evandukss/edge-observer/contract/record"
 	"github.com/evandukss/edge-observer/processing"
 )
@@ -180,12 +179,10 @@ func TestT20iRemoveJSONFieldsRemovesEveryMatchAndKeepsEveryOtherByte(t *testing.
 		undecidable("j-text", []t20iHeader{{"Content-Type", "text/plain"}}, "plain "+p("J_TEXT"), p("J_TEXT")),
 		undecidable("j-mislabelled", t20iJSON, "card_number="+p("J_MISLABEL"), p("J_MISLABEL")),
 	}
-	setup := t20iSetup{
-		pipelines: []map[string]any{t20iPipeline("t20i", []string{"account"}, t20iSlot("json", config.RemoveJSONFields, map[string]any{
-			"messages": []string{"request", "response"}, "pointers": []string{"/card/number", "/cards/*/number", "/secret", "/tokens"}}))},
-		requirements: []cp.Requirement{t20iRequirement("t20i-json", config.JSONFieldPrefix+"/card/number")},
-	}
-	t20iAssert(t, t20iRun(t, setup, cases), []string{"t20i"}, cases)
+	pointers := []string{"/card/number", "/cards/*/number", "/secret", "/tokens"}
+	setup := t20iSetup{rules: map[string]any{"remove": map[string]any{"json": map[string]any{
+		"request": pointers, "response": pointers}}}}
+	t20iAssert(t, t20iRun(t, setup, cases), []string{config.ExchangesPipeline}, cases)
 }
 
 // Where one match lies inside another, the outer one is acted on: the whole
@@ -207,9 +204,9 @@ func TestT20iRemoveJSONFieldsActsOnTheOuterOfTwoNestedMatches(t *testing.T) {
 				t.Errorf("the outer match carries no entry: %+v", a.PolicyExclusions)
 			}
 		}}}
-	setup := t20iSetup{pipelines: []map[string]any{t20iPipeline("t20i", []string{"account"}, t20iSlot("json", config.RemoveJSONFields,
-		map[string]any{"messages": []string{"request"}, "pointers": []string{"/card/number", "/card"}}))}}
-	t20iAssert(t, t20iRun(t, setup, cases), []string{"t20i"}, cases)
+	setup := t20iSetup{rules: map[string]any{"remove": map[string]any{"json": map[string]any{
+		"request": []string{"/card/number", "/card"}}}}}
+	t20iAssert(t, t20iRun(t, setup, cases), []string{config.ExchangesPipeline}, cases)
 }
 
 // replace-json-values writes its value, as a JSON string, over every match,
@@ -275,7 +272,7 @@ func TestT20iReplaceJSONValuesReplacesEveryMatchAndRecordsNoRemoval(t *testing.T
 				t20iEvidence(t, a, x, t20iUndecidableEntry("request"))
 			}},
 	}
-	setup := t20iSetup{pipelines: []map[string]any{t20iPipeline("t20i", []string{"account"}, t20iSlot("replace", config.ReplaceJSONValues,
-		map[string]any{"messages": []string{"request"}, "pointers": []string{"/card/number", "/cards/*/number", "/secret"}, "value": value}))}}
-	t20iAssert(t, t20iRun(t, setup, cases), []string{"t20i"}, cases)
+	setup := t20iSetup{rules: map[string]any{"mask": map[string]any{"json": map[string]any{
+		"request": map[string]any{"/card/number": value, "/cards/*/number": value, "/secret": value}}}}}
+	t20iAssert(t, t20iRun(t, setup, cases), []string{config.ExchangesPipeline}, cases)
 }

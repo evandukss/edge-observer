@@ -75,17 +75,15 @@ func TestApprovedInspectionSurvivesProducerExitAndPolicyChange(t *testing.T) {
 	before := inspect()
 	// A real, accepted local configuration now removes the formerly permitted
 	// field. Its compiled identity must differ from the one the artifact names.
-	configuration, err := config.Examples.ReadFile("examples/no-extension.config.json")
+	configuration, err := config.Examples.ReadFile("examples/no-rules.config.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var next config.Configuration
+	var next map[string]any
 	if err := json.Unmarshal(configuration, &next); err != nil {
 		t.Fatal(err)
 	}
-	next.Pipelines = []config.Pipeline{{Name: "exchanges", Input: "reconstruction", Sinks: []string{"account"}, Slots: []config.Slot{
-		{Name: "remove", Implementation: config.RemoveHeaders, Configuration: json.RawMessage(`{"headers":["x-public"]}`), OnFailure: config.OnFailureDropAndAccount},
-	}}}
+	next["remove"] = map[string]any{"headers": []string{"x-public"}}
 	changed, err := json.Marshal(next)
 	if err != nil {
 		t.Fatal(err)
@@ -118,7 +116,8 @@ func produceInspectionSession(t *testing.T, destination string) {
 	if err := f.finish(&logger{}); err != nil {
 		t.Fatal(err)
 	}
-	if stats := f.d.output.Stats(); stats.Written != 1 || !stats.Closed {
+	// The exchange, and the connection's record beside it.
+	if stats := f.d.output.Stats(); stats.Written != 2 || !stats.Closed {
 		t.Fatalf("producer did not seal useful output: %+v", stats)
 	}
 	copyApprovedSession(t, f.d.directory, destination)

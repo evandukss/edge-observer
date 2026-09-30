@@ -31,11 +31,11 @@ func t23Allowance(t *testing.T, c configured, events int) {
 	if err := json.Unmarshal(content, &document); err != nil {
 		t.Fatalf("decode %s: %v", c.path, err)
 	}
-	observer, _ := document["observer"].(map[string]any)
-	if observer == nil {
-		t.Fatalf("wiring, not the property: %s has no observer section", c.path)
+	limits, _ := document["limits"].(map[string]any)
+	if limits == nil {
+		t.Fatalf("wiring, not the property: %s has no limits", c.path)
 	}
-	observer["admitted_event_limit"] = events
+	limits["events"] = events
 	if content, err = json.Marshal(document); err != nil {
 		t.Fatalf("encode %s: %v", c.path, err)
 	}

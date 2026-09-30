@@ -23,7 +23,7 @@ func TestReloadRequiresTheSameNonemptyCompiledProcessingRevision(t *testing.T) {
 		change  func(*policy.Policy)
 		because string
 	}{
-		{"changed", func(p *policy.Policy) { p.ProcessingRevision = "sha256:fixture-next" }, "processing or retention"},
+		{"changed", func(p *policy.Policy) { p.ProcessingRevision = "sha256:fixture-next" }, "changes processing -"},
 		{"absent identity", func(p *policy.Policy) { p.ProcessingRevision = "" }, "processing revision"},
 		{"legacy plan", func(p *policy.Policy) { p.Processing = nil }, "compiled processing plan"},
 	} {

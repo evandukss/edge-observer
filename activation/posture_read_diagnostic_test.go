@@ -154,18 +154,15 @@ func postureReadDiagnosticChild(t *testing.T, mode string, classify bool) {
 		t.Fatalf("setup: expected memory limit %q absent: value=%q error=%v", expectedLimit, limit, limitErr)
 	}
 	outputDir := t.TempDir()
-	written, err := config.Examples.ReadFile("examples/no-extension.config.json")
+	written, err := config.Examples.ReadFile("examples/no-rules.config.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var declaration config.Configuration
+	var declaration map[string]any
 	if err := json.Unmarshal(written, &declaration); err != nil {
 		t.Fatal(err)
 	}
-	declaration.Observer.Directory, declaration.Observer.Log = outputDir, "stdout"
-	for n := range declaration.Pipelines {
-		declaration.Pipelines[n].Queues = []config.Queue{}
-	}
+	declaration["output"], declaration["log"] = outputDir, config.LogStdout
 	written, err = json.Marshal(declaration)
 	if err != nil {
 		t.Fatal(err)

@@ -88,10 +88,10 @@ func usage() string {
       permitted values and their capture-time provenance from approved.jsonl;
       missing or empty approved output is an error
 
-The configuration is one JSON file, the operator configuration of
-contract/config/CONFIG.md: where the log and approved output go, what to
-attach to, what never to attach to, and which library builds a probe may be
-placed on. A section this program does not implement is refused by name. Each
+The configuration is one JSON file, observer.config/1 of
+contract/config/CONFIG.md: where approved output and the log go, what to
+watch, what to ignore, which library builds a probe may be placed on, and what
+to remove, mask and truncate. A key it does not define is refused by name. Each
 pack it enables is read from packs/<name>.json beside it; stop, and inspect of
 a running session, read only where the session is and never a pack. The
 account is JSON unless --text asks for the one a
@@ -569,7 +569,7 @@ func begin(read policy.Policy, session string) (*daemon, error) {
 	// The writer owns the signal fixed into the gate at construction. Opening
 	// it creates an empty approved-output file, not a durable capture sink.
 	if read.Settings.ApprovedOutputBoundMiB <= 0 || read.Settings.ApprovedOutputBoundMiB > math.MaxInt64/(1<<20) {
-		return nil, fmt.Errorf("approved_output_bound_mib cannot be represented as a positive int64 byte allowance")
+		return nil, fmt.Errorf("limits.output_mib cannot be represented as a positive int64 byte allowance")
 	}
 	directory := filepath.Join(read.Settings.Directory, sessionsName, session)
 	output, err := processing.Open(directory, read.Settings.ApprovedOutputBoundMiB<<20)

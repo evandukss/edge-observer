@@ -48,7 +48,7 @@ func t18Rendered(t *testing.T, binary, directory string) string {
 }
 
 // Rows 4, 10 and 17, the event allowance, on the running program with real
-// traffic. With admitted_event_limit N, one connection is exchanged, closed,
+// traffic. With limits.events N, one connection is exchanged, closed,
 // processed and written - released from volatile intake - and a second is
 // kept open and exchanged on until the session ends by itself. The account
 // must name the limit as the reason and nothing else, admit exactly N events
@@ -74,7 +74,7 @@ func TestT18TheAdmissionLimitEndsTheSessionUnderItsReasonAndKeepsOnlyWhatWasDeci
 			c := configuring(t, target("clients", decided.process))
 			t18Edit(t, c, t18Removing)
 			if limited {
-				t18Edit(t, c, t18Setting("admitted_event_limit", limit))
+				t18Edit(t, c, t18Setting("events", limit))
 			}
 			s := t18Started(t, binary, c)
 
@@ -172,7 +172,7 @@ func TestT18TheAdmissionLimitEndsTheSessionUnderItsReasonAndKeepsOnlyWhatWasDeci
 
 // Rows 7, 10 and 17, the approved-output bound, on a loaded run of the running
 // program. Each connection is forty 3000-byte answers, closed, then written as
-// one record per route; approved_output_bound_mib is 1 as configuring writes
+// one record per route; limits.output_mib is 1 as configuring writes
 // it. Two connections fit. Eight do not: the first record that does not fit is
 // refused whole, nothing of that connection is written, the records before it
 // stay whole, and the session ends by itself with an output failure and the
@@ -302,7 +302,7 @@ func TestT18AFullVolatileIntakeEndsTheSessionUnderAStatedReason(t *testing.T) {
 	const allowance = 8192
 	client := speaking(t, t18Serving(t))
 	c := configuring(t, target("client", client.process))
-	t18Edit(t, c, t18Removing, t18Setting("admitted_event_limit", allowance))
+	t18Edit(t, c, t18Removing, t18Setting("events", allowance))
 	s := t18Started(t, binary, c)
 	t18Ask(t, client, "/?asked=t18-intake-first", "Authorization: Bearer t18-intake-secret")
 	t18Until(t, binary, c, 10*time.Second, "wiring, not the property: nothing was captured before the load",

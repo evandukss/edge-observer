@@ -77,6 +77,12 @@ const (
 	// does not enforce what the documents ask. It is the observer's defect,
 	// never the user's error, and it fails closed.
 	InternalDefect Reason = "internal_defect"
+
+	// PackNameInvalid is an enabled pack whose name does not meet PackName, so
+	// no file is looked for. PackNameMismatch is a pack that names itself other
+	// than the name it is enabled by.
+	PackNameInvalid  Reason = "pack_name_invalid"
+	PackNameMismatch Reason = "pack_name_mismatch"
 )
 
 // File is the configuration a user writes, as read.

@@ -1,19 +1,15 @@
 // Package policy reads the observer's configuration file: where it writes,
-// what it attaches to, what it never attaches to, and which library builds a
-// probe may be placed on.
+// what it watches, what it never watches, which library builds a probe may be
+// placed on, and the rules applied before anything is written.
 //
-// The file is the contract's operator configuration (contract/config), checked
-// by the contract's own code against what this program has (Inventory). Every
-// section the contract accepts and this program does not implement is refused
-// by name (Unimplemented), never read and ignored.
+// The file is the contract's configuration (contract/config, observer.config/1),
+// read and compiled by the contract's own code (CompileProcessing).
 package policy
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os"
-	"slices"
 	"time"
 
 	"github.com/evandukss/edge-observer/admission"
@@ -62,72 +58,44 @@ type Policy struct {
 	Revision string
 }
 
-// Load reads the configuration file at path.
-func Load(path string) (Policy, error) {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return Policy{}, fmt.Errorf("read the configuration: %w", err)
+// assemble is the observation approval and the settings a compiled
+// configuration asks for. A watch or ignore entry the process selector
+// refuses, or a library approval it cannot use, is refused naming its key.
+func assemble(content []byte, file config.File, resolved config.ResolvedObserver) (Policy, []config.Finding) {
+	var findings []config.Finding
+	refuse := func(subject string, err error) {
+		findings = append(findings, config.Finding{Document: "configuration", Subject: subject,
+			Reason: config.InvalidValue, Detail: err.Error()})
 	}
-	read, err := parse(content)
-	if err != nil {
-		return Policy{}, fmt.Errorf("read the configuration %s: %w", path, err)
-	}
-	return read, nil
-}
-
-func parse(content []byte) (Policy, error) {
-	return against(content, Inventory())
-}
-
-// against reads a configuration against an inventory. The program uses only
-// its own; tests use this to hold the none-versus-some rule against an
-// inventory that has some of a kind.
-func against(content []byte, has config.Available) (Policy, error) {
-	written, structural := config.ReadConfiguration(content)
-	if len(structural) > 0 {
-		return Policy{}, &Refused{Outcome: config.StructurallyRefused, Findings: structural}
-	}
-	if sections := unimplemented(written, has); len(sections) > 0 {
-		return Policy{}, &Unimplemented{Sections: sections}
-	}
-	result := config.Check(config.Input{Configuration: content, Available: has})
-	if result.Outcome != config.Accepted {
-		return Policy{}, &Refused{Outcome: result.Outcome, Findings: append(result.Structural, result.Composition...)}
-	}
-	return assemble(content, written, result.Resolved.Observer)
-}
-
-// assemble is shared by both configuration profiles so enabling processing
-// cannot bypass the process selector and descendant-mode validation.
-func assemble(content []byte, written config.Configuration, resolved config.ResolvedObserver) (Policy, error) {
 	approval := process.Approval{}
-	for i, t := range written.ObservationScope.Targets {
-		mode, answerable := modeOf(t.Descendants)
-		if !answerable {
-			return Policy{}, &Unanswerable{Target: t.Name, Existing: *t.Descendants.Existing, Future: *t.Descendants.Future}
-		}
-		rule, err := ruleOf(t.Match)
+	for i, w := range file.Watch {
+		rule, err := ruleOf(w.Match)
 		if err != nil {
-			return Policy{}, fmt.Errorf("observation_scope.targets[%d]: %w", i, err)
+			refuse(fmt.Sprintf("watch[%d]", i), err)
+			continue
 		}
-		rule.Name, rule.Mode = t.Name, mode
+		rule.Name, rule.Mode = w.Name, childrenMode(w.Children)
 		approval.Rules = append(approval.Rules, rule)
 	}
-	for i, m := range written.ObservationScope.Exclude {
+	for i, m := range file.Ignore {
 		rule, err := ruleOf(m)
 		if err != nil {
-			return Policy{}, fmt.Errorf("observation_scope.exclude[%d]: %w", i, err)
+			refuse(fmt.Sprintf("ignore[%d]", i), err)
+			continue
 		}
 		approval.Exclusions = append(approval.Exclusions, rule)
 	}
-	for i, l := range written.ObservationScope.Libraries {
+	for i, l := range file.Libraries {
 		library := process.LibraryApproval{BuildID: l.BuildID, Symbols: l.Symbols}
 		if err := library.Validate(); err != nil {
-			return Policy{}, fmt.Errorf("observation_scope.libraries[%d]: %w", i, err)
+			refuse(fmt.Sprintf("libraries[%d]", i), err)
+			continue
 		}
 		approval.Libraries = append(approval.Libraries, library)
 	}
-
+	if len(findings) > 0 {
+		return Policy{}, findings
+	}
 	settings := Settings{
 		Log:                    resolved.Log,
 		Directory:              resolved.Directory,
@@ -139,19 +107,19 @@ func assemble(content []byte, written config.Configuration, resolved config.Reso
 	return Policy{Settings: settings, Approval: approval, Revision: "sha256:" + hex.EncodeToString(sum[:])}, nil
 }
 
-// modeOf is the admission mode giving a target's two descendant answers. One
-// pair - future descendants without existing ones - has no mode.
-func modeOf(d config.Descendants) (admission.Mode, bool) {
-	switch existing, future := *d.Existing, *d.Future; {
-	case !existing && !future:
-		return admission.ModeNone, true
-	case existing && !future:
-		return admission.ModeExisting, true
-	case existing && future:
-		return admission.ModeFollow, true
-	default:
-		return admission.ModeUnset, false
+// childrenMode is the admission mode a watch entry's children answer names:
+// all is existing and future descendants, existing the ones running when the
+// watch is resolved, none no descendant. The reader admits no other value.
+func childrenMode(children string) admission.Mode {
+	switch children {
+	case config.ChildrenAll:
+		return admission.ModeFollow
+	case config.ChildrenExisting:
+		return admission.ModeExisting
+	case config.ChildrenNone:
+		return admission.ModeNone
 	}
+	return admission.ModeUnset
 }
 
 func ruleOf(m config.Match) (process.Rule, error) {
@@ -169,81 +137,4 @@ func ruleOf(m config.Match) (process.Rule, error) {
 		return process.Rule{}, err
 	}
 	return rule, nil
-}
-
-// unimplemented is every section of a well-formed configuration that asks for
-// something this program does not do. These checks run before attachment;
-// volatile intake accepting a record does not implement a configured pipeline
-// or authorize its output.
-//
-// Where the inventory holds a kind, the count decides: NONE of it means the
-// kind is unimplemented; SOME of it without the one named is left to the
-// composition check. So an inventory that gains processors turns an unknown
-// slot back into "cannot be resolved" with no change here. Packs, traffic
-// scopes, policy documents and routing have nothing to count and are refused
-// whenever asked for.
-func unimplemented(c config.Configuration, has config.Available) []Section {
-	processing := []Capability{Processing}
-	var sections []Section
-	add := func(path string, needs []Capability, detail string, arguments ...any) {
-		sections = append(sections, Section{Path: path, Needs: needs, Detail: fmt.Sprintf(detail, arguments...)})
-	}
-	builtins := func(role string) bool {
-		return slices.ContainsFunc(has.Builtins, func(b config.Component) bool { return b.Role == role })
-	}
-	kinds := func(is func(config.SinkKind) bool) bool { return slices.ContainsFunc(has.SinkKinds, is) }
-
-	for i, rule := range c.TrafficScope.Rules {
-		if len(rule.Targets) > 0 || rule.Direction != config.DirectionAny || len(rule.LocalPorts) > 0 || len(rule.RemotePorts) > 0 {
-			add(fmt.Sprintf("traffic_scope.rules[%d]", i), processing,
-				"it narrows the connections captured, and every connection of an approved instance is captured")
-		}
-	}
-	if retain := c.RetentionExport.RetainPlaintext; retain != nil && !*retain &&
-		!kinds(func(k config.SinkKind) bool { return !k.RetainsPlaintext }) {
-		add("retention_and_export.retain_plaintext", processing,
-			"it is false, and every output this program has keeps the plaintext it captures")
-	}
-	if len(c.RetentionExport.ExportSinks) > 0 && !kinds(func(k config.SinkKind) bool { return k.LeavesHost }) {
-		add("retention_and_export.export_sinks", nil, "it names %v, and nothing this program has leaves the host; "+
-			"an output that does is added to the program as a contribution, not configured into it",
-			c.RetentionExport.ExportSinks)
-	}
-	if len(c.Packs) > 0 {
-		add("packs", []Capability{Processing, Plugins}, "it enables %v, and this profile loads no pack; "+
-			"the observer's commands read and compile packs through CompileProcessing", c.Packs)
-	}
-	otherKinds := kinds(func(k config.SinkKind) bool { return k.Name != LocalAccount })
-	local := map[string]bool{}
-	for i, sink := range c.Sinks {
-		if sink.Kind == LocalAccount {
-			local[sink.Name] = true
-		} else if !otherKinds {
-			add(fmt.Sprintf("sinks[%d].kind", i), nil, "sink %q is of kind %q, and this program's one output "+
-				"is the %s; another kind is added to the program as a contribution, not configured into it",
-				sink.Name, sink.Kind, LocalAccount)
-		}
-	}
-	routed := map[string]bool{}
-	processors := builtins(config.RoleProcessor)
-	for i, pipeline := range c.Pipelines {
-		if len(pipeline.Slots) > 0 && !processors {
-			add(fmt.Sprintf("pipelines[%d].slots", i), processing,
-				"pipeline %q fills %d slots, and this program has no processing component", pipeline.Name, len(pipeline.Slots))
-		}
-		if slices.ContainsFunc(pipeline.Sinks, func(name string) bool { return local[name] }) {
-			routed[pipeline.Input] = true
-		}
-	}
-	if !routed[Reconstruction] || !routed[Connection] {
-		add("pipelines", processing, "every %s and every %s is kept in the local account, so a configuration "+
-			"routing either to none is filtering them", Reconstruction, Connection)
-	}
-	if len(c.Subscribers) > 0 && !builtins(config.RoleSubscriber) {
-		add("subscribers", processing, "it names %d subscribers, and this program has none", len(c.Subscribers))
-	}
-	if len(c.Policy) > 0 {
-		add("policy", processing, "it carries %d policy documents, and this program enforces none", len(c.Policy))
-	}
-	return sections
 }

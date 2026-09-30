@@ -51,13 +51,12 @@ func sleeping(t *testing.T, excluded bool) (int32, string) {
 
 	directory := t.TempDir()
 	path := contractConfiguration(t, func(document map[string]any) {
-		document["observer"].(map[string]any)["directory"] = directory
+		document["output"] = directory
 		target(document, "sleeper", p.Executable, "600")
 		if excluded {
 			// An exe with no args matches only a process run with none, so the exclusion
 			// names them too.
-			scope := document["observation_scope"].(map[string]any)
-			scope["exclude"] = []any{map[string]any{"exe": p.Executable, "args": []string{"600"}}}
+			document["ignore"] = []any{map[string]any{"exe": p.Executable, "args": []string{"600"}}}
 		}
 	})
 	return pid, path

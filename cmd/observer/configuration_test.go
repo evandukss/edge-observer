@@ -18,51 +18,43 @@ import (
 	"github.com/evandukss/edge-observer/policy"
 )
 
-// demonstration is the example pack the demonstration configuration enables.
-func demonstration(t *testing.T) []byte {
+// credentials is the example pack the contract ships.
+func credentials(t *testing.T) []byte {
 	t.Helper()
-	content, err := config.Examples.ReadFile("examples/packs/reversed-masking.json")
+	content, err := config.Examples.ReadFile("examples/packs/credentials.json")
 	if err != nil {
-		t.Fatalf("read the demonstration pack: %v", err)
+		t.Fatalf("read the credentials pack: %v", err)
 	}
 	return content
 }
 
-// manifest is a configuration-only pack declaring name, selecting each
-// replacement for the demonstration's slots.
-func manifest(t *testing.T, name string, replacements ...map[string]any) []byte {
+// pack is a pack naming itself name and removing each header.
+func pack(t *testing.T, name string, headers ...string) []byte {
 	t.Helper()
-	if replacements == nil {
-		replacements = []map[string]any{}
+	document := map[string]any{"version": config.PackVersion, "name": name}
+	if len(headers) > 0 {
+		document["remove"] = map[string]any{"headers": headers}
 	}
-	content, err := json.Marshal(map[string]any{"version": config.ManifestVersion, "name": name, "pack_version": "1",
-		"components": []any{}, "pipelines": []any{}, "replacements": replacements, "policy": []any{}})
+	content, err := json.Marshal(document)
 	if err != nil {
-		t.Fatalf("encode the manifest: %v", err)
+		t.Fatalf("encode the pack: %v", err)
 	}
 	return content
 }
 
-var (
-	truncateFirst = map[string]any{"pipeline": "exchanges", "slot": "mark", "implementation": config.TruncateHeaderValues,
-		"configuration": map[string]any{"headers": []string{"authorization"}, "length": 8}}
-	replaceSecond = map[string]any{"pipeline": "exchanges", "slot": "limit", "implementation": config.ReplaceHeaderValues,
-		"configuration": map[string]any{"headers": []string{"authorization"}, "value": "withheld-by-pack"}}
-)
-
-// bundle writes the demonstration configuration enabling these packs, and each
+// bundle writes the contract's no-rules example enabling these packs, and each
 // file under packs/ beside it. It returns the configuration's path.
 func bundle(t *testing.T, enabled []string, files map[string][]byte) string {
 	t.Helper()
-	content, err := config.Examples.ReadFile("examples/configuration-only-pack.config.json")
+	content, err := config.Examples.ReadFile("examples/no-rules.config.json")
 	if err != nil {
-		t.Fatalf("read the demonstration configuration: %v", err)
+		t.Fatalf("read the no-rules example: %v", err)
 	}
 	var document map[string]any
 	if err := json.Unmarshal(content, &document); err != nil {
-		t.Fatalf("decode the demonstration configuration: %v", err)
+		t.Fatalf("decode the no-rules example: %v", err)
 	}
-	document["observer"].(map[string]any)["directory"] = t.TempDir()
+	document["output"] = t.TempDir()
 	document["packs"] = enabled
 	written, err := json.Marshal(document)
 	if err != nil {
@@ -118,24 +110,24 @@ func dryRunPlans(t *testing.T, path string) account.Account {
 }
 
 // An enabled pack is read from packs/<name>.json in the configuration's
-// directory - not the directory the command runs from - and its replacements
-// fill the slots it names.
+// directory - not the directory the command runs from - and its rules reach
+// the plan as the pack's.
 func TestAnEnabledPackIsReadFromBesideTheConfiguration(t *testing.T) {
-	path := bundle(t, []string{"reversed-masking"}, map[string][]byte{"reversed-masking.json": demonstration(t)})
+	path := bundle(t, []string{"credentials"}, map[string][]byte{"credentials.json": credentials(t)})
 	read, err := loadProcessing(path)
 	if err != nil {
-		t.Fatalf("the demonstration bundle was refused: %v", err)
+		t.Fatalf("the credentials bundle was refused: %v", err)
 	}
 	pipelines := read.Processing.Pipelines()
-	if len(pipelines) != 1 || len(pipelines[0].Slots) != 2 {
-		t.Fatalf("wiring, not the loader: the demonstration compiled to %+v", pipelines)
+	at := slices.IndexFunc(pipelines, func(p config.EffectivePipeline) bool { return p.Name == config.ExchangesPipeline })
+	if at < 0 || len(pipelines[at].Slots) != 1 {
+		t.Fatalf("wiring, not the loader: the no-rules example with the credentials pack compiled to %+v", pipelines)
 	}
-	for i, want := range []string{config.TruncateHeaderValues, config.ReplaceHeaderValues} {
-		slot := pipelines[0].Slots[i]
-		if slot.Implementation != want || slot.SelectedBy != "pack:reversed-masking" {
-			t.Errorf("slot %s holds %s selected by %s, want %s selected by the installed pack",
-				slot.Name, slot.Implementation, slot.SelectedBy, want)
-		}
+	slot := pipelines[at].Slots[0]
+	if slot.Implementation != config.RemoveHeaders || slot.SelectedBy != "pack:credentials" ||
+		slot.Arguments == nil || !slices.Contains(slot.Arguments.Headers, "authorization") {
+		t.Errorf("slot %s holds %s %+v selected by %s, want the pack's header removal selected by the installed pack",
+			slot.Name, slot.Implementation, slot.Arguments, slot.SelectedBy)
 	}
 
 	// From another directory, by a relative path, beside a packs directory
@@ -145,7 +137,7 @@ func TestAnEnabledPackIsReadFromBesideTheConfiguration(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(elsewhere, "packs"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(elsewhere, "packs", "reversed-masking.json"), []byte("{"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(elsewhere, "packs", "credentials.json"), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(elsewhere)
@@ -161,8 +153,8 @@ func TestAnEnabledPackIsReadFromBesideTheConfiguration(t *testing.T) {
 // A file under packs/ that the configuration does not enable is neither read
 // nor refused, and does not change what the bundle is.
 func TestADisabledPackIsNeitherReadNorRefused(t *testing.T) {
-	corrupt := []byte(`{"version": "observer.pack/draft", "name": "unused",`)
-	path := bundle(t, []string{"reversed-masking"}, map[string][]byte{"reversed-masking.json": demonstration(t)})
+	corrupt := []byte(`{"version": "observer.pack/1", "name": "unused",`)
+	path := bundle(t, []string{"credentials"}, map[string][]byte{"credentials.json": credentials(t)})
 	one, err := loadProcessing(path)
 	if err != nil {
 		t.Fatalf("the bundle alone was refused: %v", err)
@@ -180,53 +172,43 @@ func TestADisabledPackIsNeitherReadNorRefused(t *testing.T) {
 	}
 
 	// The same file, enabled, is refused: it was ignored, not accepted.
-	enabled := bundle(t, []string{"reversed-masking", "unused"}, map[string][]byte{
-		"reversed-masking.json": demonstration(t), "unused.json": corrupt})
+	enabled := bundle(t, []string{"credentials", "unused"}, map[string][]byte{
+		"credentials.json": credentials(t), "unused.json": corrupt})
 	_, err = loadProcessing(enabled)
 	findings := refusedFor(t, err)
 	if !slices.ContainsFunc(findings, func(f config.Finding) bool {
-		return f.Document == "manifest:unused" && f.Reason == config.Malformed &&
-			strings.Contains(f.Detail, filepath.Join(filepath.Dir(enabled), "packs", "unused.json"))
+		return f.Document == "pack:unused" && f.Reason == config.Malformed
 	}) {
-		t.Errorf("the enabled corrupt pack was refused naming %+v, not as malformed at its path", findings)
+		t.Errorf("the enabled corrupt pack was refused naming %+v, not as the malformed pack:unused", findings)
 	}
 }
 
 // Two files whose declared names are exchanged are refused, although their
 // declarations together satisfy both names the configuration enables.
 func TestPacksWhoseDeclaredNamesAreSwappedAreRefused(t *testing.T) {
-	first, second := manifest(t, "first-step", truncateFirst), manifest(t, "second-step", replaceSecond)
+	first, second := pack(t, "first-step", "authorization"), pack(t, "second-step", "cookie")
 	enabled := []string{"first-step", "second-step"}
-
 	named := bundle(t, enabled, map[string][]byte{"first-step.json": first, "second-step.json": second})
 	dryRunPlans(t, named)
 
 	swapped := bundle(t, enabled, map[string][]byte{"first-step.json": second, "second-step.json": first})
-	// The compiler alone indexes by declared name, so it accepts the swapped
-	// files: the loader's name check is what refuses them.
-	content, err := os.ReadFile(swapped)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := policy.CompileProcessing(content, []config.Supplied{{Name: "first-step", Content: second},
-		{Name: "second-step", Content: first}}); err != nil {
-		t.Fatalf("wiring, not the loader: the compiler refuses the swapped declarations itself: %v", err)
-	}
-	_, err = loadProcessing(swapped)
+	_, err := loadProcessing(swapped)
 	findings := refusedFor(t, err)
 	for _, name := range enabled {
-		if !holds(findings, "pack:"+name, packNameMismatch, filepath.Join(filepath.Dir(swapped), "packs", name+".json")) {
-			t.Errorf("pack %s was not refused as misnamed at its path: %+v", name, findings)
+		if !slices.ContainsFunc(findings, func(f config.Finding) bool {
+			return f.Document == "pack:"+name && f.Subject == "name" && f.Reason == config.PackNameMismatch
+		}) {
+			t.Errorf("pack %s was not refused as misnamed at its name: %+v", name, findings)
 		}
 	}
 }
 
 // A name that could leave the packs directory, or is not a plain file name, is
-// refused by the name rule. A file declaring that name sits where the name
-// would lead and compiles when supplied directly, so nothing but the name rule
-// can be what refuses it.
+// refused by the name rule, before any file is looked for. A pack declaring
+// that name sits where the name would lead, so a loader that opened it would
+// find a pack there.
 func TestAPackNameThatCouldLeaveThePacksDirectoryIsRefusedByName(t *testing.T) {
-	neighbour := bundle(t, []string{"escape"}, map[string][]byte{"escape.json": manifest(t, "escape")})
+	neighbour := bundle(t, []string{"escape"}, map[string][]byte{"escape.json": pack(t, "escape")})
 	dryRunPlans(t, neighbour)
 
 	// Built rather than written: no literal in this module names a path
@@ -236,23 +218,15 @@ func TestAPackNameThatCouldLeaveThePacksDirectoryIsRefusedByName(t *testing.T) {
 		strings.Repeat("a", 129)} {
 		t.Run(name, func(t *testing.T) {
 			path := bundle(t, []string{name}, nil)
-			content, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			declared := manifest(t, name)
-			if _, err := policy.CompileProcessing(content, []config.Supplied{{Name: name, Content: declared}}); err != nil {
-				t.Fatalf("wiring, not the name rule: the file placed for %q would be refused anyway: %v", name, err)
-			}
 			led := filepath.Join(filepath.Dir(path), packsDirectory, name+".json")
 			if err := os.MkdirAll(filepath.Dir(led), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(led, declared, 0o600); err != nil {
+			if err := os.WriteFile(led, pack(t, name), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			_, err = loadProcessing(path)
-			if findings := refusedFor(t, err); !holds(findings, "pack:"+name, packNameInvalid, "") || len(findings) != 1 {
+			_, err := loadProcessing(path)
+			if findings := refusedFor(t, err); !holds(findings, "packs[0]", config.PackNameInvalid, "") || len(findings) != 1 {
 				t.Errorf("refused naming %+v, want only the name rule", findings)
 			}
 		})
@@ -264,8 +238,8 @@ func TestAPackNameThatCouldLeaveThePacksDirectoryIsRefusedByName(t *testing.T) {
 func TestAPackThatIsNotARegularFileIsRefusedWithoutWaiting(t *testing.T) {
 	for _, kind := range []string{"fifo", "directory"} {
 		t.Run(kind, func(t *testing.T) {
-			path := bundle(t, []string{"reversed-masking"}, map[string][]byte{"other.json": manifest(t, "other")})
-			at := filepath.Join(filepath.Dir(path), packsDirectory, "reversed-masking.json")
+			path := bundle(t, []string{"credentials"}, map[string][]byte{"other.json": pack(t, "other")})
+			at := filepath.Join(filepath.Dir(path), packsDirectory, "credentials.json")
 			var err error
 			if kind == "fifo" {
 				err = syscall.Mkfifo(at, 0o600)
@@ -282,7 +256,7 @@ func TestAPackThatIsNotARegularFileIsRefusedWithoutWaiting(t *testing.T) {
 			}()
 			select {
 			case err := <-answered:
-				if findings := refusedFor(t, err); !holds(findings, "pack:reversed-masking", packNotRegular, at) {
+				if findings := refusedFor(t, err); !holds(findings, "packs[0]", packNotRegular, at) {
 					t.Errorf("refused naming %+v, want not a regular file at %s", findings, at)
 				}
 			case <-time.After(10 * time.Second):
@@ -294,45 +268,45 @@ func TestAPackThatIsNotARegularFileIsRefusedWithoutWaiting(t *testing.T) {
 
 // A missing pack's refusal names the file looked for. A link is followed, as
 // the configuration's own path is: a dangling one is a missing pack, a loop is
-// an unreadable one, and one to a valid manifest is that manifest.
+// an unreadable one, and one to a valid pack is that pack.
 func TestAMissingPackNamesTheFileItLookedFor(t *testing.T) {
-	path := bundle(t, []string{"reversed-masking"}, nil)
+	path := bundle(t, []string{"credentials"}, nil)
 	_, err := loadProcessing(path)
-	at := filepath.Join(filepath.Dir(path), packsDirectory, "reversed-masking.json")
+	at := filepath.Join(filepath.Dir(path), packsDirectory, "credentials.json")
 	if !filepath.IsAbs(at) {
 		t.Fatalf("wiring, not the loader: %s is not absolute", at)
 	}
-	if findings := refusedFor(t, err); !holds(findings, "pack:reversed-masking", config.UnknownPack, at) {
+	if findings := refusedFor(t, err); !holds(findings, "packs[0]", config.UnknownPack, at) {
 		t.Errorf("refused naming %+v, want the missing pack and %s", findings, at)
 	}
 
-	elsewhere := filepath.Join(t.TempDir(), "reversed-masking.json")
+	elsewhere := filepath.Join(t.TempDir(), "credentials.json")
 	for _, link := range []struct {
 		name   string
 		target string
 		reason config.Reason
 	}{
 		{"dangling", filepath.Join(t.TempDir(), "absent.json"), config.UnknownPack},
-		{"loop", "reversed-masking.json", packUnreadable},
-		{"to a valid manifest", elsewhere, ""},
+		{"loop", "credentials.json", packUnreadable},
+		{"to a valid pack", elsewhere, ""},
 	} {
 		t.Run(link.name, func(t *testing.T) {
-			if err := os.WriteFile(elsewhere, demonstration(t), 0o600); err != nil {
+			if err := os.WriteFile(elsewhere, credentials(t), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			path := bundle(t, []string{"reversed-masking"}, map[string][]byte{"other.json": manifest(t, "other")})
-			at := filepath.Join(filepath.Dir(path), packsDirectory, "reversed-masking.json")
+			path := bundle(t, []string{"credentials"}, map[string][]byte{"other.json": pack(t, "other")})
+			at := filepath.Join(filepath.Dir(path), packsDirectory, "credentials.json")
 			if err := os.Symlink(link.target, at); err != nil {
 				t.Fatal(err)
 			}
 			_, err := loadProcessing(path)
 			if link.reason == "" {
 				if err != nil {
-					t.Fatalf("a link to a valid manifest was refused: %v", err)
+					t.Fatalf("a link to a valid pack was refused: %v", err)
 				}
 				return
 			}
-			if findings := refusedFor(t, err); !holds(findings, "pack:reversed-masking", link.reason, at) {
+			if findings := refusedFor(t, err); !holds(findings, "packs[0]", link.reason, at) {
 				t.Errorf("refused naming %+v, want %s at %s", findings, link.reason, at)
 			}
 		})
@@ -343,15 +317,15 @@ func TestAMissingPackNamesTheFileItLookedFor(t *testing.T) {
 // bundle at exactly the budget compiles, one byte over is refused naming the
 // pack, and a pack far over it is refused without being read.
 func TestABundleOverTheByteBudgetIsRefusedBeforeItsExcessIsRead(t *testing.T) {
-	path := bundle(t, []string{"reversed-masking"}, map[string][]byte{"reversed-masking.json": demonstration(t)})
+	path := bundle(t, []string{"credentials"}, map[string][]byte{"credentials.json": credentials(t)})
 	content, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	at := filepath.Join(filepath.Dir(path), packsDirectory, "reversed-masking.json")
+	at := filepath.Join(filepath.Dir(path), packsDirectory, "credentials.json")
 	budget := config.MaxProcessingBytes - len(content)
 	padded := func(size int) []byte {
-		pack := demonstration(t)
+		pack := credentials(t)
 		if size < len(pack) {
 			t.Fatalf("wiring, not the budget: the pack is %d bytes, over the %d asked for", len(pack), size)
 		}
@@ -368,7 +342,7 @@ func TestABundleOverTheByteBudgetIsRefusedBeforeItsExcessIsRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = loadProcessing(path)
-	if findings := refusedFor(t, err); !holds(findings, "pack:reversed-masking", config.ConfigurationTooLarge, at) {
+	if findings := refusedFor(t, err); !holds(findings, "packs[0]", config.ConfigurationTooLarge, at) {
 		t.Errorf("one byte over the budget was refused naming %+v", findings)
 	}
 
@@ -380,7 +354,7 @@ func TestABundleOverTheByteBudgetIsRefusedBeforeItsExcessIsRead(t *testing.T) {
 	runtime.ReadMemStats(&before)
 	_, err = loadProcessing(path)
 	runtime.ReadMemStats(&after)
-	if findings := refusedFor(t, err); !holds(findings, "pack:reversed-masking", config.ConfigurationTooLarge, at) {
+	if findings := refusedFor(t, err); !holds(findings, "packs[0]", config.ConfigurationTooLarge, at) {
 		t.Errorf("a pack of a gibibyte was refused naming %+v", findings)
 	}
 	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 8<<20 {
@@ -390,12 +364,12 @@ func TestABundleOverTheByteBudgetIsRefusedBeforeItsExcessIsRead(t *testing.T) {
 
 // What a reload compares is the enabled pack's bytes as they are on disk when
 // it runs: a changed pack, even by whitespace, is a processing change a
-// restart applies, while unchanged pack bytes beside an added target are an
-// observation change reload puts in force.
+// restart applies, while unchanged pack bytes beside an added watch entry are
+// an observation change reload puts in force.
 func TestReloadComparesTheEnabledPackAsItIsOnDisk(t *testing.T) {
-	pack := demonstration(t)
-	path := bundle(t, []string{"reversed-masking"}, map[string][]byte{"reversed-masking.json": pack})
-	at := filepath.Join(filepath.Dir(path), packsDirectory, "reversed-masking.json")
+	pack := credentials(t)
+	path := bundle(t, []string{"credentials"}, map[string][]byte{"credentials.json": pack})
+	at := filepath.Join(filepath.Dir(path), packsDirectory, "credentials.json")
 	current, err := loadProcessing(path)
 	if err != nil {
 		t.Fatalf("the bundle in force was refused: %v", err)
@@ -404,7 +378,7 @@ func TestReloadComparesTheEnabledPackAsItIsOnDisk(t *testing.T) {
 		name  string
 		bytes []byte
 	}{
-		{"a value", bytes.Replace(pack, []byte("withheld-by-pack"), []byte("withheld-by-edit"), 1)},
+		{"a value", bytes.Replace(pack, []byte(`"x-api-key"`), []byte(`"x-api-token"`), 1)},
 		{"whitespace only", append(slices.Clone(pack), '\n')},
 	} {
 		t.Run(change.name, func(t *testing.T) {
@@ -418,7 +392,7 @@ func TestReloadComparesTheEnabledPackAsItIsOnDisk(t *testing.T) {
 			if err != nil {
 				t.Fatalf("the changed pack was refused outright: %v", err)
 			}
-			if _, why := additive(current, candidate); !strings.Contains(why, "processing or retention") {
+			if _, why := additive(current, candidate); !strings.Contains(why, "changes processing -") {
 				t.Errorf("a changed pack was answered %q, want a processing change a restart applies", why)
 			}
 		})
@@ -435,10 +409,8 @@ func TestReloadComparesTheEnabledPackAsItIsOnDisk(t *testing.T) {
 	if err := json.Unmarshal(content, &document); err != nil {
 		t.Fatal(err)
 	}
-	scope := document["observation_scope"].(map[string]any)
-	scope["targets"] = append(scope["targets"].([]any), map[string]any{
-		"name": "worker", "match": map[string]any{"exe": "/usr/bin/worker"},
-		"descendants": scope["targets"].([]any)[0].(map[string]any)["descendants"]})
+	document["watch"] = append(document["watch"].([]any), map[string]any{
+		"name": "worker", "exe": "/usr/bin/worker", "children": config.ChildrenAll})
 	grown, err := json.Marshal(document)
 	if err != nil {
 		t.Fatal(err)
@@ -452,6 +424,6 @@ func TestReloadComparesTheEnabledPackAsItIsOnDisk(t *testing.T) {
 	}
 	added, why := additive(current, candidate)
 	if why != "" || len(added) != 1 || added[0].Name != "worker" {
-		t.Errorf("unchanged pack bytes with an added target answered %v %q, want the target added", added, why)
+		t.Errorf("unchanged pack bytes with an added watch entry answered %v %q, want the entry added", added, why)
 	}
 }

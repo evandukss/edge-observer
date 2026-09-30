@@ -104,7 +104,7 @@ func ReadFile(content []byte) (File, []Finding) {
 			}
 			switch {
 			case !PackName.MatchString(name):
-				r.add(path, InvalidValue, "%q does not match %s, so no file is looked for", name, PackName.String())
+				r.add(path, PackNameInvalid, "%q does not match %s, so no file is looked for", name, PackName.String())
 			case seen[name]:
 				r.add(path, DuplicateName, "the pack %q is enabled twice", name)
 			default:
@@ -134,9 +134,9 @@ func ReadPack(supplied Supplied) (Pack, []Finding) {
 		if value, ok := r.text(name, "name"); ok {
 			switch {
 			case !PackName.MatchString(value):
-				r.add("name", InvalidValue, "%q does not match %s", value, PackName.String())
+				r.add("name", PackNameInvalid, "%q does not match %s", value, PackName.String())
 			case value != supplied.Name:
-				r.add("name", InvalidValue, "the pack names itself %q and is enabled as %q", value, supplied.Name)
+				r.add("name", PackNameMismatch, "the pack names itself %q and is enabled as %q", value, supplied.Name)
 			}
 			pack.Name = value
 		}
