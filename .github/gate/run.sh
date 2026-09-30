@@ -39,7 +39,7 @@ attach)
 	# of these tests approve a process by the pid they see and match it against
 	# the pid the kernel reports, which is the host's, so the container shares the
 	# host's pid namespace.
-	target=go memory=1280m result=tests floor=242 list=list-attach
+	target=go memory=1280m result=tests floor=248 list=list-attach
 	privileged=(--privileged --pid=host)
 	;;
 bpf)
