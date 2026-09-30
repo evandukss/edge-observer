@@ -123,6 +123,7 @@ func independentFixture(t *testing.T, libs independentLibraries) *independentHos
 			return nil
 		},
 	}
+	f.host.Envelope = metEnvelope
 	f.write(t, "sys/kernel/arch", "x86_64\n")
 	f.write(t, "sys/kernel/osrelease", "5.15.0-independent\n")
 	f.capabilities(t, independentMask)
