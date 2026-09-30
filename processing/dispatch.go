@@ -391,7 +391,8 @@ func (r *slotRun) apply(c *reconstruct.Connection, slot config.EffectiveSlot) bo
 	switch slot.Implementation {
 	case config.RemoveHeaders, config.ReplaceHeaderValues, config.TruncateHeaderValues,
 		config.RemoveBody, config.ReduceBodyToStructure, config.RemoveQuery,
-		config.RemoveJSONFields, config.ReplaceJSONValues, config.RemoveFormFields, config.RemoveQueryParameters:
+		config.RemoveJSONFields, config.ReplaceJSONValues, config.RemoveFormFields, config.RemoveQueryParameters,
+		config.RequestBodyFields:
 	default:
 		return false
 	}
@@ -439,6 +440,10 @@ func (r *slotRun) apply(c *reconstruct.Connection, slot config.EffectiveSlot) bo
 						break
 					}
 					r.spliced(m, []byte(body), matched, config.FormFieldPrefix, where)
+				}
+			case config.RequestBodyFields:
+				if side == 0 && len(m.Body) > 0 {
+					r.requestBody(m, r.source.Exchanges[index].Request, a, where)
 				}
 			case config.RemoveQuery:
 				if side == 0 {
