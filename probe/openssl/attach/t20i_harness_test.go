@@ -32,7 +32,6 @@ import (
 	"time"
 
 	"github.com/evandukss/edge-observer/account"
-	cp "github.com/evandukss/edge-observer/contract/policy"
 	"github.com/evandukss/edge-observer/contract/record"
 	"github.com/evandukss/edge-observer/processing"
 )
@@ -270,44 +269,13 @@ func t20iMultipart(parts ...[2]string) string {
 
 // t20iSetup is what one session is configured with beyond its targets: the
 // rules the configuration writes, keyed as written (remove, mask, truncate).
-// pipelines and requirements are the earlier format's, which no
-// observer.config/1 file can write; a setup holding them is refused as wiring.
 type t20iSetup struct {
 	rules map[string]any
-
-	pipelines    []map[string]any
-	requirements []cp.Requirement
-}
-
-// t20iSlot is one slot of a pipeline in the earlier format.
-func t20iSlot(name, implementation string, configuration any) map[string]any {
-	return map[string]any{"name": name, "implementation": implementation, "configuration": configuration, "on_failure": cp.DropAndAccount}
-}
-
-// t20iPipeline is a reconstruction pipeline to these sinks, in the earlier
-// format.
-func t20iPipeline(name string, sinks []string, slots ...map[string]any) map[string]any {
-	if slots == nil {
-		slots = []map[string]any{}
-	}
-	return map[string]any{"name": name, "input": "reconstruction", "slots": slots, "sinks": sinks, "queues": []any{}}
-}
-
-// t20iRequirement is a mandatory removal of field at the sink account, in the
-// earlier format.
-func t20iRequirement(id, field string) cp.Requirement {
-	return cp.Requirement{ID: id, Target: cp.Target{Kind: "sink", Name: "account"}, Operation: "transform_field",
-		Parameters: map[string]any{"field": field, "transformation": "remove"}, FailureAction: cp.DropAndAccount}
 }
 
 // t20iConfigure writes c's configuration: these targets and these rules.
 func t20iConfigure(t *testing.T, c configured, targets []map[string]any, setup t20iSetup) {
 	t.Helper()
-	if len(setup.pipelines) > 0 || len(setup.requirements) > 0 {
-		t.Fatalf("wiring, not the property: this setup names pipelines %v and requirements %v, which an "+
-			"observer.config/1 file cannot write; raised to the orchestrator as not convertible", setup.pipelines,
-			setup.requirements)
-	}
 	c.rewrite(t, targets, nil)
 	content, err := os.ReadFile(c.path)
 	if err != nil {
@@ -430,6 +398,8 @@ type t20iOutput struct {
 	sources   map[string][]byte
 	artifacts []processing.Artifact
 	sealed    account.Account
+	// configuration is the file the session ran.
+	configuration []byte
 }
 
 // output collects what the ended session wrote and runs the public reader
@@ -458,6 +428,9 @@ func (s *t20iSession) output(t *testing.T) t20iOutput {
 	}
 	o.sources["standard output"] = []byte(strings.Join(s.stdout, "\n"))
 	o.sources["standard error"] = s.stderr.bytes()
+	if o.configuration, err = os.ReadFile(s.c.path); err != nil {
+		t.Fatalf("read the configuration the session ran: %v", err)
+	}
 
 	approved, present := o.sources[filepath.Join(s.directory(), processing.ArtifactName)]
 	if walked < 3 || !present {

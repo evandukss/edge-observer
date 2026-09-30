@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/evandukss/edge-observer/contract/config"
-	cp "github.com/evandukss/edge-observer/contract/policy"
 	"github.com/evandukss/edge-observer/contract/record"
 	"github.com/evandukss/edge-observer/processing"
 )
@@ -208,48 +207,70 @@ func TestT20iRemoveFormFieldsRemovesEveryParameterWithTheConfiguredName(t *testi
 	t20iAssert(t, t20iRun(t, setup, cases), []string{config.ExchangesPipeline}, cases)
 }
 
-// Body operations read Content-Type from the message as parsed. A slot
-// relabelling a multipart body as urlencoded does not get it admitted, and a
-// slot removing the label from a urlencoded body does not stop it being
-// admitted.
+// Body operations read Content-Type from the message as parsed: a rule that
+// removes the label from a urlencoded body does not stop it being admitted, and
+// a multipart body under the same rules still goes whole. Relabelling a message
+// before a body rule reads it is not a configuration a user can write, since
+// every mask runs after every remove.
 func TestT20iBodyOperationsReadContentTypeFromTheMessageAsParsed(t *testing.T) {
 	p, k := t20iProtected, t20iPermitted
 	multipart := t20iMultipart([2]string{"card_number", p("CT_MULTIPART")})
 	form := "card_number=" + p("CT_FORM") + "&note=" + k("CT_FORM")
 	keepHeader := t20iHeader{"X-T20i-Keep", k("CT_HEADER")}
-	// The unlabelled pipeline's remove-headers slot removes content-type from
-	// both messages, and that removal is evidence like any other.
-	unlabelled := func(pipeline string, entries ...t20iEntry) []t20iEntry {
-		if pipeline == "unlabelled" {
-			for _, message := range []string{"request", "response"} {
-				entries = append(entries, t20iEntry{message, config.HeaderFieldPrefix + "content-type", "headers", processing.DispositionRemoved})
-			}
+	// The content-type removal is evidence like any other, on both messages.
+	unlabelled := func(entries ...t20iEntry) []t20iEntry {
+		for _, message := range []string{"request", "response"} {
+			entries = append(entries, t20iEntry{message, config.HeaderFieldPrefix + "content-type", "headers", processing.DispositionRemoved})
 		}
 		return entries
 	}
 	cases := []t20iCase{
 		{name: "ct-multipart", pieces: []string{t20iRequest("POST", "/t20i/ct-multipart", []t20iHeader{{"Content-Type", "multipart/form-data; boundary=XB"}, keepHeader}, multipart)},
 			protected: []string{p("CT_MULTIPART")}, permitted: []string{k("CT_HEADER")},
-			check: func(t *testing.T, pipeline string, a processing.Artifact, x record.Exchange) {
+			check: func(t *testing.T, _ string, a processing.Artifact, x record.Exchange) {
 				t20iRemovedWhole(t, x.Request.Message, len(multipart), "content_length")
-				t20iEvidence(t, a, x, unlabelled(pipeline, t20iUndecidableEntry("request"))...)
+				t20iEvidence(t, a, x, unlabelled(t20iUndecidableEntry("request"))...)
 			}},
 		{name: "ct-form", pieces: []string{t20iRequest("POST", "/t20i/ct-form", append(slices.Clone(t20iForm), keepHeader), form)},
 			protected: []string{p("CT_FORM")}, permitted: []string{k("CT_FORM"), k("CT_HEADER")},
-			check: func(t *testing.T, pipeline string, a processing.Artifact, x record.Exchange) {
+			check: func(t *testing.T, _ string, a processing.Artifact, x record.Exchange) {
 				t20iKept(t, x.Request.Message, "note="+k("CT_FORM"))
-				t20iEvidence(t, a, x, unlabelled(pipeline, t20iEntry{"request", config.FormFieldPrefix + "card_number", "", processing.DispositionRemoved})...)
+				t20iEvidence(t, a, x, unlabelled(t20iEntry{"request", config.FormFieldPrefix + "card_number", "", processing.DispositionRemoved})...)
 			}},
 	}
-	relabel := t20iSlot("relabel", config.ReplaceHeaderValues, map[string]any{"headers": []string{"content-type"}, "value": "application/x-www-form-urlencoded"})
-	unlabel := t20iSlot("unlabel", config.RemoveHeaders, map[string]any{"headers": []string{"content-type"}})
-	form1 := t20iSlot("form", config.RemoveFormFields, map[string]any{"names": []string{"card_number"}})
-	setup := t20iSetup{
-		pipelines: []map[string]any{
-			t20iPipeline("relabelled", []string{"account"}, relabel, form1),
-			t20iPipeline("unlabelled", []string{"account"}, unlabel, form1),
-		},
-		requirements: []cp.Requirement{t20iRequirement("t20i-form-card", config.FormFieldPrefix+"card_number")},
+	setup := t20iSetup{rules: map[string]any{"remove": map[string]any{"headers": []string{"content-type"}, "form": []string{"card_number"}}}}
+	o := t20iRun(t, setup, cases)
+	t20iRemovalPrecedesTheFormRule(t, o.configuration, "content-type")
+	t20iAssert(t, o, []string{config.ExchangesPipeline}, cases)
+}
+
+// t20iRemovalPrecedesTheFormRule is the precondition of a test whose subject
+// is a header removed BEFORE a body rule reads the message: in the plan the
+// session's own configuration compiles to, the slot removing the header comes
+// before the form slot. Where it does not, the state the test names cannot
+// occur and nothing it asserts would measure it.
+func t20iRemovalPrecedesTheFormRule(t *testing.T, configuration []byte, header string) {
+	t.Helper()
+	compiled, findings := config.Compile(configuration, nil)
+	if compiled == nil || len(findings) != 0 {
+		t.Fatalf("wiring, not the property: the session's configuration does not compile here: %+v", findings)
 	}
-	t20iAssert(t, t20iRun(t, setup, cases), []string{"relabelled", "unlabelled"}, cases)
+	removal, form := -1, -1
+	for _, p := range compiled.Plan.Pipelines() {
+		if p.Name != config.ExchangesPipeline {
+			continue
+		}
+		for i, slot := range p.Slots {
+			switch {
+			case slot.Implementation == config.RemoveHeaders && slot.Arguments != nil && slices.Contains(slot.Arguments.Headers, header):
+				removal = i
+			case slot.Implementation == config.RemoveFormFields:
+				form = i
+			}
+		}
+	}
+	if removal < 0 || form < 0 || removal > form {
+		t.Fatalf("precondition, not the property: in the compiled plan the %s removal is slot %d and the form rule "+
+			"slot %d, so no message has that header removed before the form rule reads it", header, removal, form)
+	}
 }
