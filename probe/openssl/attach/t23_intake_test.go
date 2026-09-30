@@ -4,6 +4,8 @@ package attach_test
 
 import (
 	"bufio"
+	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"os"
@@ -14,8 +16,12 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/evandukss/edge-observer/account"
+	"github.com/evandukss/edge-observer/ebpf"
+	"github.com/evandukss/edge-observer/fragment"
+	"github.com/evandukss/edge-observer/intake"
 	"github.com/evandukss/edge-observer/process"
 )
 
@@ -46,8 +52,9 @@ func t23Allowance(t *testing.T, c configured, events int) {
 
 // t23Receiving is openssl s_server on a free port, not observed until a
 // configuration names it. It reads each connection with SSL_read into a buffer
-// larger than a TLS record, so each read of a large upload carries a full event
-// payload. Its output is drained so it never stops reading.
+// larger than a TLS record, and a read returns a record whole, so each read is
+// as long as the record it returns. Its output is drained so it never stops
+// reading.
 func t23Receiving(t *testing.T) (process.Process, int) {
 	t.Helper()
 	certificate, key := certificate(t)
@@ -77,6 +84,25 @@ func t23Receiving(t *testing.T) (process.Process, int) {
 	}
 	go func() { _, _ = io.Copy(io.Discard, lines) }()
 	return loaded(t, int32(command.Process.Pid)), port
+}
+
+// t23Record is the plaintext each record of t23Uploading carries: the largest a
+// TLS record holds.
+const t23Record = 16 * 1024
+
+// t23Uploading is a TLS client on port whose every record carries exactly
+// t23Record bytes: with dynamic record sizing off, one write of t23Record
+// bytes is one record. The server's certificate is the fixture's own, made for
+// this run, so it is not verified.
+func t23Uploading(t *testing.T, port int) *tls.Conn {
+	t.Helper()
+	connection, err := tls.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port),
+		&tls.Config{InsecureSkipVerify: true, DynamicRecordSizingDisabled: true})
+	if err != nil {
+		t.Fatalf("connect to s_server: %v", err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	return connection
 }
 
 // t23Ended waits for a session to end by itself and returns the gate reason
@@ -109,28 +135,46 @@ func t23Ended(t *testing.T, observer running) (string, bool) {
 	return reason, found
 }
 
-// The volatile intake fills before the event allowance does, since each record
-// is charged its payload and its metadata and every read here carries a full
-// payload. The session ends by itself, and the
-// account, its stopped record and inspect all give intake_exhausted as the
-// reason release was refused, with the records the intake refused printed on
-// the seal line. The control, the same session with one exchange, states no
-// reason and prints no loss.
+// The volatile intake fills before the event allowance does. It holds
+// allowance * payload bytes, payload being ebpf.MaxEventPayloadBytes
+// (activation.RecordingIntake), and charges each event its payload plus a fixed
+// overhead (intake.Store.Write). Every record the client sends is t23Record
+// bytes, no less than a payload, and every server read returns one, so every
+// event carries a full payload and is charged payload + overhead. The intake
+// therefore refuses a record by event allowance*payload/(payload+overhead) + 1,
+// which must come before the allowance's last event; the test checks that
+// before it runs. The session ends by itself, and the account, its stopped
+// record and inspect all give intake_exhausted as the reason release was
+// refused, with the records the intake refused printed on the seal line. The
+// control, the same session with one exchange, states no reason and prints no
+// loss.
 func TestAFullVolatileIntakeIsStatedAsIntakeExhaustedBesideTheRecordsItRefused(t *testing.T) {
 	binary := built(t)
 	const allowance = 64
 
 	t.Run("filled", func(t *testing.T) {
+		payload := int64(ebpf.MaxEventPayloadBytes)
+		overhead := int64(unsafe.Sizeof(intake.Entry{}) + unsafe.Sizeof(fragment.Record{}))
+		fillsBy := allowance*payload/(payload+overhead) + 1
+		if t23Record < payload || fillsBy >= allowance {
+			t.Fatalf("wiring, not the property: records of %d bytes against a payload of %d and an overhead of %d "+
+				"fill the intake by event %d of an allowance of %d, so the allowance can run out no later than "+
+				"the intake",
+				t23Record, payload, overhead, fillsBy, allowance)
+		}
+		t.Logf("the intake fills by event %d of an allowance of %d: payload %d, overhead %d per event",
+			fillsBy, allowance, payload, overhead)
+
 		server, port := t23Receiving(t)
 		c := configuring(t, target("server", server))
 		t23Allowance(t, c, allowance)
 		observer := started(t, binary, c)
-		client := speaking(t, port)
-		// An upload with no end, so nothing is ever released to free the intake,
-		// and every read the server makes carries a full payload.
-		chunk := strings.Repeat("x", 64*1024)
-		for range 32 {
-			if _, err := io.WriteString(client.send, chunk); err != nil {
+		client := t23Uploading(t, port)
+		// An upload with no end, so nothing is ever released to free the intake:
+		// twice the allowance in records, far past the event that fills it.
+		record := bytes.Repeat([]byte("x"), t23Record)
+		for range 2 * allowance {
+			if _, err := client.Write(record); err != nil {
 				break
 			}
 		}
