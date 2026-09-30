@@ -26,6 +26,9 @@ const (
 	CoreDumps                  Check = "core_dumps"
 	PayloadMembership          Check = "payload_membership"
 	ParticipantOutsideEnvelope Check = "participant_outside_envelope"
+	// NoParticipantRunning refuses a start at which every selected process had
+	// exited by the time its posture was read.
+	NoParticipantRunning Check = "no_participant_running"
 	// PostureUnreadable labels unavailable evidence in Refusal.Error; the
 	// refusal's Check retains the particular condition that could not be read.
 	PostureUnreadable Check = "posture_unreadable"
@@ -86,6 +89,10 @@ type Posture struct {
 	CoreHard     uint64             `json:"core_hard,omitempty"`
 	CorePattern  string             `json:"core_pattern,omitempty"`
 	Participants []ParticipantState `json:"participants"`
+	// ParticipantsExited counts supplied participants that had exited when read:
+	// the entry was gone, or the pid carried a different start. They are left
+	// out of Participants.
+	ParticipantsExited int `json:"participants_exited"`
 }
 
 // Capture is shared with the serial processing worker. Both capture
