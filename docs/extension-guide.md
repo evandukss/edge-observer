@@ -25,7 +25,7 @@ them. One library is supported: OpenSSL 3.x, linked dynamically.
 
 `Inspect` must not attach or read what the process holds, and fills `Support.Reason` whichever way it
 answers. `Attach` reports each call into the library as a `probe.Transfer` and each connection ending
-as a `probe.Connection` through the `probe.Sink` it is given. Capture, ordering and the spool take
+as a `probe.Connection` through the `probe.Sink` it is given. Capture, ordering and the volatile intake take
 transfers from any adapter and need no change. The optional interfaces in the same file
 (`probe.Attested`, `probe.Covering`, `probe.Counting` and the rest) are how an attachment says what the
 kernel confirmed, what it lost and what it refused. An attachment that does not implement
@@ -69,7 +69,7 @@ file, and `contract/record/project.go`, which turns a reconstruction into the pu
 HTTP fields from it. The record types the configuration can route (`Reconstruction` in
 `policy/inventory.go`) name HTTP fields too.
 
-The observer program reconstructs when a finished capture is read back, never while it captures: a
+The legacy spool reader reconstructs when a finished capture is read back: a
 capture yields fragments and connection records and holds no reconstruction state, and `inspect`,
 given a session's directory, runs `reconstruct.Run` over the fragments beside the account
 (`internal/published/published.go`, `Reconstruct`) and prints what `reconstruct` renders. A second
@@ -77,22 +77,19 @@ protocol is reached from that read.
 
 ## An output
 
-A capture writes through two interfaces: `capture.Sink` (`Write(fragment.Record) error`, in
-`capture/capture.go`) for fragments and `connection.Sink` (`Connection(connection.Record) error`, in
-`connection/record.go`) for connection records. The one implementation is the local spool in
-`spool/spool.go`, which also bounds what it keeps and counts what it drops.
+A capture hands records to two storage interfaces: `capture.Sink` (`Write(fragment.Record) error`,
+in `capture/capture.go`) and `connection.Sink` (`Connection(connection.Record) error`, in
+`connection/record.go`). Production supplies the same `intake.Store` to both. These are volatile
+storage boundaries, not extension points for durable output: neither may parse payload, grant
+admission, decide completeness, or write raw records to disk.
 
-A second output compiles against those two interfaces without touching them. It is not reachable
-without two further changes:
+A processing consumer calls `Take` and later `Release`. It keeps no intake lock while parsing or
+writing, and the record remains charged until release. It must establish completeness separately and
+obtain release authorization before durable output. Queue order alone is not lifecycle evidence.
 
-    policy/inventory.go      the sink kinds the program accepts in a configuration. A configuration
-                             naming any other kind is refused, and the refusal says an output is added
-                             to the program rather than configured into it
-    cmd/observer/main.go     the session start hands the spool to capture as its only destination,
-                             and reads the spool's own counts for the account
-
-There is no step that routes a configured sink to an implementation, so the second of those is where
-one would be built.
+`policy/inventory.go` declares which output kinds configuration accepts. Routing an approved result
+to a durable output belongs downstream of processing and authorization. The legacy `spool` package
+still defines the raw artifact format read by older-session inspection; it is not a production intake.
 
 ## Checking a change
 

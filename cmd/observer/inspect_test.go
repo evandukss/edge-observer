@@ -13,7 +13,7 @@ import (
 func TestInspectOfAConfigurationStillAsksTheRunningSession(t *testing.T) {
 	directory := t.TempDir()
 	path := contractConfiguration(t, func(document map[string]any) {
-		document["observer"].(map[string]any)["directory"] = directory
+		document["output"] = directory
 		target(document, "gateway", "/usr/bin/php")
 	})
 	var out bytes.Buffer

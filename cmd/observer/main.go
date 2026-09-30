@@ -3,18 +3,20 @@
 //
 // It runs in the foreground, logs to the configured file (and to standard
 // output in the foreground), and seals one account per session beside that
-// session's spool. It listens on nothing: a command to a running session is a
-// request file in its directory plus a signal to the pid its pid file names.
+// session's approved output. It listens on nothing: a command to a running
+// session is a request file in its directory plus a signal to its pid.
 // It drops every capability once the probes are placed. Nothing leaves the
 // host.
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"net"
 	"os"
 	"os/signal"
@@ -25,9 +27,11 @@ import (
 	"time"
 
 	"github.com/evandukss/edge-observer/account"
+	protected "github.com/evandukss/edge-observer/activation"
 	"github.com/evandukss/edge-observer/attachment"
 	"github.com/evandukss/edge-observer/capture"
 	"github.com/evandukss/edge-observer/connection"
+	"github.com/evandukss/edge-observer/intake"
 	"github.com/evandukss/edge-observer/internal/published"
 	"github.com/evandukss/edge-observer/policy"
 	"github.com/evandukss/edge-observer/preflight"
@@ -35,7 +39,9 @@ import (
 	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/probe/openssl/attach"
 	"github.com/evandukss/edge-observer/process"
+	"github.com/evandukss/edge-observer/processing"
 	"github.com/evandukss/edge-observer/spool"
+	"golang.org/x/sys/unix"
 )
 
 const name = "observer"
@@ -68,7 +74,7 @@ func usage() string {
       activation record says which session it follows and how long nothing was
       observed in between
   ` + name + ` stop <configuration>
-      end the running session, sealing its account beside its spool
+      end the running session, sealing its account beside approved output
   ` + name + ` reload <configuration>
       put in force what the configuration the session was started with now ADDS:
       a target needing no probe beyond what is attached. Anything it takes away,
@@ -78,14 +84,16 @@ func usage() string {
   ` + name + ` inspect <configuration | session directory> [--text]
       the running session's account, as it stands; or, given a session's
       directory, the account that session sealed when it ended, read from that
-      directory alone on any machine. There --text adds each exchange
-      reconstructed from the spool beside the account: start lines, header
-      names and body shapes, and no header value or body byte
+      directory alone on any machine. There --text adds approved records,
+      permitted values and their capture-time provenance from approved.jsonl;
+      missing or empty approved output is an error
 
-The configuration is one JSON file, the operator configuration of
-contract/config/CONFIG.md: where the log and the spools go, what to
-attach to, what never to attach to, and which library builds a probe may be
-placed on. A section this program does not implement is refused by name. The
+The configuration is one JSON file, observer.config/1 of
+contract/config/CONFIG.md: where approved output and the log go, what to
+watch, what to ignore, which library builds a probe may be placed on, and what
+to remove, mask and truncate. A key it does not define is refused by name. Each
+pack it enables is read from packs/<name>.json beside it; stop, and inspect of
+a running session, read only where the session is and never a pack. The
 account is JSON unless --text asks for the one a
 person reads; --local adds each target's conditions, arguments included, for a
 view that stays on this host.`
@@ -104,6 +112,12 @@ func run(arguments []string, stdout io.Writer) error {
 			len(arguments), usage())
 	}
 	command, configuration, options := arguments[0], arguments[1], arguments[2:]
+	// Made absolute once, here: packs are read beside the configuration, and a
+	// detached session and a reload read it again from elsewhere.
+	configuration, err := filepath.Abs(configuration)
+	if err != nil {
+		return fmt.Errorf("resolve the configuration's path: %w", err)
+	}
 
 	allowed := map[string][]string{
 		"preflight": {"--text"},
@@ -148,9 +162,10 @@ func run(arguments []string, stdout io.Writer) error {
 
 // ready says whether a capture of this configuration can run on this host,
 // before anything attaches. It judges exactly the processes start would attach
-// to, exclusions and refusals applied.
+// to, exclusions and refusals applied, and the envelope it runs in with start's
+// own check: run the same way start will be, it answers for start.
 func ready(path string, text bool, stdout io.Writer) error {
-	read, err := policy.Load(path)
+	read, err := loadProcessing(path)
 	if err != nil {
 		return err
 	}
@@ -168,18 +183,29 @@ func ready(path string, text bool, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// A failure leaves the process dumpable, and the envelope's core_dumps
+	// judgment says so, as it would refuse start.
+	_ = undumpable()
 	host := preflight.Running()
 	host.Loads = attach.Loads
+	host.Envelope = envelopeJudged
 	readiness := preflight.Assess(host, selected, catalog)
+	judged := slices.Concat(readiness.Requirements, readiness.Envelope)
 
+	subject := func(r preflight.Requirement) string {
+		named := r.Name
+		if r.Check != "" {
+			named += " " + r.Check
+		}
+		if r.PID != 0 {
+			named += fmt.Sprintf(", pid %d", r.PID)
+		}
+		return named
+	}
 	if text {
 		_, _ = fmt.Fprintf(stdout, "verdict        %s\n", readiness.Verdict)
-		for _, r := range readiness.Requirements {
-			subject := r.Name
-			if r.PID != 0 {
-				subject += fmt.Sprintf(", pid %d", r.PID)
-			}
-			_, _ = fmt.Fprintf(stdout, "%-14s %s: %s\n", strings.ToUpper(string(r.Status)), subject, r.Found)
+		for _, r := range judged {
+			_, _ = fmt.Fprintf(stdout, "%-14s %s: %s\n", strings.ToUpper(string(r.Status)), subject(r), r.Found)
 		}
 	} else {
 		encoder := json.NewEncoder(stdout)
@@ -192,9 +218,14 @@ func ready(path string, text bool, stdout io.Writer) error {
 		return nil
 	}
 	var named []string
-	for _, r := range readiness.Requirements {
-		if r.Status != preflight.Met {
+	for _, r := range judged {
+		if r.Status == preflight.Met {
+			continue
+		}
+		if r.Check == "" {
 			named = append(named, r.Name+" "+string(r.Status))
+		} else {
+			named = append(named, subject(r)+" "+string(r.Status))
 		}
 	}
 	return fmt.Errorf("%s: %s", readiness.Verdict, strings.Join(named, ", "))
@@ -203,7 +234,7 @@ func ready(path string, text bool, stdout io.Writer) error {
 // dryRun prints what the policy would select, attaching nothing. Its coverage
 // is planned: nothing is placed yet.
 func dryRun(path string, text, local bool, stdout io.Writer) error {
-	read, err := policy.Load(path)
+	read, err := loadProcessing(path)
 	if err != nil {
 		return err
 	}
@@ -221,17 +252,17 @@ func dryRun(path string, text, local bool, stdout io.Writer) error {
 
 // inspect prints a session's account: a running session's as it stands, asked
 // through its configuration, or a finished session's as sealed, read from its
-// directory alone - with, as text, the exchanges reconstructed from its spool.
+// directory alone - with, as text, its persisted approved records.
 // The second works on a copy on any machine.
 func inspect(path string, text bool, stdout io.Writer) error {
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
 		return inspectFinished(os.DirFS(path), text, stdout)
 	}
-	read, err := policy.Load(path)
+	directory, err := sessionDirectory(path)
 	if err != nil {
 		return err
 	}
-	answer, err := ask(read.Settings.Directory, "inspect", nil, askWithin)
+	answer, err := ask(directory, "inspect", nil, askWithin)
 	if err != nil {
 		return err
 	}
@@ -255,12 +286,12 @@ func inspect(path string, text bool, stdout io.Writer) error {
 
 // inspectFinished prints the account a session sealed, reading only through
 // its directory. JSON is the sealed file as written; text is rendered as for a
-// running session, then the reconstructed exchanges. A session that never
-// sealed is refused: its spool is a capture nothing accounts for.
+// running session, then the approved records. A session that never sealed
+// is refused: its output is a capture nothing accounts for.
 func inspectFinished(session fs.FS, text bool, stdout io.Writer) error {
 	content, err := fs.ReadFile(session, sealedName)
 	if errors.Is(err, fs.ErrNotExist) {
-		for _, name := range []string{spool.Name, spool.ConnectionsName} {
+		for _, name := range []string{processing.ArtifactName, spool.Name, spool.ConnectionsName} {
 			if _, statErr := fs.Stat(session, name); statErr == nil {
 				return errNeverSealed
 			}
@@ -282,38 +313,16 @@ func inspectFinished(session fs.FS, text bool, stdout io.Writer) error {
 		return fmt.Errorf("%s holds a %s account, and a finished session's is %s", sealedName, sealed.Kind, account.Sealed)
 	}
 	if text {
-		account.Render(stdout, sealed, false)
-		return renderExchanges(session, stdout)
+		var rendered bytes.Buffer
+		account.Render(&rendered, sealed, false)
+		if _, err := rendered.WriteTo(stdout); err != nil {
+			return err
+		}
+		return processing.ReadArtifacts(session, func(a processing.Artifact) error {
+			return processing.RenderArtifact(stdout, a)
+		})
 	}
 	_, err = stdout.Write(content)
-	return err
-}
-
-// renderExchanges prints the reconstruction of a finished session's spool.
-// Reconstruction happens only when a capture is read back, never while it
-// runs. It prints start lines, header names, framing, body extents and shapes,
-// and no header value or body byte. An account without its spool says so; an
-// unreadable spool is an error after the account.
-func renderExchanges(session fs.FS, stdout io.Writer) error {
-	done, err := published.Reconstruct(session)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		_, err = fmt.Fprintf(stdout, "exchanges  NOT RECONSTRUCTED: no %s is beside the account, so nothing "+
-			"here says what crossed\n", spool.Name)
-		return err
-	case err != nil:
-		return fmt.Errorf("the account is printed, and the spool beside it could not be reconstructed: %w", err)
-	}
-	exchanges := 0
-	for _, one := range done.Connections {
-		exchanges += len(one.Exchanges)
-	}
-	if _, err := fmt.Fprintf(stdout, "exchanges  %d connections and %d exchanges reconstructed from %s: start "+
-		"lines, header names and body shapes, no header value and no body byte\n",
-		len(done.Connections), exchanges, spool.Name); err != nil {
-		return err
-	}
-	_, err = io.WriteString(stdout, done.String())
 	return err
 }
 
@@ -328,12 +337,16 @@ func emit(to io.Writer, a account.Account, text, local bool) error {
 }
 
 // sealedSession is the most recent session to seal, so the next can report how
-// long nothing was observed in between.
+// long nothing was observed in between. Lost is the account's losses as one
+// clause (account.Account.Lost) and Reason the gate's reason for refusing
+// release, for stop to print beside how it sealed.
 type sealedSession struct {
-	Session  string    `json:"session"`
-	Sealed   time.Time `json:"sealed"`
-	Account  string    `json:"account"`
-	Complete bool      `json:"complete"`
+	Session  string           `json:"session"`
+	Sealed   time.Time        `json:"sealed"`
+	Account  string           `json:"account"`
+	Complete bool             `json:"complete"`
+	Lost     string           `json:"lost,omitempty"`
+	Reason   probe.GateReason `json:"reason,omitempty"`
 }
 
 func lastSealed(directory string) (sealedSession, error) {
@@ -350,11 +363,10 @@ func lastSealed(directory string) (sealedSession, error) {
 
 // stop ends the running session and waits for it to seal.
 func stop(path string, stdout io.Writer) error {
-	read, err := policy.Load(path)
+	directory, err := sessionDirectory(path)
 	if err != nil {
 		return err
 	}
-	directory := read.Settings.Directory
 	pid, session, err := holder(directory)
 	if err != nil {
 		return err
@@ -374,6 +386,14 @@ func stop(path string, stdout io.Writer) error {
 		if !last.Complete {
 			how = "INCOMPLETE, and the account says why"
 		}
+		// What capture lost goes right after how it sealed: a seal says its steps
+		// succeeded, not that nothing was lost.
+		if last.Lost != "" {
+			how += " (LOST " + last.Lost + ")"
+		}
+		if last.Reason != "" {
+			how += ", release refused: " + string(last.Reason)
+		}
 		_, _ = fmt.Fprintf(stdout, "stopped    session %s, sealed %s, account %s\n", session, how, last.Account)
 		return nil
 	}
@@ -389,7 +409,7 @@ func start(path string, stdout io.Writer) (err error) {
 			report(reporting, "failed %v", err)
 		}
 	}()
-	read, err := policy.Load(path)
+	read, err := loadProcessing(path)
 	if err != nil {
 		return err
 	}
@@ -426,7 +446,8 @@ func start(path string, stdout io.Writer) (err error) {
 
 	activatedAt := time.Now()
 	current := running.snapshot(account.Live, activatedAt)
-	record := activated(session, os.Getpid(), activatedAt, current)
+	record := activated(session, os.Getpid(), activatedAt, current, running.payloadPosture)
+	record.MemoryAssurance = "Current payload-holder membership and limits verified. Memory containment is conditional on entering the isolated bounded no-swap cgroup before exec and keeping membership and limits fixed through capture. These readings do not establish that no allocation predates entry."
 	record.Follows = running.follows(activatedAt)
 	if err := log.write(record); err != nil {
 		// An activation nobody can read is not an activation: readiness is learned
@@ -456,19 +477,44 @@ func start(path string, stdout io.Writer) (err error) {
 
 	ticker := time.NewTicker(read.Settings.StateEvery)
 	defer ticker.Stop()
-	previous := current
+	running.serveUntilStop(stopping, asking, ticker.C, control, log, current)
+	return running.finish(log)
+}
+
+// serveUntilStop is the production controller loop. Storage can withdraw an
+// idle capture without another event, worker decision, or diagnostic snapshot.
+func (d *daemon) serveUntilStop(stopping, asking <-chan os.Signal, ticks <-chan time.Time, control *controller, log *logger, previous account.Account) {
+	failed := d.startProcessing()
 	for {
 		select {
+		case <-failed:
+			d.consumeStorageExhaustion()
+			return
 		case <-stopping:
-			return running.finish(log)
+			d.consumeStorageExhaustion()
+			return
+		case <-d.intake.Exhausted():
+			// The intake refused a record, so capture's input is incomplete. The gate
+			// takes intake_exhausted as its reason now, which requests withdrawal and
+			// makes every pending release ineligible, as at the input limit
+			// (probe.DeliveryGateOptions.IntakeExhausted). It is not the
+			// approved-output writer's refusal.
+			d.gate.ConsumeStorageExhaustion()
+			return
+		case <-d.storageExhausted:
+			d.consumeStorageExhaustion()
+			return
+		case <-d.gate.Withdrawal():
+			d.consumeStorageExhaustion()
+			return
 		case <-asking:
 			control.serve()
-		case at := <-ticker.C:
-			now := running.snapshot(account.Live, at)
-			if err := log.write(stated(session, at, now, previous)); err != nil {
+		case at := <-ticks:
+			now := d.snapshot(account.Live, at)
+			if err := log.write(stated(d.session, at, now, previous)); err != nil {
 				// An unwritable log does not stop observation; failures are counted and the
 				// final record reports them.
-				running.logFailures++
+				d.logFailures++
 			}
 			previous = now
 		}
@@ -484,12 +530,19 @@ type daemon struct {
 	// again.
 	path string
 
-	// directory is this session's own: its spool and its sealed account.
+	// directory is this session's own: its approved output and sealed account.
 	directory string
 
-	written  *spool.Spool
-	capture  *capture.Session
-	attached probe.Attachment
+	output                        *processing.Writer
+	processing                    *processingRun
+	capture                       *capture.Session
+	attached                      probe.Attachment
+	intake                        *intake.Store
+	gate                          *probe.DeliveryGate
+	payloadPosture                protected.Posture
+	storageExhausted              <-chan struct{}
+	storageExhaustionConsumptions uint64
+	verifyParticipants            func(*probe.DeliveryGate, []process.Process) (protected.Posture, error)
 
 	// plan is the account at activation - resolved policy and what the kernel
 	// confirmed attached - which every later account starts from.
@@ -498,9 +551,16 @@ type daemon struct {
 	logFailures int
 }
 
-// begin resolves the policy, opens the spool, attaches, drops every capability
-// and reads its own posture back. A failure anywhere leaves nothing behind.
+// begin establishes dumpability in the payload holder and verifies the entire
+// protected setup before attach. Plaintext does not exist here before attach;
+// moving any plaintext earlier would invalidate this ordering argument.
 func begin(read policy.Policy, session string) (*daemon, error) {
+	if read.Processing == nil || read.ProcessingRevision == "" {
+		return nil, &protected.Refusal{Check: protected.ProcessingPlan, PID: os.Getpid(), Detail: "a compiler-produced processing plan and revision are required"}
+	}
+	if err := undumpable(); err != nil {
+		return nil, err
+	}
 	resolution, table, err := resolve(read.Approval)
 	if err != nil {
 		return nil, err
@@ -514,18 +574,42 @@ func begin(read policy.Policy, session string) (*daemon, error) {
 	if err := selectedAnything(resolution); err != nil {
 		return nil, err
 	}
-
+	participants := make([]process.Process, 0, len(resolution.Selections))
+	for _, selection := range resolution.Selections {
+		participant, found := table.Lookup(selection.ObserverPID)
+		if !found {
+			return nil, &protected.Refusal{Check: protected.ParticipantOutsideEnvelope, PID: os.Getpid(), Detail: fmt.Sprintf("selected participant pid %d has no identity reading", selection.ObserverPID)}
+		}
+		participants = append(participants, participant)
+	}
+	// The writer owns the signal fixed into the gate at construction. Opening
+	// it creates an empty approved-output file, not a durable capture sink.
+	if read.Settings.ApprovedOutputBoundMiB <= 0 || read.Settings.ApprovedOutputBoundMiB > math.MaxInt64/(1<<20) {
+		return nil, fmt.Errorf("limits.output_mib cannot be represented as a positive int64 byte allowance")
+	}
 	directory := filepath.Join(read.Settings.Directory, sessionsName, session)
-	written, err := spool.Open(directory, read.Settings.BoundMiB<<20)
+	output, err := processing.Open(directory, read.Settings.ApprovedOutputBoundMiB<<20)
 	if err != nil {
 		return nil, err
 	}
+	removeOutput := func() {
+		_ = output.Close()
+		_ = os.Remove(filepath.Join(directory, processing.ArtifactName))
+		_ = os.Remove(directory)
+	}
+	prepared, err := protected.Prepare(read, participants, uint64(read.Settings.AdmittedEventLimit), output.Exhausted())
+	if err != nil {
+		removeOutput()
+		return nil, err
+	}
+
 	leaveNothing := func() {
-		_ = written.Close()
+		_ = prepared.Intake.Close()
+		_ = output.Close()
 		_ = os.RemoveAll(directory)
 	}
-	recording := capture.Recording(written, written)
-	attached, observed, err := observe(catalog, resolution, table, recording)
+	recording := prepared.Recording
+	attached, observed, err := observe(catalog, resolution, table, recording, prepared.Gate)
 	if err != nil {
 		leaveNothing()
 		return nil, err
@@ -547,14 +631,18 @@ func begin(read policy.Policy, session string) (*daemon, error) {
 	plan.Attached(account.Live, session, observed, attached.Capability())
 	return &daemon{
 		policy: read, session: session, directory: directory,
-		written: written, capture: recording, attached: attached, plan: plan,
+		capture: recording, attached: attached, plan: plan,
+		output: output, storageExhausted: output.Exhausted(),
+		intake: prepared.Intake, gate: prepared.Gate, payloadPosture: prepared.Posture,
+		verifyParticipants: protected.VerifyActive,
 	}, nil
 }
 
 // abandon undoes a session that attached and could not be activated.
 func (d *daemon) abandon() {
 	_ = d.attached.Close()
-	_ = d.written.Close()
+	_ = d.output.Close()
+	_ = d.intake.Close()
 	_ = os.RemoveAll(d.directory)
 }
 
@@ -584,6 +672,27 @@ func resolve(approval process.Approval) (process.Resolution, process.Table, erro
 		}
 	}
 	return approval.Resolve(host), table, nil
+}
+
+// undumpable makes this process non-dumpable, as the payload holder must be
+// before anything attaches. start does it before its envelope is checked, and
+// preflight before it judges the envelope, so both judge the same process.
+func undumpable() error {
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+		return &protected.Refusal{Check: protected.CoreDumps, PID: os.Getpid(), Detail: fmt.Sprintf("set payload-holder dumpability before attach: %v", err)}
+	}
+	return nil
+}
+
+// envelopeJudged is start's envelope check (activation.Envelope) on this
+// process and the selected ones, in the words preflight reports.
+func envelopeJudged(selected []process.Process) []preflight.EnvelopeJudgment {
+	var judged []preflight.EnvelopeJudgment
+	for _, one := range protected.Envelope(selected) {
+		judged = append(judged, preflight.EnvelopeJudgment{Check: string(one.Check), Met: one.Met,
+			Unreadable: one.Unreadable, PID: one.PID, Detail: one.Detail})
+	}
+	return judged
 }
 
 // selectedAnything refuses a policy none of whose targets selected a process.
@@ -635,8 +744,7 @@ func (d *daemon) snapshot(kind account.Kind, at time.Time) account.Account {
 	} else {
 		run.GrantsErr = errors.New("this attachment does not record what it admitted")
 	}
-	stats := d.written.Stats()
-	run.Spool = &stats
+	run.Processing = d.processingSnapshot()
 	a.Ran(at, run)
 	return a
 }
@@ -656,29 +764,40 @@ func (d *daemon) follows(activatedAt time.Time) *follows {
 }
 
 // finish is the finalisation in its one order - stop production, drain what
-// was in flight, read the counters, seal - then writes the account once beside
-// the spool.
+// was in flight, read the counters, finalize capture and processing - then
+// writes the account once beside approved output. drainWithin bounds only the
+// producer drain; it is not a deadline for processing or the whole session.
 func (d *daemon) finish(log *logger) error {
 	sealer := &connection.Sealer{Producer: producing(d.attached), Within: drainWithin}
 	seal, sealErr := sealer.Stop()
-	// The run's inventory has three sources, none able to answer for another: the
-	// program (produced), capture (placed) and the spool (kept).
-	seal.Counters = seal.Counters.Join(d.capture.Counted())
-	seal.Counters = seal.Counters.Join(d.written.Counted())
 	// The backend's production count makes a trailing loss visible.
 	d.capture.Finish(seal.Sealed, seal.Counters.ReservationAttempts)
+	seal.Counters = seal.Counters.Join(d.capture.Counted())
+	// Raw fragments are not persisted in this pipeline. Approved route records
+	// have different units and cannot satisfy the legacy spool identity.
+	noSpool := connection.Uncounted("raw fragments are not persisted; approved route records are counted separately")
+	seal.Counters.Persisted, seal.Counters.PersistedDropped, seal.Counters.PersistedRefused = noSpool, noSpool, noSpool
+	processingErr := d.finishProcessing(processing.Finalization{Withdrawn: seal.Withdrawal.Complete, Drained: seal.Drain.Complete})
+	d.consumeStorageExhaustion()
+	_ = d.intake.Close()
+	seal.Sealed = time.Now()
 
 	// Read while the program's maps are open; closing the attachment closes them.
 	final := d.snapshot(account.Sealed, time.Now())
+	if processingErr != nil {
+		seal.Complete = false
+		seal.Because = append(seal.Because, "processing did not finish successfully: "+processingErr.Error())
+	}
 	final.Closed(seal, sealErr)
 	if err := d.attached.Close(); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, name+": "+err.Error())
 	}
-	_ = d.written.Close()
 
 	record := stopped{
 		Record: "stopped", Version: recordVersion, Session: d.session, At: time.Now(),
 		Sealed: sealErr == nil, Complete: sealErr == nil && seal.Complete, LogFailures: d.logFailures,
+		StorageExhaustionConsumptions: d.storageExhaustionConsumptions,
+		Processing:                    final.Processing,
 	}
 	path := filepath.Join(d.directory, sealedName)
 	content, err := json.MarshalIndent(final, "", "  ")
@@ -713,7 +832,12 @@ func (d *daemon) finish(log *logger) error {
 	if final.Seal != nil {
 		sealedAt = final.Seal.Sealed
 	}
-	last, _ := json.Marshal(sealedSession{Session: d.session, Sealed: sealedAt, Account: path, Complete: record.Complete})
+	reason := probe.GateReason("")
+	if final.Processing != nil {
+		reason = final.Processing.GateReason
+	}
+	last, _ := json.Marshal(sealedSession{Session: d.session, Sealed: sealedAt, Account: path, Complete: record.Complete,
+		Lost: final.Lost(), Reason: reason})
 	if err := place(filepath.Join(d.policy.Settings.Directory, lastName), last); err != nil {
 		record.Error = err.Error()
 	}
@@ -779,11 +903,15 @@ func (u unstoppable) Account() (connection.Counters, error) {
 // at once: a probe is placed on a file and fires for every process running it,
 // so per-process placement would report each call once per placement.
 func observe(catalog probe.Catalog, resolution process.Resolution, table process.Table,
-	sink probe.Sink) (probe.Attachment, []attachment.Observed, error) {
+	sink probe.Sink, gate *probe.DeliveryGate) (probe.Attachment, []attachment.Observed, error) {
+	state := gate.Snapshot()
+	if state.MaxEvents == 0 || state.Charged != 0 || state.Reason != "" {
+		return nil, nil, &protected.Refusal{Check: protected.DeliveryGate, PID: os.Getpid(), Detail: "attach requires the verified fresh delivery gate"}
+	}
 	adapter, canAttach := catalog.Adapters()[0].(probe.Adapter)
 
 	attempts := make([]attachment.Attempt, 0, len(resolution.Selections))
-	request := probe.Request{Deny: resolution.Denials}
+	request := probe.Request{Deny: resolution.Denials, DeliveryGate: gate}
 	for _, one := range resolution.Selections {
 		p, found := table.Lookup(one.ObserverPID)
 		if !found {

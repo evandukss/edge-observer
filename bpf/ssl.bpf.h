@@ -383,7 +383,10 @@ struct admission {
 	__u64 parent_ns_dev;
 	__u64 parent_ns_ino;
 	__u32 parent_pid;
-	__u32 target;    // which target admitted it, counting from one; 0 by descent
+	// target is the target that admitted it or, by descent, its ancestor: the
+	// session's identity for that target, which a reload never gives to another
+	// (package ebpf, targetIdentity). A denial carries its exclusion's number.
+	__u32 target;
 	__u32 rule;      // which condition inside that target matched, counting from one
 
 	// threads is how many of the instance's threads still run, and leader_gone
@@ -542,8 +545,21 @@ struct event {
 	__u16 dport;        // host order
 	__u8  padding_end[4];
 
-	// The socket's own start, monotonic, appended after everything else.
+	// The socket's own start, monotonic, appended after the endpoints.
 	__u64 opened;
+
+	// The admission the event was taken under (struct origin), appended after
+	// everything else. A process the fork hook admitted is written by nothing in
+	// userspace, and its grant is gone once it exits, which can be before its
+	// events are read; so what a record of it needs travels with its events.
+	__u64 parent_generation;
+	__u64 parent_ns_dev;
+	__u64 parent_ns_ino;
+	__u32 parent_pid;
+	__u32 target;
+	__u32 rule;
+	__u8  admitted_by;  // OBS_BY_TARGET or OBS_BY_DESCENT
+	__u8  padding_origin[3];
 	__u8  data[OBS_CHUNK];
 };
 
@@ -1393,9 +1409,36 @@ static __always_inline void obs_associate(const struct instance_key *who, const 
 	*state = OBS_FD_ESTABLISHED;
 }
 
+// origin is what an event says about the admission it was taken under: the
+// target and condition, how the instance was admitted, and for one admitted by
+// descent the instance it was admitted below. Copied out of the grant where the
+// grant is checked, beside the generation the event carries.
+struct origin {
+	__u64 parent_generation;
+	__u64 parent_ns_dev;
+	__u64 parent_ns_ino;
+	__u32 parent_pid;
+	__u32 target;
+	__u32 rule;
+	__u8  kind;
+};
+
+static __always_inline void obs_origin(const struct admission *grant, struct origin *into)
+{
+	into->parent_generation = grant->parent_generation;
+	into->parent_ns_dev = grant->parent_ns_dev;
+	into->parent_ns_ino = grant->parent_ns_ino;
+	into->parent_pid = grant->parent_pid;
+	into->target = grant->target;
+	into->rule = grant->rule;
+	into->kind = grant->kind;
+}
+
 // obs_emit submits an event. length is meaningful only when measured is set.
-// who and generation come from the grant that was checked, not the pid alone.
+// who, generation and origin come from the grant that was checked, not the pid
+// alone.
 static __always_inline void obs_emit(const struct instance_key *who, __u64 generation,
+				     const struct origin *origin,
 				     __u64 ssl, __u32 length, __u8 dir,
 				     __u8 early, __u8 measured, __u8 kind,
 				     __u64 buf, __s32 fd, __u64 binding, __u64 socket,
@@ -1427,6 +1470,14 @@ static __always_inline void obs_emit(const struct instance_key *who, __u64 gener
 	e->opened = ends->opened;
 	e->ssl = ssl;
 	e->generation = generation;
+	e->parent_generation = origin->parent_generation;
+	e->parent_ns_dev = origin->parent_ns_dev;
+	e->parent_ns_ino = origin->parent_ns_ino;
+	e->parent_pid = origin->parent_pid;
+	e->target = origin->target;
+	e->rule = origin->rule;
+	e->admitted_by = origin->kind;
+	__builtin_memset(e->padding_origin, 0, sizeof(e->padding_origin));
 	e->ns_dev = who->ns_dev;
 	e->ns_ino = who->ns_ino;
 	e->pid = id >> 32;
@@ -1600,6 +1651,8 @@ static __always_inline int obs_return(void *ctx, __u32 func)
 		obs_count(OBS_STAT_REFUSED);
 		return 0;
 	}
+	struct origin origin = {};
+	obs_origin(grant, &origin);
 
 	// What the window established about the socket, read once so every way this
 	// function emits carries the same answer.
@@ -1616,7 +1669,7 @@ static __always_inline int obs_return(void *ctx, __u32 func)
 			return 0;
 		if ((__u64)moved > call.cap)
 			return 0;
-		obs_emit(&key, call.generation, call.ssl, (__u32)moved, call.dir, call.early, 1,
+		obs_emit(&key, call.generation, &origin, call.ssl, (__u32)moved, call.dir, call.early, 1,
 			 OBS_TRANSFER, call.buf, fd, binding, socket, fd_state, call.outcome, &ends);
 		return 0;
 	}
@@ -1628,7 +1681,7 @@ static __always_inline int obs_return(void *ctx, __u32 func)
 	// with 1; anything else is an error or an end with no bytes.
 	__s64 ok = (__s64)(__s32)OBS_RC(ctx);
 	if (ok != 1 && ok != 2) {
-		obs_emit(&key, call.generation, call.ssl, 0, call.dir, call.early, 0, OBS_TRANSFER, 0,
+		obs_emit(&key, call.generation, &origin, call.ssl, 0, call.dir, call.early, 0, OBS_TRANSFER, 0,
 			 fd, binding, socket, fd_state, call.outcome, &ends);
 		return 0;
 	}
@@ -1640,13 +1693,13 @@ static __always_inline int obs_return(void *ctx, __u32 func)
 		obs_read_taken(call.generation);
 		if (bpf_probe_read_user(&moved, sizeof(moved), (void *)call.pcount) == 0 &&
 		    moved > 0 && moved <= call.cap) {
-			obs_emit(&key, call.generation, call.ssl, (__u32)moved, call.dir, call.early, 1,
+			obs_emit(&key, call.generation, &origin, call.ssl, (__u32)moved, call.dir, call.early, 1,
 				 OBS_TRANSFER, call.buf, fd, binding, socket, fd_state, call.outcome, &ends);
 			return 0;
 		}
 	}
 #endif
-	obs_emit(&key, call.generation, call.ssl, 0, call.dir, call.early, 0, OBS_TRANSFER, 0,
+	obs_emit(&key, call.generation, &origin, call.ssl, 0, call.dir, call.early, 0, OBS_TRANSFER, 0,
 		 fd, binding, socket, fd_state, call.outcome, &ends);
 	return 0;
 }
@@ -2169,7 +2222,9 @@ SEC("uprobe") int obs_free_entry(void *ctx)
 	// A connection ending crossed no socket: no association (OBS_FD_NONE) and no
 	// endpoints (an empty carrier says they were not read).
 	struct ends none = {};
-	obs_emit(&key, grant->generation, OBS_PARM1(ctx), 0, 0, 0, 0, OBS_CLOSED, 0,
+	struct origin origin = {};
+	obs_origin(grant, &origin);
+	obs_emit(&key, grant->generation, &origin, OBS_PARM1(ctx), 0, 0, 0, 0, OBS_CLOSED, 0,
 		 0, 0, 0, OBS_FD_NONE, OBS_OUTCOME_NONE, &none);
 	return 0;
 }

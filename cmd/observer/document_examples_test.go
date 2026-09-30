@@ -15,8 +15,6 @@ import (
 	"testing"
 
 	contractaccount "github.com/evandukss/edge-observer/contract/account"
-	"github.com/evandukss/edge-observer/contract/config"
-	contractpolicy "github.com/evandukss/edge-observer/contract/policy"
 )
 
 func checkDocumentBundle(examples fs.FS) map[string]error {
@@ -24,67 +22,6 @@ func checkDocumentBundle(examples fs.FS) map[string]error {
 	if result.Outcome != contractaccount.Validated || result.Examined.Members != 5 ||
 		result.Examined.Records == 0 || result.Examined.Blocks == 0 {
 		return map[string]error{"": fmt.Errorf("dummy bundle validation: %+v", result)}
-	}
-	return nil
-}
-
-// Components live inside manifests; policies live inside configurations or
-// manifests. Insert the standalone examples as raw JSON so the real check sees
-// every member, including any misspelled or unknown member.
-func checkDocumentDeclarations(contracts fs.FS) map[string]error {
-	whole := func(err error) map[string]error { return map[string]error{"": err} }
-	read := func(name string, into any) error {
-		content, err := fs.ReadFile(contracts, name)
-		if err != nil {
-			return err
-		}
-		return json.Unmarshal(content, into)
-	}
-	var component, policyDocument json.RawMessage
-	var configuration, manifest map[string]json.RawMessage
-	var available config.Available
-	for _, one := range []struct {
-		name string
-		into any
-	}{
-		{"examples/component.json", &component},
-		{"examples/policy.json", &policyDocument},
-		{"config/examples/external-component.config.json", &configuration},
-		{"config/examples/packs/acme-classifier.json", &manifest},
-		{"config/examples/runtime.json", &available},
-	} {
-		if err := read(one.name, one.into); err != nil {
-			return whole(fmt.Errorf("%s: %w", one.name, err))
-		}
-	}
-	manifest["components"] = append(append([]byte{'['}, component...), ']')
-	configuration["policy"] = append(append([]byte{'['}, policyDocument...), ']')
-	configJSON, err := json.Marshal(configuration)
-	if err != nil {
-		return whole(err)
-	}
-	packJSON, err := json.Marshal(manifest)
-	if err != nil {
-		return whole(err)
-	}
-	checked := config.Check(config.Input{Configuration: configJSON, Available: available,
-		Manifests: []config.Supplied{{Name: "acme-classifier", Content: packJSON}}})
-	if checked.Outcome != config.Accepted || checked.Resolved == nil {
-		return whole(fmt.Errorf("standalone declarations: %+v", checked))
-	}
-	decided := contractpolicy.Decide(checked.Resolved.Policy, checked.Resolved.Inventory)
-	if len(decided.Findings) != 2 || len(decided.Activations) == 0 {
-		return whole(fmt.Errorf("expected the requirement and approved claim to be decided: %+v", decided))
-	}
-	for _, finding := range decided.Findings {
-		if finding.Disposition != contractpolicy.Accept && finding.Disposition != contractpolicy.AllowTrusted {
-			return whole(fmt.Errorf("policy declaration refused: %+v", finding))
-		}
-	}
-	for _, activation := range decided.Activations {
-		if !activation.Activates {
-			return whole(fmt.Errorf("policy prevented activation: %+v", activation))
-		}
 	}
 	return nil
 }

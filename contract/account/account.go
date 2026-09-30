@@ -17,7 +17,7 @@ import (
 // The versions this draft names. No machine-readable schema is published;
 // example JSON files show the shapes, and the Go validators enforce the contracts.
 const (
-	Version       = "observer.account/1-draft"
+	Version       = "observer.account/2-draft"
 	BundleVersion = "observer.bundle/1-draft"
 )
 
@@ -55,17 +55,6 @@ const (
 	NotCarried BlockState = "not_carried"
 )
 
-// RequiredBlocks is the dotted path of every required block: required wherever
-// its parent is Carried, and refused if absent.
-var RequiredBlocks = []string{
-	"provenance", "provenance.observer", "provenance.configuration", "provenance.pipelines",
-	"scope", "scope.requested", "scope.instances", "scope.overlap", "scope.placement", "scope.coverage",
-	"scope.filters",
-	"capture", "capture.capability", "capture.seen", "capture.loss", "capture.admitted", "capture.ordering",
-	"capture.refused", "capture.spool",
-	"reconstruction", "processing", "requirements", "seal", "seal.recorded",
-}
-
 // Block is the state every block carries.
 type Block struct {
 	State BlockState `json:"state"`
@@ -83,7 +72,6 @@ type Account struct {
 	Capture        Capture        `json:"capture"`
 	Reconstruction Reconstruction `json:"reconstruction"`
 	Processing     Processing     `json:"processing"`
-	Requirements   Requirements   `json:"requirements"`
 	Seal           Seal           `json:"seal"`
 
 	// Extensions is namespaced pack material, under its own member so nothing in
@@ -103,7 +91,6 @@ type Provenance struct {
 	Observer      Observer      `json:"observer"`
 	Contracts     []string      `json:"contracts"`
 	Configuration Configuration `json:"configuration"`
-	Pipelines     Pipelines     `json:"pipelines"`
 }
 
 // Observer is what the build that wrote the account can do, and the kernel
@@ -160,29 +147,6 @@ type ConfigurationReference struct {
 	Generation string `json:"generation,omitempty" account:"count"`
 }
 
-// Pipelines is the effective pipelines and every component's version.
-type Pipelines struct {
-	Block
-	Pipelines []Pipeline `json:"pipelines"`
-}
-
-// Pipeline is one effective pipeline as the configuration check resolved it.
-type Pipeline struct {
-	Name       string         `json:"name"`
-	Input      string         `json:"input"`
-	DeclaredBy string         `json:"declared_by"`
-	Slots      []PipelineSlot `json:"slots"`
-	Sinks      []string       `json:"sinks"`
-}
-
-// PipelineSlot is one slot, what fills it, at which version, and who selected it.
-type PipelineSlot struct {
-	Slot           string `json:"slot"`
-	Implementation string `json:"implementation"`
-	Version        string `json:"version"`
-	SelectedBy     string `json:"selected_by"`
-}
-
 // Scope is what was asked for, what it resolved to, and what the session's
 // coverage turned out to be.
 type Scope struct {
@@ -200,15 +164,18 @@ type Scope struct {
 	Limits    []string  `json:"limits"`
 }
 
-// The three controls, as separate references.
+// The requested controls: the configuration's keys that say what is observed
+// and what is written, each as a separate reference.
 const (
-	ObservationScope   = "observation_scope"
-	TrafficScope       = "traffic_scope"
-	RetentionAndExport = "retention_and_export"
+	Watch        = "watch"
+	Ignore       = "ignore"
+	WriteContent = "write_content"
 )
 
-// Requested is the three controls as the configuration stated them, by
-// reference.
+// Controls is every control, in the order an account lists them.
+var Controls = []string{Watch, Ignore, WriteContent}
+
+// Requested is the controls as the configuration stated them, by reference.
 type Requested struct {
 	Block
 	Controls []Control `json:"controls"`
@@ -473,12 +440,33 @@ type Seen struct {
 	ConnectionsUnrecorded string `json:"connections_unrecorded,omitempty" account:"count"`
 }
 
-// Loss is what the kernel side discarded. Losses only.
+// Loss is what the kernel side discarded, and the calls under way when the
+// probes were placed, which it never saw. Losses only.
 type Loss struct {
 	Block
 	Dropped   string   `json:"dropped,omitempty" account:"count"`
 	Unmatched string   `json:"unmatched,omitempty" account:"count"`
 	Occasion  Occasion `json:"occasion"`
+	UnderWay  UnderWay `json:"under_way"`
+}
+
+// UnderWay is what the approved processes' threads said at attach about calls
+// that began before the probes were placed (the operational account's
+// declaration, probe.UnderWay). Unavailable where a thread could not be read.
+type UnderWay struct {
+	Block
+	Threads      string  `json:"threads,omitempty" account:"count"`
+	Undetermined string  `json:"undetermined,omitempty" account:"count"`
+	First        Blocked `json:"first"`
+}
+
+// Blocked names the first thread counted under way, each member undetermined
+// where none was.
+type Blocked struct {
+	PID  record.Text `json:"pid"`
+	TID  record.Text `json:"tid"`
+	FD   record.Text `json:"fd"`
+	Call record.Text `json:"call"`
 }
 
 // Occasion is when unmatched returns were seen (the host's monotonic clock),
@@ -543,7 +531,27 @@ type Reconstruction struct {
 // Processing is what the configured pipelines did with what capture delivered.
 type Processing struct {
 	Block
-	Pipelines []Processed `json:"pipelines"`
+	Pipelines []Processed          `json:"pipelines"`
+	Aggregate *ProcessingAggregate `json:"aggregate,omitempty" account:"optional"`
+}
+
+// ProcessingAggregate is session-wide evidence without per-pipeline counts.
+// Counts are decimal strings. ProcessingFailures counts affected durable routes
+// per batch processing refusal: every route for a batch refusal, or the
+// affected pipeline's routes once for a pipeline refusal; this is not a
+// unique-route, batch or exchange count. A useful prefix can be written on a
+// route whose suffix incurs a processing failure. Authorized and Written count
+// permitted and completed route records separately; OutputFailures counts
+// failed approved writes. Internal serialization defects use the terminal
+// error/seal reason, not these counters. A gate reason is not an output
+// failure, policy suppression or a capture-loss count. No whole-session
+// terminal-state claim is made here.
+type ProcessingAggregate struct {
+	GateReason         string `json:"gate_reason"`
+	ProcessingFailures string `json:"processing_failures" account:"count"`
+	OutputFailures     string `json:"output_failures" account:"count"`
+	Authorized         string `json:"authorized" account:"count"`
+	Written            string `json:"written" account:"count"`
 }
 
 // Processed is one pipeline's dispositions.
@@ -568,46 +576,6 @@ type Output struct {
 	Sink        string `json:"sink"`
 	Disposition string `json:"disposition"`
 	Count       string `json:"count,omitempty" account:"count"`
-}
-
-// Requirements is every declaration's disposition: what the core enforces,
-// apart from what an extension declares.
-type Requirements struct {
-	Block
-	CoreEnforced      []Enforced `json:"core_enforced"`
-	ExtensionDeclared []Declared `json:"extension_declared"`
-	Refused           []Declared `json:"refused"`
-}
-
-// Enforced is a requirement the core accepted and enforces, with its scope:
-// enforcement point, what it covers and does not, and the sink where relevant.
-type Enforced struct {
-	Declaration      string        `json:"declaration"`
-	Operation        string        `json:"operation"`
-	EnforcementPoint string        `json:"enforcement_point"`
-	Covers           string        `json:"covers"`
-	DoesNotCover     string        `json:"does_not_cover"`
-	Sink             *EnforcedSink `json:"sink,omitempty" account:"optional"`
-	Pipelines        []string      `json:"pipelines"`
-}
-
-// EnforcedSink is the sink an acceptance targets, as the runtime inventory
-// knows it, including whether it leaves the host or keeps plaintext.
-type EnforcedSink struct {
-	Kind             string `json:"kind"`
-	LeavesHost       bool   `json:"leaves_host"`
-	RetainsPlaintext bool   `json:"retains_plaintext"`
-}
-
-// Declared is a declaration the core does not enforce: an allowed trusted claim
-// with its limitation, or a refused declaration.
-type Declared struct {
-	Declaration string   `json:"declaration"`
-	DeclaredBy  string   `json:"declared_by"`
-	Disposition string   `json:"disposition"`
-	Reason      string   `json:"reason"`
-	Limitation  string   `json:"limitation,omitempty" account:"optional"`
-	Pipelines   []string `json:"pipelines"`
 }
 
 // Seal is how the session ended and the members it sealed, with record counts.

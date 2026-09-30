@@ -347,8 +347,6 @@ var permitted = map[string]map[Moment][]BlockState{
 		Sealed: {Carried, Unavailable, NotCarried}},
 	"processing": {Planned: {Carried, Unavailable, NotCarried}, Live: {Carried, Unavailable, NotCarried},
 		Sealed: {Carried, Unavailable, NotCarried}},
-	"requirements": {Planned: {Carried, Unavailable, NotCarried}, Live: {Carried, Unavailable, NotCarried},
-		Sealed: {Carried, Unavailable, NotCarried}},
 	"seal": {Planned: {NotReached}, Live: {NotReached}, Sealed: {Carried, Unavailable}},
 }
 
@@ -369,6 +367,14 @@ func readAccount(member string, content []byte) (Account, []Finding, int) {
 	var version string
 	if raw, present := members["account"]; !present || json.Unmarshal(raw, &version) != nil {
 		s.find("account", RequiredMemberAbsent, "an account names its contract version")
+		return Account{}, s.findings, 0
+	}
+	if version != Version && strings.HasPrefix(version, "observer.account/") {
+		// An earlier draft carries blocks this one does not - provenance.pipelines,
+		// requirements and processing.aggregate.stopped_pipelines - so it is refused
+		// by the draft it names rather than read as this one.
+		s.find("account", UnknownAccountVersion, "%s is another draft of this contract, and this validator reads "+
+			"only %s", version, Version)
 		return Account{}, s.findings, 0
 	}
 	if version != Version {
@@ -438,16 +444,16 @@ func (s *shape) vocabulary(a Account) {
 			seen := map[string]int{}
 			for index, control := range a.Scope.Requested.Controls {
 				at := fmt.Sprintf("scope.requested.controls[%d]", index)
-				oneOf(at+".control", control.Control, ObservationScope, TrafficScope, RetentionAndExport)
+				oneOf(at+".control", control.Control, Controls...)
 				seen[control.Control]++
 				if control.State == Carried && (control.Document == "" || control.Revision == "" || control.Member == "") {
 					s.find(at, RequiredMemberAbsent, "a carried control names its document, revision and member")
 				}
 			}
-			for _, control := range []string{ObservationScope, TrafficScope, RetentionAndExport} {
+			for _, control := range Controls {
 				if seen[control] != 1 {
 					s.find("scope.requested.controls", ValueNotInContract,
-						"each of the three controls appears once, and %s appears %d times", control, seen[control])
+						"each of the %d controls appears once, and %s appears %d times", len(Controls), control, seen[control])
 				}
 			}
 		}
@@ -464,15 +470,6 @@ func (s *shape) vocabulary(a Account) {
 			for n, output := range pipeline.Outputs {
 				oneOf(fmt.Sprintf("%s.outputs[%d].disposition", at, n), output.Disposition, "dispatched", "refused", "dropped")
 			}
-		}
-	}
-	if a.Requirements.State == Carried {
-		for index, one := range a.Requirements.ExtensionDeclared {
-			oneOf(fmt.Sprintf("requirements.extension_declared[%d].disposition", index), one.Disposition, "allow_trusted")
-		}
-		for index, one := range a.Requirements.Refused {
-			oneOf(fmt.Sprintf("requirements.refused[%d].disposition", index), one.Disposition,
-				"refuse_activation", "refuse_assurance")
 		}
 	}
 	if a.Scope.State == Carried && a.Scope.Instances.State == Carried {

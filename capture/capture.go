@@ -86,7 +86,7 @@ type Stats struct {
 	// It separates those from gaps the backend confirmed.
 	Unexplained int64 `json:"unexplained"`
 
-	// ConnectionsUnrecorded is connection records produced and not persisted,
+	// ConnectionsUnrecorded is connection records the sink refused,
 	// never folded into Rejected.
 	ConnectionsUnrecorded int64 `json:"connections_unrecorded"`
 }
@@ -262,7 +262,7 @@ func Consumes(read func() (probe.Consumed, error)) Option {
 	return func(s *Session) { s.consumed = read }
 }
 
-// Recording starts a session that also persists each connection's record to
+// Recording starts a session that also hands each connection's record to
 // records, once the record stops changing: at the connection's end, or at
 // Finish for one still open.
 func Recording(sink Sink, records connection.Sink, options ...Option) *Session {
@@ -342,6 +342,17 @@ func (s *Session) Transfer(t probe.Transfer) {
 		s.stats.Records++
 	}
 	s.mutex.Unlock()
+}
+
+// Refused takes the place in the production order of an event the delivery
+// gate refused. It is placed in no stream and ends none: a refusal is not a
+// loss. Without its place, every refused event would read at Finish as an
+// observation missing from the order, counted Lost, and every live stream would
+// be retired as a loss retires them. A gap before it is still a gap.
+func (s *Session) Refused(stamp uint64, at time.Time) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	s.observe(stamp, at)
 }
 
 // observe reads one observation's place in the backend's production order and
@@ -441,8 +452,8 @@ func (s *Session) interruptLocked(missing uint64, at time.Time) {
 	s.closed = append(s.closed, retired...)
 	s.interrupted = true
 
-	// Written under the lock: the caller already holds it and the sink is a local
-	// append.
+	// Called under the lock: the caller already holds it. The sink must do
+	// bounded storage work, never parsing or durable output.
 	for _, record := range retired {
 		if s.records == nil {
 			continue
@@ -565,7 +576,7 @@ func (s *Session) Finish(at time.Time, produced connection.Count) {
 	}
 }
 
-// write persists one record, counting a refusal on its own counter.
+// write hands on one record, counting a refusal on its own counter.
 func (s *Session) write(record connection.Record) {
 	if s.records == nil {
 		return

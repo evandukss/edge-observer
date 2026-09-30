@@ -347,7 +347,7 @@ func (s *set) Losses() (probe.Losses, error) {
 	members := s.members
 	s.mutex.Unlock()
 
-	var total probe.Losses
+	total := probe.Losses{UnderWay: probe.UnderWay{Known: true}}
 	for _, at := range members {
 		counted, canCount := at.live.(probe.Counting)
 		if !canCount {
@@ -360,10 +360,27 @@ func (s *set) Losses() (probe.Losses, error) {
 		}
 		total.Dropped += lost.Dropped
 		total.Unmatched += lost.Unmatched
+		total.UnderWay = underWay(total.UnderWay, lost.UnderWay)
 		total.Descendants += lost.Descendants
 		total.When = spanning(total.When, lost.When)
 	}
 	return total, nil
+}
+
+// underWay folds one member's reading into the set's: counts summed, the first
+// thread named is the first member's that named one, and one member that could
+// not read a thread makes the whole not known, its reason kept.
+func underWay(held, next probe.UnderWay) probe.UnderWay {
+	held.Threads += next.Threads
+	held.Undetermined += next.Undetermined
+	if held.First == nil {
+		held.First = next.First
+	}
+	if !next.Known {
+		held.Known = false
+		held.Why = strings.TrimPrefix(held.Why+"; "+next.Why, "; ")
+	}
+	return held
 }
 
 // spanning folds one member's occasion into the set's interval. A silent

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/evandukss/edge-observer/account"
+	protected "github.com/evandukss/edge-observer/activation"
 	"github.com/evandukss/edge-observer/attachment"
 	"github.com/evandukss/edge-observer/policy"
 	"github.com/evandukss/edge-observer/probe"
@@ -393,19 +394,21 @@ type follows struct {
 // placed, grants written, capabilities dropped and posture read back. It
 // states the observer's state rather than a bare word to match.
 type activation struct {
-	Record   string           `json:"record"`
-	Version  int              `json:"version"`
-	Session  string           `json:"session"`
-	PID      int              `json:"pid"`
-	At       time.Time        `json:"at"`
-	Policy   account.Policy   `json:"policy"`
-	Features features         `json:"features"`
-	Capture  string           `json:"capturing"`
-	Coverage []targetCoverage `json:"coverage"`
-	Follows  *follows         `json:"follows,omitempty"`
+	Record          string             `json:"record"`
+	Version         int                `json:"version"`
+	Session         string             `json:"session"`
+	PID             int                `json:"pid"`
+	At              time.Time          `json:"at"`
+	Policy          account.Policy     `json:"policy"`
+	Features        features           `json:"features"`
+	Capture         string             `json:"capturing"`
+	Coverage        []targetCoverage   `json:"coverage"`
+	Follows         *follows           `json:"follows,omitempty"`
+	PayloadPosture  *protected.Posture `json:"payload_posture,omitempty"`
+	MemoryAssurance string             `json:"memory_assurance,omitempty"`
 }
 
-func activated(session string, pid int, at time.Time, a account.Account) activation {
+func activated(session string, pid int, at time.Time, a account.Account, posture protected.Posture) activation {
 	available := probe.Capability{}
 	if a.Capability != nil {
 		available = *a.Capability
@@ -413,29 +416,30 @@ func activated(session string, pid int, at time.Time, a account.Account) activat
 	return activation{
 		Record: "activation-completed", Version: recordVersion, Session: session, PID: pid, At: at,
 		Policy: a.Policy, Features: features{Requested: a.Build, Available: available},
-		Capture: a.Capturing, Coverage: coverageOf(a),
+		Capture: a.Capturing, Coverage: coverageOf(a), PayloadPosture: &posture,
 	}
 }
 
 // state restates the session's state on a cadence, so an old activation record
 // cannot stand for current health.
 type state struct {
-	Record   string            `json:"record"`
-	Version  int               `json:"version"`
-	Session  string            `json:"session"`
-	At       time.Time         `json:"at"`
-	Policy   account.Policy    `json:"policy"`
-	Coverage []targetCoverage  `json:"coverage"`
-	Loss     *account.Loss     `json:"loss,omitempty"`
-	Admitted *account.Admitted `json:"admitted,omitempty"`
-	Spool    *spool.Stats      `json:"spool,omitempty"`
-	Changes  []string          `json:"changes"`
+	Record     string              `json:"record"`
+	Version    int                 `json:"version"`
+	Session    string              `json:"session"`
+	At         time.Time           `json:"at"`
+	Policy     account.Policy      `json:"policy"`
+	Coverage   []targetCoverage    `json:"coverage"`
+	Loss       *account.Loss       `json:"loss,omitempty"`
+	Admitted   *account.Admitted   `json:"admitted,omitempty"`
+	Spool      *spool.Stats        `json:"spool,omitempty"`
+	Processing *account.Processing `json:"processing,omitempty"`
+	Changes    []string            `json:"changes"`
 }
 
 func stated(session string, at time.Time, now, before account.Account) state {
 	record := state{
 		Record: "state", Version: recordVersion, Session: session, At: at, Policy: now.Policy,
-		Coverage: coverageOf(now), Loss: now.Loss, Admitted: now.Admitted, Spool: now.Spool,
+		Coverage: coverageOf(now), Loss: now.Loss, Admitted: now.Admitted, Spool: now.Spool, Processing: now.Processing,
 		Changes: changes(before, now),
 	}
 	return record
@@ -514,4 +518,8 @@ type stopped struct {
 	// LogFailures is how many records could not be written to the log. The
 	// account holds what they would have restated.
 	LogFailures int `json:"log_failures"`
+	// This counts the controller consuming storage exhaustion, not Snapshot or
+	// Admit noticing it later. Without it an unwired idle controller is silent.
+	StorageExhaustionConsumptions uint64              `json:"storage_exhaustion_consumptions"`
+	Processing                    *account.Processing `json:"processing,omitempty"`
 }

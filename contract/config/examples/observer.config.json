@@ -1,0 +1,24 @@
+{
+  "version": "observer.config/1",
+  "output": "/var/lib/observer",
+  "log": "stdout",
+  "watch": [
+    {"name": "api", "exe": "/usr/local/bin/api-server", "args": ["--listen", "8443"], "children": "all"}
+  ],
+  "ignore": [{"exe": "/usr/bin/curl"}],
+  "libraries": [],
+  "write_content": true,
+  "remove": {
+    "headers": ["authorization", "cookie"],
+    "query": ["token"],
+    "query_string": false,
+    "form": ["card_number"],
+    "json": {"request": ["/card/number"], "response": ["/items/*/pan"]},
+    "bodies": [],
+    "body_values": []
+  },
+  "mask": {"headers": {"x-api-key": "withheld"}, "json": {"response": {"/email": "withheld"}}},
+  "truncate": {"headers": {"x-trace-id": 8}},
+  "limits": {"output_mib": 64, "events": 16384, "state_every_seconds": 30},
+  "packs": ["credentials"]
+}

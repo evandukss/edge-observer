@@ -22,12 +22,22 @@ import (
 
 // additive decides whether a candidate policy only adds to the one in force,
 // naming the targets it adds, or says what it takes away. Reload adds; restart
-// takes away. Removing a target, changing an exclusion, where the observer
-// writes, which libraries may be probed, or a kept target's conditions or mode
-// is refused with the reason, and one forbidden change refuses the whole
-// candidate. A target needing a library nothing has attached is decided where
-// libraries are known (set.Admit).
+// takes away. Removing a target, changing or reordering the exclusions, where
+// the observer writes, which libraries may be probed, or a kept target's
+// conditions or mode is refused with the reason, and one forbidden change
+// refuses the whole candidate. A target needing a library nothing has attached
+// is decided where libraries are known (set.Admit).
 func additive(current, candidate policy.Policy) ([]process.Rule, string) {
+	if current.Processing == nil || candidate.Processing == nil {
+		return nil, "reload requires a compiled processing plan for both the active session and the candidate"
+	}
+	if current.ProcessingRevision == "" || candidate.ProcessingRevision == "" {
+		return nil, "reload requires a nonempty compiler-produced processing revision"
+	}
+	if current.ProcessingRevision != candidate.ProcessingRevision {
+		return nil, "the candidate changes processing - remove, mask, truncate, write_content, or which packs are " +
+			"enabled or what they hold - which a restart applies"
+	}
 	if current.Settings != candidate.Settings {
 		return nil, "the candidate changes where the observer writes or how often it restates its state, " +
 			"which a restart applies"
@@ -46,6 +56,12 @@ func additive(current, candidate policy.Policy) ([]process.Rule, string) {
 		if !slices.ContainsFunc(candidate.Approval.Exclusions, func(offered process.Rule) bool { return sameRule(exclusion, offered) }) {
 			return nil, fmt.Sprintf("the candidate removes an exclusion (exclusion %d), which a restart applies", i+1)
 		}
+	}
+	// The account names an exclusion by its number alone and cites the
+	// configuration in force, so the same exclusions in another order would give
+	// one number to two of them.
+	if !slices.EqualFunc(current.Approval.Exclusions, candidate.Approval.Exclusions, sameRule) {
+		return nil, "the candidate reorders the exclusions, which the account names by number, so a restart applies it"
 	}
 
 	for _, held := range current.Approval.Rules {
@@ -66,6 +82,58 @@ func additive(current, candidate policy.Policy) ([]process.Rule, string) {
 		}
 	}
 	return added, ""
+}
+
+// sessionNumbers is the number each of a candidate's targets holds in this
+// session, keyed by its number in the candidate. A kept target keeps its own;
+// an added one takes its number in the candidate where no target of the
+// session holds it, and otherwise the next above the highest. A number is a
+// position in one configuration and additive matches kept targets by name, so
+// a target put ahead of a kept one would otherwise take the kept one's number
+// and one number would name two targets for the rest of the session.
+func sessionNumbers(held []account.Target, candidate []process.Resolved) map[int]int {
+	kept := make(map[string]int, len(held))
+	taken := make(map[int]bool, len(held))
+	highest := 0
+	for _, one := range held {
+		kept[one.Name] = one.Number
+		taken[one.Number] = true
+		highest = max(highest, one.Number)
+	}
+	numbers := make(map[int]int, len(candidate))
+	for _, one := range candidate {
+		if number, found := kept[one.Name]; found {
+			numbers[one.Number] = number
+		}
+	}
+	for _, one := range candidate {
+		if _, found := kept[one.Name]; found {
+			continue
+		}
+		number := one.Number
+		if taken[number] {
+			number = highest + 1
+		}
+		taken[number] = true
+		highest = max(highest, number)
+		numbers[one.Number] = number
+	}
+	return numbers
+}
+
+// renumber puts every target number a resolution carries into this session's
+// numbering (sessionNumbers).
+func renumber(resolution *process.Resolution, numbers map[int]int) {
+	for i := range resolution.Targets {
+		resolution.Targets[i].Number = numbers[resolution.Targets[i].Number]
+	}
+	for i := range resolution.Selections {
+		one := &resolution.Selections[i]
+		one.Provenance.Number = numbers[one.Provenance.Number]
+		for j := range one.AlsoNamedBy {
+			one.AlsoNamedBy[j].Number = numbers[one.AlsoNamedBy[j].Number]
+		}
+	}
 }
 
 // sameRule compares every condition a rule names and its mode, telling a
@@ -180,7 +248,7 @@ func (d *daemon) reload(at time.Time, body []byte) reloadRecord {
 		return refuse(fmt.Sprintf("the request carries no reading this session can use (%v): the reload "+
 			"command reads the candidate for a session that cannot read it itself after attaching", err))
 	}
-	candidate, err := policy.Load(d.path)
+	candidate, err := loadProcessing(d.path)
 	if err != nil {
 		return refuse(err.Error())
 	}
@@ -197,6 +265,7 @@ func (d *daemon) reload(at time.Time, body []byte) reloadRecord {
 		record.Outcome = "unchanged"
 		return record
 	}
+	renumber(&request.Resolution, sessionNumbers(d.plan.Targets, request.Resolution.Targets))
 	admitting, can := d.attached.(probe.Admitting)
 	if !can {
 		return refuse("this attachment admits nothing after attaching, so a restart applies the candidate")
@@ -222,7 +291,7 @@ func (d *daemon) reload(at time.Time, body []byte) reloadRecord {
 	for _, p := range request.Processes {
 		processes[p.PID] = p
 	}
-	admit := probe.Request{Deny: request.Resolution.Denials, Read: make(map[int32]probe.Reading)}
+	admit := probe.Request{Deny: request.Resolution.Denials, Read: make(map[int32]probe.Reading), DeliveryGate: d.gate}
 	attempts := make(map[int32]attachment.Attempt)
 	for _, one := range request.Resolution.Selections {
 		if !slices.ContainsFunc(one.NamedBy(), func(reason admission.Provenance) bool { return names[reason.Target] }) {
@@ -255,6 +324,12 @@ func (d *daemon) reload(at time.Time, body []byte) reloadRecord {
 	}
 
 	if len(admit.Processes) > 0 {
+		if d.verifyParticipants == nil || d.gate == nil {
+			return refuse("activation refused: delivery_gate: reload has no protected participant verifier or active gate")
+		}
+		if _, err := d.verifyParticipants(d.gate, admit.Processes); err != nil {
+			return refuse(err.Error())
+		}
 		admitted, err := admitting.Admit(admit)
 		for _, skipped := range admitted.Skipped {
 			skip(skipped.Selection.ObserverPID, skipped.Why)
@@ -304,6 +379,10 @@ func (d *daemon) reload(at time.Time, body []byte) reloadRecord {
 	}
 	resolved := account.Plan(at, account.Policy{Revision: candidate.Revision, Generation: generation},
 		request.Resolution, attach.Built(), inspected)
+	// Observation can grow, but the worker keeps the exact immutable plan it
+	// started with. The equal generation above is permission to retain it,
+	// never permission to swap in a newly compiled plan.
+	candidate.Processing = d.policy.Processing
 	d.policy = candidate
 	d.plan.Policy = resolved.Policy
 	d.plan.Limits = resolved.Limits
@@ -368,7 +447,7 @@ func readForReload(candidate policy.Policy) (reloadRequest, error) {
 // reloadCommand reads the running session's configuration with this command's
 // privileges and asks the session to put in force what it adds.
 func reloadCommand(path string, stdout io.Writer) error {
-	read, err := policy.Load(path)
+	read, err := loadProcessing(path)
 	if err != nil {
 		return err
 	}

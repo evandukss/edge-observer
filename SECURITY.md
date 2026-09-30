@@ -28,16 +28,16 @@ make it do any of the following is a vulnerability:
 - write to any process's memory;
 - keep the capabilities it attached with once its probes are placed;
 - listen on a network socket, or send anything off the host;
-- create its log, pid file, spool or account so that a user other than the one running it can read them
+- persist raw plaintext from either capture callback;
+- create its log, pid file or account so that a user other than the one running it can read them
   (it creates files `0600` and directories `0700`);
 - act on a configuration section it does not implement instead of refusing the configuration.
 
 ## What does not count
 
-- **The spool holds the captured plaintext.** Every request and response an approved process sent or
-  received is in the session's spool files, base64-encoded, until you delete them. That is what the
-  observer is for. Whoever can read those files - the user that ran the observer, and root - can read
-  that traffic, credentials and personal data included.
+- **Legacy spool files hold captured plaintext.** Their payload is base64-encoded, not encrypted.
+  Whoever can read those files can read the traffic, credentials and personal data included.
+  The volatile intake does not sanitize or delete artifacts made by earlier captures.
 - **Running it needs root, or the capabilities listed in
   [docs/compatibility.md](docs/compatibility.md).** A report that assumes the attacker already holds
   them is not about the observer.

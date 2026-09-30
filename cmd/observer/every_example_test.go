@@ -17,7 +17,6 @@ import (
 
 	"github.com/evandukss/edge-observer/account"
 	"github.com/evandukss/edge-observer/contract/config"
-	"github.com/evandukss/edge-observer/policy"
 )
 
 // moduleRoot is the directory of the nearest go.mod above this package, which
@@ -47,7 +46,7 @@ func moduleRoot(t *testing.T) string {
 // examplesFloor is the fewest example files the walk must find before its
 // result means anything: the count when set, held as a floor so later
 // examples need no edit here.
-const examplesFloor = 18
+const examplesFloor = 9
 
 // executor is the program an examples directory describes, run over that
 // directory through a filesystem that records every file opened. It returns
@@ -63,9 +62,8 @@ type executor struct {
 // executes it. A directory with examples no entry names is refused.
 var executors = []executor{
 	{"contract/config/examples", "observer dry-run over every *.config.json", dryRunEvery},
-	{"contract/config/examples", "the configuration check over every example index.json lists", checkAsIndexed},
+	{"contract/config/examples", "the reader over every observer.config/1 example, with the packs it enables", compileEveryFile},
 	{"contract/examples/bundle", "the account validator over the dummy bundle", checkDocumentBundle},
-	{"contract", "the configuration and policy checks over standalone declarations", checkDocumentDeclarations},
 }
 
 // notExecuted is every example file deliberately executed by nothing, each
@@ -194,9 +192,9 @@ func (r *openedFS) names() []string {
 	return slices.Compact(slices.Sorted(slices.Values(r.opened)))
 }
 
-// dryRunOne runs one operator configuration through this program's dry run.
-// It was read if the program prints a plan or refuses naming unimplemented
-// sections; anything else is a configuration it cannot execute.
+// dryRunOne runs one configuration through this program's dry run. It was
+// read if the program prints a plan; anything else is a configuration it
+// cannot execute.
 func dryRunOne(examples fs.FS, name string) error {
 	content, err := fs.ReadFile(examples, name)
 	if err != nil {
@@ -211,13 +209,36 @@ func dryRunOne(examples fs.FS, name string) error {
 	if err := os.WriteFile(written, content, 0o600); err != nil {
 		return err
 	}
+	// The program reads the packs a configuration enables from packs/ beside
+	// it, so the example's packs are copied with it. The copy reads past the
+	// recording: copying a pack is not a program executing it, so a pack
+	// counts as opened only where a program opens it.
+	source := examples
+	if recorded, ok := examples.(*openedFS); ok {
+		source = recorded.fsys
+	}
+	packs := path.Join(path.Dir(name), "packs")
+	entries, err := fs.ReadDir(source, packs)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		pack, err := fs.ReadFile(source, path.Join(packs, entry.Name()))
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Join(directory, "packs"), 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(directory, "packs", entry.Name()), pack, 0o600); err != nil {
+			return err
+		}
+	}
 	var out bytes.Buffer
-	err = run([]string{"dry-run", written}, &out)
-	var unimplemented *policy.Unimplemented
-	switch {
-	case errors.As(err, &unimplemented):
-		return nil
-	case err != nil:
+	if err := run([]string{"dry-run", written}, &out); err != nil {
 		return err
 	}
 	var planned account.Account
@@ -227,10 +248,15 @@ func dryRunOne(examples fs.FS, name string) error {
 	return nil
 }
 
+// dryRunEvery dry-runs every *.config.json written at observer.config/1. A
+// file at another version is peeked at without being recorded as opened.
 func dryRunEvery(examples fs.FS) map[string]error {
 	failures := map[string]error{}
 	err := fs.WalkDir(examples, ".", func(at string, entry fs.DirEntry, err error) error {
 		if err != nil || entry.IsDir() || !strings.HasSuffix(at, ".config.json") {
+			return err
+		}
+		if written, err := versionOf(examples, at); err != nil || written != config.FileVersion {
 			return err
 		}
 		if err := dryRunOne(examples, at); err != nil {
@@ -244,60 +270,66 @@ func dryRunEvery(examples fs.FS) map[string]error {
 	return failures
 }
 
-// strictly decodes a document, refusing members its type lacks.
-func strictly(content []byte, into any) error {
-	decoder := json.NewDecoder(bytes.NewReader(content))
-	decoder.DisallowUnknownFields()
-	return decoder.Decode(into)
+// versionOf is the version a document states, read without recording the file
+// as opened, or "" where it states none.
+func versionOf(examples fs.FS, at string) (string, error) {
+	if recorded, ok := examples.(*openedFS); ok {
+		examples = recorded.fsys
+	}
+	content, err := fs.ReadFile(examples, at)
+	if err != nil {
+		return "", err
+	}
+	var version struct {
+		Version string `json:"version"`
+	}
+	if json.Unmarshal(content, &version) != nil {
+		return "", nil
+	}
+	return version.Version, nil
 }
 
-// checkAsIndexed runs the configuration check over every example the index
-// lists, with its manifests and the example runtime, requiring the stated
-// outcome.
-func checkAsIndexed(examples fs.FS) map[string]error {
-	whole := func(err error) map[string]error { return map[string]error{"": err} }
-	content, err := fs.ReadFile(examples, "index.json")
-	if err != nil {
-		return whole(err)
-	}
-	var index []struct {
-		Name          string         `json:"name"`
-		Purpose       string         `json:"purpose"`
-		Configuration string         `json:"configuration"`
-		Manifests     []string       `json:"manifests"`
-		Outcome       config.Outcome `json:"outcome"`
-	}
-	if err := strictly(content, &index); err != nil {
-		return map[string]error{"index.json": err}
-	}
-	runtime, err := fs.ReadFile(examples, "runtime.json")
-	if err != nil {
-		return whole(err)
-	}
-	var available config.Available
-	if err := strictly(runtime, &available); err != nil {
-		return map[string]error{"runtime.json": err}
-	}
+// compileEveryFile compiles every example written at observer.config/1, with
+// the packs it enables read from packs/<name>.json beside it. Every other
+// example is peeked at without being recorded as opened, since reading its
+// version is not executing it.
+func compileEveryFile(examples fs.FS) map[string]error {
 	failures := map[string]error{}
-	for _, one := range index {
-		configuration, err := fs.ReadFile(examples, one.Configuration)
+	source := examples
+	if recorded, ok := examples.(*openedFS); ok {
+		source = recorded.fsys
+	}
+	err := fs.WalkDir(source, ".", func(at string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || !strings.HasSuffix(at, ".json") {
+			return err
+		}
+		if written, err := versionOf(examples, at); err != nil || written != config.FileVersion {
+			return err
+		}
+		content, err := fs.ReadFile(examples, at)
 		if err != nil {
-			failures["index.json"] = errors.Join(failures["index.json"], err)
-			continue
+			return err
 		}
-		in := config.Input{Configuration: configuration, Available: available}
-		for _, manifest := range one.Manifests {
-			content, err := fs.ReadFile(examples, manifest)
+		file, findings := config.ReadFile(content)
+		var packs []config.Supplied
+		for _, name := range file.Packs {
+			pack, err := fs.ReadFile(examples, path.Join(path.Dir(at), "packs", name+".json"))
 			if err != nil {
-				failures["index.json"] = errors.Join(failures["index.json"], err)
-				continue
+				failures[at] = err
+				return nil
 			}
-			in.Manifests = append(in.Manifests, config.Supplied{Name: strings.TrimSuffix(path.Base(manifest), ".json"), Content: content})
+			packs = append(packs, config.Supplied{Name: name, Content: pack})
 		}
-		if result := config.Check(in); result.Outcome != one.Outcome {
-			failures[one.Configuration] = fmt.Errorf("%s checks as %q where the index says %q: %+v %+v",
-				one.Name, result.Outcome, one.Outcome, result.Structural, result.Composition)
+		if len(findings) == 0 {
+			_, findings = config.Compile(content, packs)
 		}
+		if len(findings) > 0 {
+			failures[at] = fmt.Errorf("refused: %+v", findings)
+		}
+		return nil
+	})
+	if err != nil {
+		failures[""] = err
 	}
 	return failures
 }

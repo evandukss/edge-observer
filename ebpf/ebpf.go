@@ -285,6 +285,10 @@ type Event struct {
 	NamespacePID int32
 	Generation   admission.Generation
 
+	// Origin is that admission as the program held it when the firing was
+	// checked against it.
+	Origin Origin
+
 	PID       int32
 	TID       int32
 	Direction fragment.Direction
@@ -303,6 +307,17 @@ type Event struct {
 	Measured bool
 
 	At time.Time
+}
+
+// Origin is how an event's instance was admitted (struct origin, bpf/ssl.bpf.h):
+// the target by the session's identity for it (targetIdentity), which is not
+// its number in the configuration; the condition; the kind; and, for one
+// admitted by descent, the instance it was admitted below.
+type Origin struct {
+	Kind   admission.Kind
+	Target uint32
+	Rule   uint32
+	Parent admission.Key
 }
 
 // Session is a loaded program, its links, and the events they report.
@@ -361,6 +376,12 @@ type Session struct {
 	index     map[instanceKey]int
 	held      sync.Mutex
 
+	// targets is the target behind each identity the allowlist's target field
+	// carries, and identities the reverse (targetIdentity). Written by the caller
+	// at attach and at a reload, read by the delivery goroutine, under held.
+	targets    map[uint32]admission.Provenance
+	identities map[string]uint32
+
 	// beyond is every descendant of an admitted instance found in an unenumerated
 	// pid namespace, with its start identity, so each is named once.
 	beyond map[instanceKey]admission.Start
@@ -393,6 +414,11 @@ type Session struct {
 	// closing, so the account can say it could not find out what was lost.
 	failed  atomic.Bool
 	failure atomic.Pointer[string]
+
+	// underWay is what the threads said at attach about calls that began before
+	// the probes were placed (underway.go). Written once, before the session is
+	// returned.
+	underWay probe.UnderWay
 }
 
 // readerFailure is why the ring reader stopped, or empty where it stopped
@@ -468,16 +494,19 @@ type placed struct {
 	refusal string
 }
 
-const chunk = 4096
+// MaxEventPayloadBytes is the enforced ceiling on a decoded event's payload.
+// It bounds accepted raw payload per event, not metadata or process memory.
+const MaxEventPayloadBytes = 4096
 
 // rawHeader is the fixed part of struct event before its data array: seven
 // eight-byte fields, six four-byte and six one-byte fields (86 bytes), then
 // the socket's endpoints appended after them (a flag, a padding byte, the
 // network namespace, two 16-byte addresses, two ports, four padding bytes),
-// then the socket's start: 144. The padding is explicit so no offset depends
-// on the compiler, and package bpf's layout guard pins every offset against
-// the source (bpf/ssl.bpf.h).
-const rawHeader = 144
+// then the socket's start (144), then the admission's origin (three eight-byte
+// fields, three four-byte, a kind and three padding bytes): 184. The padding
+// is explicit so no offset depends on the compiler, and package bpf's layout
+// guard pins every offset against the source (bpf/ssl.bpf.h).
+const rawHeader = 184
 
 // Attach loads the program, places the points, fills the allowlist and begins
 // reading. Nothing is captured before this and nothing after Close.
@@ -491,6 +520,9 @@ func Attach(options Options) (*Session, error) {
 		return nil, err
 	}
 
+	// The events channel's capacity is staging depth, while MaxEventPayloadBytes
+	// is a per-event payload maximum. Their values are equal by coincidence;
+	// unifying them would make changing either silently change the other.
 	session := &Session{
 		monotonicBase: pairClocks(),
 		collection:    collection,
@@ -506,6 +538,10 @@ func Attach(options Options) (*Session, error) {
 		_ = session.Close()
 		return nil, err
 	}
+
+	// The threads before any probe exists, so a call already under way can be told
+	// from one that began after (underway.go).
+	before := session.readBefore()
 
 	// Every function is unmeasurable before any probe is placed, and cleared only
 	// once its return probe is confirmed: an entry probe is live the moment it is
@@ -537,6 +573,9 @@ func Attach(options Options) (*Session, error) {
 		_ = session.Close()
 		return nil, err
 	}
+
+	// And the threads again, over everything admitted by now.
+	session.underWay = session.readAfter(before)
 
 	// And the sockets those processes already hold (seedSockets).
 	if err := session.seedSockets(); err != nil {
@@ -757,6 +796,7 @@ func (s *Session) authorise(who []admission.Selection) error {
 			s.refuse(one, reason, err)
 			continue
 		}
+		value.Target = s.targetIdentity(granted.Provenance)
 		if err := allowed.Update(keyOf(granted.Instance), value, ebpf.UpdateAny); err != nil {
 			return fmt.Errorf("%w: admit pid %d: %v", ErrUnavailable, granted.Instance.PID, err)
 		}
@@ -885,6 +925,52 @@ func encode(one admission.Selection, threads int32) (admissionValue, error) {
 		Mode:             mode,
 		Propagate:        propagate,
 	}, nil
+}
+
+// targetIdentity is what the allowlist's target field carries for a grant
+// written under one, and so what the fork hook copies to every descendant and
+// every event carries back; the table behind it reads the field back to a
+// name. A name is the identity, since a reload that changes or removes a target
+// is refused and a restart is a new session. A name's first identity is the
+// number it is offered where no other name holds it, and otherwise the next
+// above the highest, so one identity never names two targets whatever numbers
+// a caller offers. The observer command offers each target its number in the
+// session (cmd/observer, sessionNumbers), so there the two are equal; a
+// configuration's own numbers are positions, which a reload putting a new
+// target first would give to two.
+func (s *Session) targetIdentity(one admission.Provenance) uint32 {
+	s.held.Lock()
+	defer s.held.Unlock()
+	if identity, known := s.identities[one.Target]; known {
+		return identity
+	}
+	if s.targets == nil {
+		s.targets = make(map[uint32]admission.Provenance)
+		s.identities = make(map[string]uint32)
+	}
+	identity := uint32(one.Number)
+	if _, taken := s.targets[identity]; taken || identity == 0 {
+		identity = 1
+		for held := range s.targets {
+			identity = max(identity, held+1)
+		}
+	}
+	s.targets[identity] = admission.Provenance{Target: one.Target, Number: one.Number}
+	s.identities[one.Target] = identity
+	return identity
+}
+
+// provenanceOf is the target a grant's target field names, read back through
+// the identities this session gave (targetIdentity). One it never gave keeps
+// only its number.
+func (s *Session) provenanceOf(identity, rule uint32) admission.Provenance {
+	s.held.Lock()
+	target, known := s.targets[identity]
+	s.held.Unlock()
+	if !known {
+		return admission.Provenance{Number: int(identity), Rule: int(rule)}
+	}
+	return admission.Provenance{Target: target.Target, Number: target.Number, Rule: int(rule)}
 }
 
 // enumerate passes the pid namespaces of everything being admitted to the
@@ -1071,12 +1157,14 @@ func (s *Session) adopt() error {
 				Mode:        one.Mode,
 				Propagation: admission.CanPropagate,
 				ObserverPID: below.PID,
+				Adopted:     true,
 			}
 			value, err := encode(inherited, below.Threads)
 			if err != nil {
 				return fmt.Errorf("%w: admit pid %d below pid %d: %v",
 					ErrUnavailable, below.PID, one.ObserverPID, err)
 			}
+			value.Target = s.targetIdentity(inherited.Provenance)
 			if err := allowed.Update(keyOf(child), value, ebpf.UpdateAny); err != nil {
 				return fmt.Errorf("%w: admit pid %d below pid %d: %v",
 					ErrUnavailable, below.PID, one.ObserverPID, err)
@@ -1464,22 +1552,20 @@ func (s *Session) Admissions() ([]admission.Selection, error) {
 		if value.Kind == denied {
 			continue
 		}
+		provenance := s.provenanceOf(value.Target, value.Rule)
+		provenance.Parent = admission.Key{
+			Namespace:  admission.Namespace{Device: value.ParentNSDevice, Inode: value.ParentNSInode},
+			PID:        int32(value.ParentPID),
+			Generation: admission.Generation(value.ParentGeneration),
+		}
 		one := admission.Selection{
 			Instance: admission.Instance{
 				Namespace:  admission.Namespace{Device: key.NamespaceDevice, Inode: key.NamespaceInode},
 				PID:        int32(key.PID),
 				Generation: admission.Generation(value.Generation),
 			},
-			Kind: decodeKind(value.Kind),
-			Provenance: admission.Provenance{
-				Number: int(value.Target),
-				Rule:   int(value.Rule),
-				Parent: admission.Key{
-					Namespace:  admission.Namespace{Device: value.ParentNSDevice, Inode: value.ParentNSInode},
-					PID:        int32(value.ParentPID),
-					Generation: admission.Generation(value.ParentGeneration),
-				},
-			},
+			Kind:        decodeKind(value.Kind),
+			Provenance:  provenance,
 			Mode:        decodeMode(value.Mode),
 			Propagation: decodePropagation(value.Propagate),
 		}
@@ -1635,8 +1721,8 @@ func (s *Session) Denials() ([]admission.Denial, error) {
 }
 
 // recorded puts an instance into the inventory once, keeping the first record:
-// an authorised selection carries its target and mode, which a later event
-// cannot.
+// an authorised selection carries its mode, start and executable, which a later
+// event does not.
 func (s *Session) recorded(one admission.Selection) {
 	s.held.Lock()
 	defer s.held.Unlock()
@@ -1652,11 +1738,13 @@ func (s *Session) recorded(one admission.Selection) {
 }
 
 // Inventory is every instance this session recorded a grant for: what authorise
-// admitted, what adopt wrote, what a reading of the allowlist found (where a
-// fork-hook descendant enters), and every instance an event was attributed to.
-// It is session state and cannot fail, so an instance absent here was recorded
-// by nothing. Not covered: a fork-hook descendant that transferred nothing and
-// whose entry was removed before any reading of the allowlist.
+// admitted, what adopt wrote, what a reading of the allowlist found, and every
+// instance an event was attributed to, with the admission the event carried
+// (where a fork-hook descendant enters the observer command's account, which
+// reads no allowlist this way). It is session state and cannot fail, so an
+// instance absent here was recorded by nothing. Not covered: a fork-hook
+// descendant that transferred nothing and whose entry was removed before any
+// reading of the allowlist.
 func (s *Session) Inventory() []admission.Selection {
 	s.held.Lock()
 	defer s.held.Unlock()
@@ -1842,6 +1930,11 @@ func (s *Session) Reconcile() ([]Declined, error) {
 	)
 	entries := allowed.Iterate()
 	for entries.Next(&key, &value) {
+		// A denial's field holds its exclusion's number, not a target identity.
+		provenance := admission.Provenance{Number: int(value.Target), Rule: int(value.Rule)}
+		if value.Kind != denied {
+			provenance = s.provenanceOf(value.Target, value.Rule)
+		}
 		one := admission.Selection{
 			Instance: admission.Instance{
 				Namespace:  admission.Namespace{Device: key.NamespaceDevice, Inode: key.NamespaceInode},
@@ -1849,7 +1942,7 @@ func (s *Session) Reconcile() ([]Declined, error) {
 				Generation: admission.Generation(value.Generation),
 			},
 			Kind:       decodeKind(value.Kind),
-			Provenance: admission.Provenance{Number: int(value.Target), Rule: int(value.Rule)},
+			Provenance: provenance,
 			Mode:       decodeMode(value.Mode),
 		}
 
@@ -1999,12 +2092,12 @@ func (s *Session) Reads() (map[admission.Generation]uint64, error) {
 func (s *Session) Dropped() (int64, error) { return s.stat(obpf.StatReserveFailed) }
 
 // Unmatched is how many returns fired with nothing recorded on the way in, so
-// the call's count was never read. It may cover a call already inside the
-// function when the probes were placed; whether that return fires varies
-// between runs on some kernels, so neither zero nor one is evidence about such
-// a call. Attaching before the traffic starts bounds the loss. Returns of entry
-// points reached inside a probed call are not counted (struct call's live
-// flag, bpf/ssl.bpf.h).
+// the call's count was never read: calls that entered after the probes were
+// placed and recorded nothing (probe.Losses). A call already inside the
+// function when the probes were placed returns here only where another return
+// probe on that function armed it at entry; otherwise its return fires nothing,
+// and UnderWay accounts for it. Returns of entry points reached inside a probed
+// call are not counted (struct call's live flag, bpf/ssl.bpf.h).
 func (s *Session) Unmatched() (int64, error) { return s.stat(obpf.StatUnmatched) }
 
 // Unmeasurable is how many calls entered a function this session holds no
@@ -2260,17 +2353,9 @@ func (s *Session) read() {
 			s.undecodable.Add(1)
 			continue
 		}
-		// An instance admitted by the fork hook that transferred and had gone before
-		// any reading of the allowlist is recorded here only (Inventory).
-		s.recorded(admission.Selection{
-			Instance: admission.Instance{
-				Namespace:  event.Namespace,
-				PID:        event.NamespacePID,
-				Generation: event.Generation,
-			},
-			Kind:        admission.KindUnknown,
-			ObserverPID: event.PID,
-		})
+		// An instance admitted by the fork hook is recorded here only (Inventory):
+		// nothing in userspace wrote its grant.
+		s.recorded(s.selectionOf(event))
 		select {
 		case s.events <- event:
 			s.delivered.Add(1)
@@ -2281,6 +2366,34 @@ func (s *Session) read() {
 			return
 		}
 	}
+}
+
+// selectionOf is the admission an event was taken under, from what the event
+// carries: its target resolved through this session's identities, and for an
+// instance admitted by descent the instance it was admitted below. Every
+// identity the program can carry was written by targetIdentity, so one this
+// session does not know leaves the target unnamed.
+func (s *Session) selectionOf(event Event) admission.Selection {
+	one := admission.Selection{
+		Instance: admission.Instance{
+			Namespace:  event.Namespace,
+			PID:        event.NamespacePID,
+			Generation: event.Generation,
+		},
+		Kind:        event.Origin.Kind,
+		ObserverPID: event.PID,
+	}
+	s.held.Lock()
+	target, known := s.targets[event.Origin.Target]
+	s.held.Unlock()
+	if known {
+		one.Provenance = admission.Provenance{Target: target.Target, Number: target.Number,
+			Rule: int(event.Origin.Rule)}
+	}
+	if one.Kind == admission.ByDescent {
+		one.Provenance.Parent = event.Origin.Parent
+	}
+	return one
 }
 
 // idled says the ring buffer held nothing for a whole read. The send is not
@@ -2314,6 +2427,25 @@ func (s *Session) endpointsOf(sample []byte) probe.Ends {
 		ends.OpenedAt = s.monotonicBase.Add(time.Duration(raw))
 	}
 	return ends
+}
+
+// originOf reads the admission an event was taken under, appended after the
+// socket's start.
+func originOf(sample []byte) Origin {
+	order := binary.LittleEndian
+	return Origin{
+		Kind:   decodeKind(sample[180]),
+		Target: order.Uint32(sample[172:176]),
+		Rule:   order.Uint32(sample[176:180]),
+		Parent: admission.Key{
+			Namespace: admission.Namespace{
+				Device: order.Uint64(sample[152:160]),
+				Inode:  order.Uint64(sample[160:168]),
+			},
+			PID:        int32(order.Uint32(sample[168:172])),
+			Generation: admission.Generation(order.Uint64(sample[144:152])),
+		},
+	}
 }
 
 // pairClocks reads the program's clock and the wall clock once and returns the
@@ -2361,6 +2493,7 @@ func (s *Session) decode(sample []byte) (Event, bool) {
 		Early:        sample[81] != 0,
 		Measured:     sample[82] != 0,
 		Endpoints:    s.endpointsOf(sample),
+		Origin:       originOf(sample),
 		At:           time.Now(),
 	}
 	switch sample[80] {
@@ -2370,8 +2503,8 @@ func (s *Session) decode(sample []byte) (Event, bool) {
 		event.Direction = fragment.Received
 	}
 
-	if kept > chunk {
-		kept = chunk
+	if kept > MaxEventPayloadBytes {
+		kept = MaxEventPayloadBytes
 	}
 	if int(rawHeader+kept) <= len(sample) && kept > 0 {
 		event.Payload = append([]byte(nil), sample[rawHeader:rawHeader+kept]...)

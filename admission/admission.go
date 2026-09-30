@@ -351,7 +351,10 @@ func (p Propagation) String() string {
 // parent. It travels with the grant, so a process two targets matched can lose
 // one reason without losing the other.
 type Provenance struct {
-	// Target is the entry's configured name; Number its position from one.
+	// Target is the entry's configured name. Number is its position from one in
+	// the configuration a resolution read; a running session puts a reload's
+	// targets into its own numbering before admitting them (cmd/observer,
+	// sessionNumbers), so there it is the target's number in the session.
 	Target string
 	Number int
 
@@ -431,6 +434,12 @@ type Selection struct {
 	// ObserverPID is the observer's own number for this instance, for reading
 	// /proc. Zero where unknown, which is not pid zero.
 	ObserverPID int32
+
+	// Adopted is whether the instance was found by the walk of an admitted
+	// process's running descendants when probes were placed (package ebpf,
+	// adopt), and so whether its namespace was read then rather than when the
+	// policy was resolved.
+	Adopted bool
 }
 
 // Answers is what this selection's mode answers to the five behaviours.

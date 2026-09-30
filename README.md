@@ -54,19 +54,20 @@ proven, and what does not work. Read it before relying on anything here.
   the adapter.
 - **One protocol**: HTTP/1.1, with JSON bodies described by their shape. Other traffic is captured and
   not reconstructed. Reconstruction runs when a finished session is read back, never while capturing.
-- **One output**: the spool and the account, on the host. Nothing is exported.
-- **Most of the configuration contract.** [contract/config/CONFIG.md](contract/config/CONFIG.md)
-  specifies packs, processing pipelines, subscribers, policy documents, traffic filtering, turning
-  plaintext retention off, export, and other kinds of sink. The program implements none of them, and
-  refuses a configuration that asks for any of them, naming the section. Of a target's five
-  `descendants` answers, three accept one value each.
+- **Local output**: the session account, on the host. Raw capture records stay in bounded volatile
+  storage. Durable payload output requires processing and release authorization. Nothing is exported.
+- **One set of rules for every watched program.** The configuration
+  ([contract/config/CONFIG.md](contract/config/CONFIG.md)) removes, masks and truncates headers, query
+  parameters, form fields, JSON members and whole bodies, in one fixed order, and packs add rules from
+  `packs/<name>.json` beside it. Different rules for different watched programs are not in it. Three
+  things the earlier format could write cannot be written: stopping a pipeline at its first undecidable
+  exchange, exchanges written without connection records, and a mask with a truncation on one header.
 - **A reload only adds.** It puts in force a new target that needs no probe beyond those already
   placed. Anything it would take away, and a library nothing has attached to, waits for a restart.
 - **No release**: no archive, no tag, no version number.
 - **Every published format is a draft and not frozen**: the record (`observer.record/1-draft`), the
-  account and bundle (`observer.account/1-draft`, `observer.bundle/1-draft`), the configuration, pack
-  manifest and component interface (`observer.config/draft`, `observer.pack/draft`,
-  `observer.component/draft`) and the policy vocabulary (`observer.policy/draft`).
+  account and bundle (`observer.account/2-draft`, `observer.bundle/1-draft`), and the configuration and
+  pack (`observer.config/1`, `observer.pack/1`).
 - **The account format has no worked example bundle** in this repository;
   [contract/account/ACCOUNT.md](contract/account/ACCOUNT.md) specifies it.
 
@@ -112,45 +113,42 @@ Four steps: configure, check the host, run, inspect. Every command runs the prog
 
 ### 1. Configure
 
-The observer reads one JSON file, the operator configuration specified in
+The observer reads one JSON file, the configuration specified in
 [contract/config/CONFIG.md](contract/config/CONFIG.md). Start from the simplest one the program runs:
 
-    cp contract/config/examples/no-extension.config.json observer.config.json
+    cp contract/config/examples/no-rules.config.json observer.config.json
 
-In a release archive that file is already there, as `observer.config.json`. Four things in it are yours
+In a release archive that file is already there, as `observer.config.json`. Three things in it are yours
 to set.
 
-**Where it writes.** `observer.directory` is where the observer keeps its pid file and one directory per
-run under `sessions`; it is created if missing. `observer.log` is `stdout`, or an absolute path for a
-log file.
+**Where it writes.** `output` is where the observer keeps its pid file and one directory per run under
+`sessions`; it is created if missing. `log` is `stdout`, or an absolute path for a log file.
 
-**What it observes.** `observation_scope.targets` is the list of processes you approve, and no other
-process is observed. For one process already running, find what identifies it:
+**What it watches.** `watch` is the list of processes you approve, and no other process is observed. For
+one process already running, find what identifies it:
 
     pgrep -a <program name>                 # its pid and command line (or find it with ps)
     readlink /proc/<pid>/exe                # the file the kernel runs: this is "exe"
     tr '\0' '\n' < /proc/<pid>/cmdline      # its command line, one entry per line
 
-Then write the target, with `args` being every command-line entry after the first:
+Then write the entry, with `args` being every command-line entry after the first:
 
-    {
-      "name": "api",
-      "match": {"exe": "/usr/bin/python3.11", "args": ["/srv/api/server.py"]},
-      "descendants": {"existing": true, "future": true, "boundary": "exec_ends_the_grant",
-                      "root_exit": "survivors_keep_their_grants", "replacement": "needs_restart"}
-    }
+    {"name": "api", "exe": "/usr/bin/python3.11", "args": ["/srv/api/server.py"], "children": "all"}
 
-Every condition in `match` must hold. Besides `exe` and `args` there are three more: `cgroup`, a path on
+Every condition in an entry must hold. Besides `exe` and `args` there are three more: `cgroup`, a path on
 the unified cgroup hierarchy that the process must be in or below; `port`, a listening TCP port whose
 holders are selected, with an optional `interface`; and `pid`, which names one process as
-`{"pid": N, "start": S, "boot": B}`. `descendants.existing` and `descendants.future` choose whether the
-matched process's children already running, and the ones it creates later, are observed too; the other
-three answers are fixed and must be written exactly as above. `observation_scope.exclude` lists matches
-that are never observed, whatever a target says.
+`{"pid": N, "start": S, "boot": B}`. `children` is `all` (the default), `existing` or `none`: whether
+the matched process's children are watched too - every one, only those already running, or none.
+`ignore` lists matches that are never watched, whatever an entry says.
 
-**Leave every other section as it is in the file.** The program implements what that file asks for -
-every connection of an approved process, kept on this host - and refuses any other value there with a
-message naming the section, rather than ignoring it.
+**What it removes.** Without rules the observer writes every exchange of a watched process as it
+crossed the TLS boundary. `remove` takes headers, query parameters, form fields, JSON members and whole
+bodies out before anything is written, and the observer refuses to start when it cannot enforce
+every one. `mask` replaces a value and `truncate` shortens a header's value. The shipped pack
+`credentials` removes the usual credential headers: copy `contract/config/examples/packs/credentials.json`
+to `packs/credentials.json` beside your configuration and add `"packs": ["credentials"]`. A misspelled
+key is refused by name, never ignored.
 
 Check what it would select, attaching nothing:
 
@@ -160,17 +158,36 @@ A target that selected nothing says why. Fix the target until yours shows the pr
 
 ### 2. Check the host
 
-Attaching needs root, or the capabilities [docs/compatibility.md](docs/compatibility.md) lists. Ask
-first whether this host can run it, as the user that will run it:
+Attaching needs root, or the capabilities [docs/compatibility.md](docs/compatibility.md) lists.
 
-    sudo ./observer preflight observer.config.json --text
+**The observer runs only inside an envelope of its own.** Its process must be in a cgroup (cgroup v2) of
+its own that is a memory domain with a finite `memory.max` and no swap, and every process it watches
+must be outside that cgroup. `start` refuses anywhere else and names the condition. A login shell's
+cgroup has no memory limit and a service's own cgroup holds the service, so neither will do. Launch
+`preflight` and `start` the same way, so that preflight judges the envelope start will run in.
 
-It answers `READY`, or `NOT READY` naming each requirement missing, or `INDETERMINATE` naming what it
-could not read, and exits 0 only on `READY`. It attaches nothing. Do not start on anything but `READY`.
+On a host with systemd, a transient scope is one:
+
+    sudo systemd-run --scope -p MemoryMax=512M -p MemorySwapMax=0 ./observer preflight observer.config.json --text
+
+With containers, the observer runs in a container of its own whose `--memory` and `--memory-swap` are
+equal, sharing the host's pid and cgroup namespaces, and the service it watches runs in another:
+
+    docker run --rm --privileged --pid=host --cgroupns=host --memory=512m --memory-swap=512m \
+        --volume "$PWD:/observer" --workdir /observer <an image with a shell> \
+        ./observer preflight observer.config.json --text
+
+The limit bounds what the observer itself may hold; 512M is an example, not a measured need.
+
+Preflight answers `READY`, or `NOT READY` naming each requirement missing - each envelope condition
+start would refuse on among them, in start's own words - or `INDETERMINATE` naming what it could not
+read, and exits 0 only on `READY`. It attaches nothing. Do not start on anything but `READY`.
 
 ### 3. Run
 
-    sudo ./observer start observer.config.json
+Launched the way preflight was:
+
+    sudo systemd-run --scope -p MemoryMax=512M -p MemorySwapMax=0 ./observer start observer.config.json
 
 It runs in the foreground and prints one JSON record per line; the first says it activated and what it
 attached to. Now use the service you approved so traffic crosses it - nothing is observed on a quiet
@@ -180,11 +197,12 @@ session's account as it stands.
     sudo ./observer stop observer.config.json
 
 (or Ctrl-C in the first terminal) ends the run. `stop` prints the session it ended, whether it sealed
-completely, and the path of the account it sealed.
+completely, on the same line anything the account says was lost and why release was refused, and the
+path of the account it sealed.
 
 ### 4. Inspect
 
-A finished run is a directory: `<observer.directory>/sessions/<session>`, the session `stop` named.
+A finished run is a directory: `<output>/sessions/<session>`, the session `stop` named.
 
     sudo ./observer inspect /var/lib/observer/sessions/<session> --text
 
@@ -198,19 +216,28 @@ before believing anything else in it**: a run that lost events is not evidence a
 host. And a run that saw nothing is only evidence of a quiet process if the account also says the
 probes were attached.
 
-After the account, `--text` prints the exchanges reconstructed from the spool beside it: each connection
-under its process, with whether that process was the server or the client, and under it each request's
-method and path and the status of the response to it, every header by name, and each body by its size
-and JSON shape. It prints no header value and no body byte. Reconstruction runs here, as the directory
-is read, on the machine running `inspect`, and it reads the session's whole spool, every value
-included, into memory to find that structure. Leaving the values out of what it prints removes nothing:
-they were read to build the view, and the spool still holds them. A directory holding the account alone
-says that nothing was reconstructed, rather than showing a session in which nothing crossed.
+`--text` prints the sealed account and the approved records from `approved.jsonl`, including
+permitted header and trailer values, decoded body bytes, and their capture-time policy revision,
+route, connection metadata and message positions. Inspection uses the persisted result; changing
+local policy does not reinterpret it. Copying just `account.json` and `approved.jsonl` is sufficient.
 
-**The header values and body bytes are in the spool files beside the account, in full**: `.jsonl` files
-of one JSON record per line, where each record of what crossed carries those bytes base64-encoded. That
-is plaintext in all but spelling - whatever credentials and personal data the observed traffic carried
-are in it, one decode away - and it stays on this host until you delete it.
+Named policy exclusions distinguish fields that were removed from fields absent in the retained
+messages. An empty exclusion array means none were excluded there; an absent or null array in an
+older artifact means that evidence is unavailable. Truncation evidence identifies an indeterminate
+suffix independently of the connection's actual ending. Missing, empty or unreadable approved
+output fails text inspection, even if the account was printed. A legacy raw spool is not used as a
+fallback. See [approved inspection](docs/approved-inspection.md) for the reader contract.
+
+**New capture sessions do not create raw spool files.** Both capture callbacks copy records into a
+bounded volatile intake. Reaching its limit refuses the next record whole and signals exhaustion;
+releasing held records does not reopen an exhausted intake. Intake records are not approved output.
+The processing worker writes authorized, processed route records to `approved.jsonl`; it does not
+write raw fragments or connection records to the legacy spool. The sealed account sits beside that
+approved output.
+
+Legacy `fragments.jsonl` files contain header values and body bytes base64-encoded, including any
+credentials and personal data the traffic carried. Reading such a file does not sanitize it or remove
+it from disk.
 
 ## Documentation
 

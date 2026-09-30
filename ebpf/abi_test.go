@@ -72,9 +72,10 @@ func TestTheAllowlistIsTheSameShapeOnBothSidesOfTheProgram(t *testing.T) {
 					held.MaxEntries)
 			}
 
-			// The event's layout: a ring buffer carries no type information, so the size
-			// is pinned here and the offsets are proved where a real event arrives (the
-			// attach suite).
+			// The event's layout: a ring buffer carries no type information, so only the
+			// map's type is checked here. Its fields' order, widths and offsets are pinned
+			// against the source by package bpf's layout guard, and proved where a real
+			// event arrives (the attach suite).
 			if held, found := spec.Maps["events"]; !found {
 				t.Errorf("the %s program has no ring buffer", program.Name)
 			} else if held.Type != ciliumebpf.RingBuf {

@@ -5,8 +5,10 @@ package attach_test
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,7 +21,7 @@ import (
 	"github.com/evandukss/edge-observer/account"
 	"github.com/evandukss/edge-observer/ebpf"
 	"github.com/evandukss/edge-observer/process"
-	"github.com/evandukss/edge-observer/spool"
+	"github.com/evandukss/edge-observer/processing"
 )
 
 // compiled is a fixture program built from testdata against the system's
@@ -171,27 +173,47 @@ func exactly(name string, p process.Process, boot, mode string) map[string]any {
 		"descendants": mode}
 }
 
-// observedBy is how many records the session's spool holds for each pid.
+// observedBy counts what the session APPROVED, per holding process. It reads
+// the approved artifact rather than the raw spool, which the observer stopped
+// writing when capture moved to a volatile intake.
+//
+// The counts are not comparable with the spool's: that held one record per
+// fragment and this holds one per approved route. Every caller asks only
+// whether a process appears at all, so the magnitude is reported in failure
+// text and asserted nowhere - keep it that way, because the two numbers answer
+// different questions.
 func observedBy(t *testing.T, directory string) map[int32]int {
 	t.Helper()
 	counts := make(map[int32]int)
-	for _, record := range spooledRecords(t, filepath.Join(directory, spool.Name)) {
-		counts[record.Process.PID]++
-	}
-	return counts
-}
-
-func sealedAt(t *testing.T, directory string) account.Account {
-	t.Helper()
-	content, err := os.ReadFile(filepath.Join(directory, "account.json"))
+	file, err := os.Open(filepath.Join(directory, processing.ArtifactName))
 	if err != nil {
-		t.Fatalf("read the sealed account: %v", err)
+		if errors.Is(err, fs.ErrNotExist) {
+			return counts
+		}
+		t.Fatalf("read the approved output: %v", err)
 	}
-	var sealed account.Account
-	if err := json.Unmarshal(content, &sealed); err != nil {
-		t.Fatalf("decode the sealed account: %v", err)
+	defer func() { _ = file.Close() }()
+	lines := bufio.NewScanner(file)
+	lines.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	for lines.Scan() {
+		var artifact processing.Artifact
+		if err := json.Unmarshal(lines.Bytes(), &artifact); err != nil {
+			// A line still being written.
+			continue
+		}
+		counts[artifact.Connection.Process.PID]++
 	}
-	return sealed
+	// Which KIND of empty this is. A caller that finds its pid absent cannot
+	// otherwise tell "the artifact carries entries, none of them this one" -
+	// its own question, answered no - from "the artifact carries nothing at
+	// all", which is a different failure and not about the pid it asked for.
+	pids := make([]int32, 0, len(counts))
+	for pid := range counts {
+		pids = append(pids, pid)
+	}
+	slices.Sort(pids)
+	t.Logf("approved output holds %d entries across pids %v", len(pids), pids)
+	return counts
 }
 
 func previewed(t *testing.T, binary string, c configured) account.Account {
@@ -360,6 +382,16 @@ func TestAnExcludedProcessAndItsDescendantProduceNothingWhileAControlOutsideItDo
 // cgroupFor makes a cgroup under this container's hierarchy. Its removal is
 // registered before anything moves in and moves out whatever remains, so
 // nothing is left on the host whatever order the clean-ups run in.
+//
+// AT THE MOUNT ROOT, and a bounded cgroup cannot go anywhere else. The gate
+// runner empties the root into gate-runner and enables the controllers THERE,
+// on the root, because a cgroup holding processes may enable none in its own
+// subtree - and gate-runner is where every process in this container then
+// lives. So gate-runner can never carry controllers, nothing created beneath
+// it has a memory.max to write, and a cgroup that needs a limit is a sibling
+// of gate-runner rather than a child of it. Measured: creating the observer's
+// envelope under gate-runner fails with permission denied on memory.max,
+// which reads as a privilege problem and is the no-internal-process rule.
 func cgroupFor(t *testing.T, name string) string {
 	t.Helper()
 	directory := filepath.Join(ebpf.DefaultCgroupMount, name)
@@ -368,12 +400,37 @@ func cgroupFor(t *testing.T, name string) string {
 	}
 	t.Cleanup(func() {
 		content, _ := os.ReadFile(filepath.Join(directory, "cgroup.procs"))
+		home := ownCgroup(t)
 		for _, pid := range strings.Fields(string(content)) {
-			_ = os.WriteFile(filepath.Join(ebpf.DefaultCgroupMount, "cgroup.procs"), []byte(pid), 0o644)
+			_ = os.WriteFile(filepath.Join(home, "cgroup.procs"), []byte(pid), 0o644)
 		}
 		_ = os.Remove(directory)
 	})
 	return directory
+}
+
+// ownCgroup is the cgroup this test process is in, which is where a process is
+// returned to when the group holding it goes away.
+//
+// NOT the mount root. A cgroup with a controller enabled in its subtree_control
+// may hold no processes of its own, so writing a pid to the root fails with
+// "device or resource busy" the moment anything beneath it is capped - which is
+// every run of this suite, because the observer needs a bounded envelope. The
+// root accepts processes only while nothing is bounded, so a helper that
+// returns them there models a system in which the resource controls are off.
+func ownCgroup(t *testing.T) string {
+	t.Helper()
+	content, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		t.Fatalf("read this process's own cgroup: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(content)), "\n") {
+		if path, ok := strings.CutPrefix(line, "0::"); ok {
+			return filepath.Join(ebpf.DefaultCgroupMount, path)
+		}
+	}
+	t.Fatalf("no unified cgroup line in /proc/self/cgroup:\n%s", content)
+	return ""
 }
 
 func moveInto(t *testing.T, directory string, pid int32) {
@@ -411,7 +468,10 @@ func TestACgroupTargetIsASnapshotAndTheObjectItResolvedToDecides(t *testing.T) {
 		t.Fatalf("the account records no object for the cgroup it resolved: %+v", first.Cgroup)
 	}
 
-	moveInto(t, ebpf.DefaultCgroupMount, leaver.PID)
+	// Out of the target and into the cgroup this test is in, NOT the mount root:
+	// the root holds no processes once anything beneath it is bounded, which is
+	// every run of this suite. See ownCgroup.
+	moveInto(t, ownCgroup(t), leaver.PID)
 	_, entrant := looping(t, port, "entrant", witness, "loop")
 	moveInto(t, group, entrant.PID)
 	nested := cgroupFor(t, name+"/inner")
@@ -443,7 +503,7 @@ func TestACgroupTargetIsASnapshotAndTheObjectItResolvedToDecides(t *testing.T) {
 	// The path made again: everything moved out, the object removed, a new one made
 	// under the same path, a newcomer put in it.
 	for _, pid := range []int32{stayer.PID, entrant.PID, nester.PID} {
-		moveInto(t, ebpf.DefaultCgroupMount, pid)
+		moveInto(t, ownCgroup(t), pid)
 	}
 	if err := os.Remove(nested); err != nil {
 		t.Fatalf("remove %s: %v", nested, err)
@@ -530,184 +590,4 @@ func forkingServer(t *testing.T, mode ...string) (process.Process, int) {
 		t.Fatalf("the forking server did not come up: %q %v", line, err)
 	}
 	return loaded(t, int32(command.Process.Pid)), port
-}
-
-// workers is every child the server has, other than those in known, once there
-// is at least one.
-func workers(t *testing.T, server int32, known ...int32) []int32 {
-	t.Helper()
-	for range 300 {
-		table, err := process.Read(procfs)
-		if err != nil {
-			t.Fatalf("read the process table: %v", err)
-		}
-		var found []int32
-		for _, p := range table.All() {
-			if p.PPID == server && !slices.Contains(known, p.PID) {
-				found = append(found, p.PID)
-			}
-		}
-		if len(found) > 0 {
-			return found
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("the server %d forked no worker beyond %v", server, known)
-	return nil
-}
-
-// answered sends one request to the forking server and reads its whole answer,
-// whose body is "served", so the exchange has finished in the worker.
-// conversation.ask reads one line and can return on a line left from an earlier
-// answer before its own request was served.
-func answered(t *testing.T, c conversation, path string) {
-	t.Helper()
-	if line := c.ask(t, path); !strings.HasPrefix(line, "HTTP/1.1 200") {
-		t.Fatalf("the forking server answered %q", line)
-	}
-	for {
-		line, err := c.receive.ReadString('\n')
-		if err != nil {
-			t.Fatalf("read the rest of the answer: %v", err)
-		}
-		if strings.TrimRight(line, "\r\n") == "served" {
-			return
-		}
-	}
-}
-
-// A port target on a server forking a worker per connection resolves to the
-// parent and the running worker, and under follow covers a worker forked after
-// activation; under none it does not.
-func TestAPortTargetOnAForkingServerCoversItsWorkersAndUnderFollowTheOnesForkedAfter(t *testing.T) {
-	binary := built(t)
-	for _, one := range []struct {
-		mode  string
-		later bool
-	}{{"follow", true}, {"none", false}} {
-		t.Run(one.mode, func(t *testing.T) {
-			server, port := forkingServer(t)
-			early := speaking(t, port)
-			answered(t, early, "early")
-			existing := workers(t, server.PID)
-
-			c := configuring(t, map[string]any{"name": "server", "port": port, "descendants": one.mode})
-			observer := started(t, binary, c)
-			roots := pidsIn(named(inspected(t, binary, c), "server").Roots)
-			if !slices.Contains(roots, server.PID) || !slices.Contains(roots, existing[0]) {
-				t.Fatalf("the port resolved to %v, want the server %d and its running worker %d", roots, server.PID,
-					existing[0])
-			}
-
-			late := speaking(t, port)
-			answered(t, late, "late")
-			forkedAfter := workers(t, server.PID, existing...)
-			for range 3 {
-				answered(t, early, "early")
-				answered(t, late, "late")
-			}
-			waitForSpool(t, observer.directory(c), 2)
-			sealed := ended(t, observer, c)
-
-			by := observedBy(t, observer.directory(c))
-			if by[existing[0]] == 0 {
-				t.Errorf("the worker running at activation, pid %d, was not observed", existing[0])
-			}
-			if got := by[forkedAfter[0]] > 0; got != one.later {
-				t.Errorf("under %s the worker forked after activation, pid %d, observed %v with %d records, want %v",
-					one.mode, forkedAfter[0], got, by[forkedAfter[0]], one.later)
-			}
-			// A failure carries what was admitted, placed, lost and sealed, and the records
-			// by pid: enough to tell a fixture that did not wait from a lost grant.
-			if t.Failed() {
-				t.Logf("records by pid %v; server %d, worker at activation %d, worker forked after %d\n%s",
-					by, server.PID, existing[0], forkedAfter[0], rendered(sealed))
-			}
-		})
-	}
-}
-
-// A stop with data queued: traffic is flowing when the stop arrives, the seal
-// says whether in-flight data was drained or accounted and why, and what the
-// account says was written is what the spool on disk holds.
-func TestAStopWithTrafficFlowingDrainsOrAccountsTheRemainderAndSaysWhich(t *testing.T) {
-	binary := built(t)
-	witness := t.TempDir()
-	_, flood := looping(t, serving(t), "F", witness, "flood")
-	c := configuring(t, target("flooding", flood))
-	observer := started(t, binary, c)
-	waitForSpool(t, observer.directory(c), 20)
-
-	out, err := exec.Command(binary, "stop", c.path).CombinedOutput()
-	if err != nil {
-		t.Fatalf("stop with traffic flowing: %v\n%s", err, out)
-	}
-	sealed := sealedAt(t, observer.directory(c))
-	if sealed.Seal == nil {
-		t.Fatalf("the account says nothing of its seal: %s", sealed.SealError)
-	}
-	drain := sealed.Seal.Drain
-	switch {
-	case !drain.Outstanding.Known:
-		t.Errorf("the seal does not know how much was outstanding: %s", drain.Outstanding.Why)
-	case drain.Outstanding.Value > 0 && drain.Because == "":
-		t.Errorf("%d were outstanding at the seal and the account does not say what became of them", drain.Outstanding.Value)
-	}
-	if !strings.Contains(string(out), "sealed complete") && !strings.Contains(string(out), "sealed INCOMPLETE") {
-		t.Errorf("the stop does not say how the session sealed:\n%s", out)
-	}
-	records := spooledRecords(t, filepath.Join(observer.directory(c), spool.Name))
-	if sealed.Spool == nil || int64(len(records)) != sealed.Spool.Written {
-		t.Errorf("the spool holds %d records and the account says %+v", len(records), sealed.Spool)
-	}
-}
-
-// Storage exhaustion: a spool driven past its bound drops whole records, counts
-// them and never overwrites. The files stay within the bound and hold exactly
-// what the account says was written; fullness is read from the files.
-func TestAFullSpoolDropsWholeRecordsCountsThemAndTheAccountNamesIt(t *testing.T) {
-	binary := built(t)
-	witness := t.TempDir()
-	_, flood := looping(t, serving(t), "F", witness, "flood")
-	c := configuring(t, target("flooding", flood))
-	observer := started(t, binary, c)
-	directory := observer.directory(c)
-
-	const limit = int64(1) << 20
-	held := func() int64 {
-		var total int64
-		for _, file := range []string{spool.Name, spool.ConnectionsName} {
-			if info, err := os.Stat(filepath.Join(directory, file)); err == nil {
-				total += info.Size()
-			}
-		}
-		return total
-	}
-	deadline := time.Now().Add(90 * time.Second)
-	for held() < limit-64*1024 {
-		if time.Now().After(deadline) {
-			t.Fatalf("wiring, not the property: the spool holds %d of %d bytes after ninety seconds of flooding, "+
-				"so the bound was never reached", held(), limit)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	time.Sleep(2 * time.Second)
-	sealed := ended(t, observer, c)
-
-	if sealed.Spool == nil || sealed.Spool.Limit != limit {
-		t.Fatalf("the account names the spool %+v, want its bound of %d bytes", sealed.Spool, limit)
-	}
-	if sealed.Spool.Dropped == 0 {
-		t.Errorf("the spool reached its bound under a flood and the account counts nothing dropped: %+v", sealed.Spool)
-	}
-	if on := held(); on > limit || sealed.Spool.Bytes > limit {
-		t.Errorf("the spool holds %d bytes on disk and says %d, past its bound of %d", on, sealed.Spool.Bytes, limit)
-	}
-	records := spooledRecords(t, filepath.Join(directory, spool.Name))
-	if int64(len(records)) != sealed.Spool.Written {
-		t.Errorf("the spool holds %d records and the account says %d were written", len(records), sealed.Spool.Written)
-	}
-	if text := rendered(sealed); !strings.Contains(text, fmt.Sprintf("%d dropped at the bound", sealed.Spool.Dropped)) {
-		t.Errorf("the rendered account does not name what was dropped at the bound:\n%s", text)
-	}
 }

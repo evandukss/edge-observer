@@ -13,10 +13,10 @@ written against these contract versions, and a row that reads a member of one of
 contract's version changes:
 
     observer.record/1-draft      the observation, connection, reconstruction and reassembly records
-    observer.account/1-draft     the account
+    observer.account/2-draft     the account
     observer.bundle/1-draft      the bundle
-    observer.policy/draft        the policy-declaration vocabulary
-    observer.config/draft        operator configuration
+    observer.config/1            the configuration
+    observer.pack/1              the pack
 
 ## What is graded
 

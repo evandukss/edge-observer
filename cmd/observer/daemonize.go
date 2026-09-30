@@ -27,7 +27,7 @@ const reportName = "OBSERVER_ACTIVATION_REPORT"
 // before anything starts. Restart-on-failure is a supervisor's job; under one,
 // run start in the foreground.
 func daemonize(path string, stdout io.Writer) error {
-	read, err := policy.Load(path)
+	read, err := loadProcessing(path)
 	if err != nil {
 		return err
 	}
@@ -106,7 +106,7 @@ func report(to *os.File, format string, arguments ...any) {
 // whose activation record names the session it follows and the gap. Under a
 // supervisor, restart through it: the gap is recorded either way.
 func restart(path string, stdout io.Writer) error {
-	read, err := policy.Load(path)
+	read, err := loadProcessing(path)
 	if err != nil {
 		return err
 	}

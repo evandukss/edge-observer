@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -108,7 +109,7 @@ func (a EBPF) Attach(request probe.Request, sink probe.Sink) (probe.Attachment, 
 	}
 
 	for _, one := range objects {
-		live, declined, err := a.place(one, sink)
+		live, declined, err := a.place(one, sink, request.DeliveryGate)
 		if err == nil {
 			for _, refused := range declined {
 				attached.refuse(refused.Selection.ObserverPID, refused.Err)
@@ -304,7 +305,7 @@ func observed(processes []process.Process, declined []ebpf.Declined) []int32 {
 
 // place attaches one library object's probes for its processes, and says
 // which of them the kernel was never given an authorisation for.
-func (a EBPF) place(one object, sink probe.Sink) (probe.Attachment, []ebpf.Declined, error) {
+func (a EBPF) place(one object, sink probe.Sink, gate *probe.DeliveryGate) (probe.Attachment, []ebpf.Declined, error) {
 	points, discarded := ebpf.PointsFrom(one.support.Probes, a.Adapter.Runtime)
 	if len(discarded) > 0 {
 		// The resolver found symbols no program was chosen for: the catalogue and the
@@ -345,6 +346,7 @@ func (a EBPF) place(one object, sink probe.Sink) (probe.Attachment, []ebpf.Decli
 		// unattached entry point are simply absent (package ebpf, Coverage).
 		capability: session.Coverage().Narrow(a.Capability()),
 		sink:       sink,
+		gate:       gate,
 		known:      make(map[int32]identity),
 		done:       make(chan struct{}),
 	}
@@ -511,9 +513,18 @@ type ebpfAttachment struct {
 	procfs     string
 	capability probe.Capability
 	sink       probe.Sink
+	gate       *probe.DeliveryGate
+	ungated    atomic.Int64
+
+	// unplaced is refused events whose place in the order the sink could not
+	// take (refused).
+	unplaced atomic.Int64
 
 	mutex sync.Mutex
 	known map[int32]identity
+
+	// gateRefused is events the gate refused, by its reason; under mutex.
+	gateRefused map[probe.GateReason]int64
 
 	closed sync.Once
 	done   chan struct{}
@@ -522,39 +533,72 @@ type ebpfAttachment struct {
 func (a *ebpfAttachment) deliver() {
 	defer close(a.done)
 	for event := range a.session.Events() {
-		who := a.identify(event)
-		switch event.Kind {
-		case ebpf.Closed:
-			a.sink.Closed(probe.Connection{
-				Process:  who.process,
-				Instance: who.instance,
-				Network:  a.networkOf(event.PID),
-				Stamp:    event.Stamp,
-				Endpoint: event.SSL,
-				At:       event.At,
-			})
-		case ebpf.Transfer:
-			a.sink.Transfer(probe.Transfer{
-				Process:    who.process,
-				Instance:   who.instance,
-				Network:    a.networkOf(event.PID),
-				Stamp:      event.Stamp,
-				Descriptor: event.Descriptor,
-				Binding:    event.Binding,
-				Bound:      event.Bound,
-				Socket:     event.Socket,
-				Ends:       event.Endpoints,
-				Outcome:    event.Outcome,
-				Endpoint:   event.SSL,
-				Direction:  event.Direction,
-				Length:     event.Length,
-				Payload:    event.Payload,
-				Early:      event.Early,
-				Measured:   event.Measured,
-				At:         event.At,
-			})
-		}
+		a.deliverEvent(event)
 	}
+}
+
+func (a *ebpfAttachment) deliverEvent(event ebpf.Event) {
+	// Reservation and kind classification precede identify: even a refused
+	// close on an unseen PID must neither read procfs nor grow the identity cache.
+	if a.gate != nil {
+		if decision := a.gate.Admit(probe.DeliveryKind(event.Kind), event.Measured); !decision.Admitted {
+			a.refused(event, decision.State.Reason)
+			return
+		}
+	} else {
+		a.ungated.Add(1)
+	}
+	who := a.identify(event)
+	switch event.Kind {
+	case ebpf.Closed:
+		a.sink.Closed(probe.Connection{
+			Process:  who.process,
+			Instance: who.instance,
+			Network:  a.networkOf(event.PID),
+			Stamp:    event.Stamp,
+			Endpoint: event.SSL,
+			At:       event.At,
+		})
+	case ebpf.Transfer:
+		a.sink.Transfer(probe.Transfer{
+			Process:    who.process,
+			Instance:   who.instance,
+			Network:    a.networkOf(event.PID),
+			Stamp:      event.Stamp,
+			Descriptor: event.Descriptor,
+			Binding:    event.Binding,
+			Bound:      event.Bound,
+			Socket:     event.Socket,
+			Ends:       event.Endpoints,
+			Outcome:    event.Outcome,
+			Endpoint:   event.SSL,
+			Direction:  event.Direction,
+			Length:     event.Length,
+			Payload:    event.Payload,
+			Early:      event.Early,
+			Measured:   event.Measured,
+			At:         event.At,
+		})
+	}
+}
+
+// refused accounts for an event the gate refused: counted under its reason, and
+// its place in the production order handed to capture, so the refusal is not
+// read as a loss. The hand-off fails open: a sink without it installs nothing
+// and the refusal is again counted as lost, so every refusal it could not
+// place is counted under probe.RefusalUnplaced, which is what catches that.
+func (a *ebpfAttachment) refused(event ebpf.Event, reason probe.GateReason) {
+	a.mutex.Lock()
+	if a.gateRefused == nil {
+		a.gateRefused = make(map[probe.GateReason]int64)
+	}
+	a.gateRefused[reason]++
+	a.mutex.Unlock()
+	if placing, can := a.sink.(interface{ Refused(uint64, time.Time) }); can {
+		placing.Refused(event.Stamp, event.At)
+		return
+	}
+	a.unplaced.Add(1)
 }
 
 // identity is who an event came from: the process a fragment is attributed to,
@@ -736,20 +780,34 @@ func (a *ebpfAttachment) Losses() (probe.Losses, error) {
 		return probe.Losses{}, err
 	}
 	return probe.Losses{
-		Dropped: dropped, Unmatched: unmatched, Descendants: descendants, When: when,
+		Dropped: dropped, Unmatched: unmatched, UnderWay: a.session.UnderWay(), Descendants: descendants, When: when,
 	}, nil
 }
 
-// Refusals is what this attachment's program refused, by reason, read from its
-// counters. An unreadable counter fails the call.
+// Refusals reports kernel counters and the delivery loop's ungated-event
+// diagnostic. As with the socket success counter, that diagnostic is a path
+// witnessed, not a loss. An unreadable kernel counter fails the call.
 func (a *ebpfAttachment) Refusals() (map[string]int64, error) {
-	refused, err := a.session.Refusals()
+	return a.refusals(a.session.Refusals)
+}
+
+func (a *ebpfAttachment) refusals(read func() (ebpf.Refusals, error)) (map[string]int64, error) {
+	refused, err := read()
 	if err != nil {
 		return nil, err
 	}
-	counted := make(map[string]int64, len(refused.Counted))
+	counted := make(map[string]int64, len(refused.Counted)+1)
 	for reason, value := range refused.Counted {
 		counted[string(reason)] = value
 	}
+	counted[probe.DeliveryWithoutGate] = a.ungated.Load()
+	a.mutex.Lock()
+	for _, reason := range probe.GateReasons() {
+		if reason.InvalidatesCapture() {
+			counted[probe.GateRefusal(reason)] = a.gateRefused[reason]
+		}
+	}
+	a.mutex.Unlock()
+	counted[probe.RefusalUnplaced] = a.unplaced.Load()
 	return counted, nil
 }

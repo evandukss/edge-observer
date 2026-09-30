@@ -1,13 +1,14 @@
 # Observer account contract
 
-Versions: account `observer.account/1-draft`, bundle `observer.bundle/1-draft`. **DRAFT and not frozen.**
+Versions: account `observer.account/2-draft`, bundle `observer.bundle/1-draft`. **DRAFT and not frozen.**
+The validator refuses an account at the earlier draft, `observer.account/1-draft`, by name.
 No machine-readable schema is published; example JSON files show the document shapes, and the tool's
 Go validators enforce the contracts. This document is the contract and the Go types in this directory
 encode it. Where the two disagree this document is corrected first.
 
 The account is what the observer says about ONE capture session: what was asked for and what it resolved
 to, what was attached, what came through, what was lost, what could not be established, what processing
-did, which requirements the core enforces and which it does not, and how the session ended. The records it
+did, and how the session ended. The records it
 describes are the record contracts (`contract/record/record.md`). The bundle is a sealed account
 and those records, copied together so they can be validated and inspected away from the host that wrote
 them.
@@ -18,11 +19,11 @@ It is domain-neutral. Nothing here names a business operation or a privacy rule.
 
 | Name here | What it is | Where | Version |
 |---|---|---|---|
-| **operational account** | the observer's own account of a session at three moments - planned, live, sealed - built by one set of functions and sealed beside the session's spool | `account`, `Account` | `Version` = 1 |
-| **account** | this contract: the published form of a SEALED operational account, with the records it describes carried beside it in a bundle | `contract/account` | `observer.account/1-draft` |
+| **operational account** | the observer's own account of a session at three moments - planned, live, sealed - built by one set of functions and sealed beside approved output for new sessions or a raw spool for legacy sessions | `account`, `Account` | `Version` = 1 |
+| **account** | this contract: the published form of a SEALED operational account, with the records it describes carried beside it in a bundle | `contract/account` | `observer.account/2-draft` |
 
 **The relation is one-way and versioned on the operational account's number.** An account at
-`observer.account/1-draft` is PROJECTED from an operational account of version 1 and nothing else; a
+`observer.account/2-draft` is PROJECTED from an operational account of version 1 and nothing else; a
 projection that is handed any other version refuses. Wherever this contract says account it means the
 second row.
 
@@ -69,7 +70,7 @@ Which states each moment permits:
 | `provenance`, `scope` | carried | carried | carried |
 | `capture` | not_reached | carried, unavailable | carried, unavailable |
 | `reconstruction` | not_reached | carried, unavailable, not_carried | carried, unavailable, not_carried |
-| `processing`, `requirements` | any but not_reached | any but not_reached | any but not_reached |
+| `processing` | any but not_reached | any but not_reached | any but not_reached |
 | `seal` | not_reached | not_reached | carried, unavailable |
 
 A state a moment does not permit is refused with `block_state_not_permitted`.
@@ -91,7 +92,7 @@ permits at `live` and `sealed`. Nothing further is owed for that direction.
 
 ## The account
 
-    account         "observer.account/1-draft"
+    account         "observer.account/2-draft"
     session         the session id
     moment          planned | live | sealed
     at              instant: wall, observer_wall_read - when the account was taken
@@ -100,18 +101,18 @@ permits at `live` and `sealed`. Nothing further is owed for that direction.
     capture         block
     reconstruction  block
     processing      block
-    requirements    block
     seal            block
     extensions      object, possibly empty
 
 ### Required blocks
+
+Tests parse this section: preserve this heading and list order, with one block name per line indented four spaces, using only lowercase letters, underscores and dots; keep prose outside the list.
 
 The dotted path of every block, and each is required wherever its parent block is `carried`:
 
     provenance
     provenance.observer
     provenance.configuration
-    provenance.pipelines
     scope
     scope.requested
     scope.instances
@@ -123,20 +124,20 @@ The dotted path of every block, and each is required wherever its parent block i
     capture.capability
     capture.seen
     capture.loss
+    capture.loss.under_way
     capture.admitted
     capture.ordering
     capture.refused
     capture.spool
     reconstruction
     processing
-    requirements
     seal
     seal.recorded
 
 Beside the blocks, every other member named below is required where its block is `carried`, and one that is
 absent is refused with `required_member_absent`; the only optional members are a block's `why` - required when
 it is `unavailable` - and the reasons that exist only for some values: a placed process's `reason`, a probe's
-`through` and `refusal`, an admission's `why`, an instance coverage's `why`, a cgroup's `why`, a withheld claim's `reason`, a declaration's `limitation`, an accepted requirement's `sink`, and a withdrawal's and a drain's
+`through` and `refusal`, an admission's `why`, an instance coverage's `why`, a cgroup's `why`, a withheld claim's `reason`, and a withdrawal's and a drain's
 `because`. A list is `[]`, and `null` is
 absent. A count is a decimal string, and a value outside its vocabulary, or a count that is not decimal, is
 `value_not_in_contract`. A member the contract does not name, anywhere outside an extension's `content`, is
@@ -150,7 +151,6 @@ refused with `member_not_in_contract`.
 | `observer` | block: the capability facts of the BUILD (below) and `floor` `{published, proved, established, would_establish}` - claims about the build and not about this session |
 | `contracts[]` | the contract versions this account and its records are written at |
 | `configuration` | block: `references[]` `{document, revision, generation}` - the configuration the session ran under BY REFERENCE: its content revision and the generation the session activated. **Never its content and never a credential** |
-| `pipelines` | block: `pipelines[]` `{name, input, declared_by, slots[] {slot, implementation, version, selected_by}, sinks[]}` - the effective pipelines as the configuration check resolved them, with the version of each implementation |
 
 ### scope
 
@@ -158,7 +158,7 @@ What was asked for, what it resolved to, and what the session's coverage turned 
 
 | Member | Meaning |
 |---|---|
-| `requested` | block: `controls[]`, one per control - `observation_scope`, `traffic_scope`, `retention_and_export` - each its own block `{state, control, document, revision, member}`. Three separate controls, never one expressed through another. A control this producer does not read is `not_carried`, which is not a control that was empty |
+| `requested` | block: `controls[]`, one per control - `watch`, `ignore`, `write_content`, the configuration's keys (contract/config/CONFIG.md) - each its own block `{state, control, document, revision, member}`. Separate controls, never one expressed through another. A control this producer does not read is `not_carried`, which is not a control that was empty |
 | `targets[]` | `{number, name, mode, descendants, resolution, roots[], existing_descendants[], denied[], unsupported[], cgroups[], listeners[]}`. `descendants` is the five answers `{existing, future, boundary, root_exit, replacement}`. `resolution` is a block: `carried` where the target resolved, `unavailable` with `why` where it did not - an unresolved target selected nothing because nothing could be resolved, which is not a target that matched nothing. `cgroups[]` holds `{path, inode, why}` for a cgroup target as it was when resolved, `listeners[]` `{address, owners[]}` for a port target; each is empty for a target that selects another way |
 | `exclusions[]` | `{number, roots[], denied[]}` |
 | `overlap` | block: `instances[]` `{instance, targets[]}` - every instance more than one target selected |
@@ -169,10 +169,13 @@ What was asked for, what it resolved to, and what the session's coverage turned 
 | `limits[]` | what this scope's coverage does not reach, one sentence each |
 
 An `instance` is `{pid, pid_namespace, namespace_pid, birth, executable}`: the pid in the observer's own pid
-namespace, the process's pid namespace read at resolution, its number there, its start identity and its
+namespace, the process's pid namespace, its number there, its start identity and its
 executable. Never its arguments. A determined pid namespace says what established it: `resolution_proc_read`
-for one read from `/proc` when the policy was resolved, `admission_event` for a descendant whose admission the
-kernel reported. **Approval is checked before plaintext is copied**; the scope is where a reader learns which
+for one read from `/proc` when the policy was resolved, which includes the descendants it listed as already
+running; `attach_proc_read` for a descendant found running when probes were placed and read by the walk that
+admitted it; `admission_event` for a descendant the kernel admitted at a fork, whose namespace its events carry.
+Being inherited does not decide which. An admission whose operational account does not say leaves it unnamed.
+**Approval is checked before plaintext is copied**; the scope is where a reader learns which
 instances were eligible to be read, and nothing a later filter did narrows it.
 
 #### Per-instance coverage
@@ -221,7 +224,8 @@ Every member is its own block, so one that could not be read is not read as the 
 |---|---|
 | `capability` | the capability facts of the ATTACHMENT, and `sentence`, the observer's own sentence saying what it can report |
 | `seen` | `transfers`, `unmeasured`, `empty`, `records`, `connections`, `closed`, `early`, and what capture could not place: `rejected`, `unattributed`, `endings_unmatched`, `connections_unrecorded` |
-| `loss` | `dropped`, `unmatched`, `occasion` `{first, last, handle, pid, tid}`: the first and last unmatched return on the monotonic clock, and the first one's handle, process and thread, each undetermined where no occasion was stated. Losses only |
+| `loss` | `dropped`, `unmatched`, `occasion` `{first, last, handle, pid, tid}`: the first and last unmatched return on the monotonic clock, and the first one's handle, process and thread, each undetermined where no occasion was stated; and `under_way`. Losses only |
+| `loss.under_way` | calls that began before the probes were placed, which nothing in the kernel sees: no entry is recorded and their return fires nothing. The approved processes' threads are read before placement and after. `threads` is those blocked inside the same socket system call on the same descriptor in both readings and switched out no further, so the call each is inside began before the probes; it counts socket I/O, not TLS calls. `undetermined` is those that ran meanwhile, whose loss is not known and is never read as none. `first` `{pid, tid, fd, call}` names the first of `threads`, each undetermined where there is none. `unavailable` where a thread could not be read |
 | `admitted` | `descendants`. Not a loss |
 | `ordering` | `disordered`, `unstamped`, `tolerated`, `lost`, `retired`, `unexplained`. Never folded into `loss`: a session that could not order its observations has not lost them |
 | `refused` | `reasons` `{reason: count}` |
@@ -248,16 +252,23 @@ are to find.
 accounted, not silent**: a record a predicate removed is counted under the component and reason that removed
 it.
 
-### requirements
-
-The dispositions `contract/policy` decides, kept in three lists so the core's guarantee and an
-extension's claim are never in one:
-
-| Member | What | Disposition |
-|---|---|---|
-| `core_enforced[]` | `{declaration, operation, enforcement_point, covers, does_not_cover, sink, pipelines[]}` - the scope the vocabulary's acceptance names. `sink` `{kind, leaves_host, retains_plaintext}` is present exactly where the acceptance targets a sink or dispatches through one, and absent otherwise | `accept` |
-| `extension_declared[]` | `{declaration, declared_by, disposition, reason, limitation, pipelines[]}` - operator-approved and NOT core-enforced, with the claim's statement under the trusted label in `limitation` | `allow_trusted` |
-| `refused[]` | the same shape, without `limitation` | `refuse_activation`, `refuse_assurance` |
+An optional `aggregate` carries session totals when per-pipeline attribution was not measured:
+`{gate_reason, processing_failures, output_failures, authorized, written}`.
+The four counts are decimal strings. `authorized` and `written` count route records separately;
+permission does not assert write completion or durable flush. For each batch's processing refusals,
+`processing_failures` counts each affected durable route once: every route for a batch refusal, or
+the affected pipeline's routes for a pipeline refusal. This is not a count of unique routes, batches or exchanges; a route can write a useful
+prefix and also count a refused suffix. `output_failures` counts failed approved writes. An internal
+artifact-serialization defect instead terminates processing and names the binary defect in the seal
+reason; it does not increment either counter. Neither counter is policy suppression or capture loss,
+which retain their own dispositions and readings. `gate_reason` is empty when the gate has no
+invalidation reason; otherwise it is one of the reasons `probe.GateReasons` classifies as invalidating
+the capture - `input_limit`, `storage_exhausted`, `intake_exhausted`, `unknown_length` and
+`unknown_kind` - and each remains distinguishable. `intake_exhausted` is the volatile intake refusing a
+record: capture's input is then incomplete, and nothing still pending is released.
+When only this aggregate is supplied, `pipelines` is empty because attribution was not supplied;
+that is not a per-pipeline zero. Aggregate counts must never be copied onto a synthetic pipeline
+or onto every pipeline. The aggregate adds no intake, writer-capacity or cleanup diagnostics.
 
 ### seal
 
@@ -299,7 +310,7 @@ A directory. Its root holds `bundle.json`:
 
 | `role` | `contract` | File |
 |---|---|---|
-| `account` | `observer.account/1-draft` | one account, JSON |
+| `account` | `observer.account/2-draft` | one account, JSON |
 | `observations` | `observer.record/1-draft` | JSON Lines, one `observation` per line |
 | `connections` | `observer.record/1-draft` | JSON Lines, one `connection` per line |
 | `reconstructions` | `observer.record/1-draft` | JSON Lines, one `reconstruction` per line |
@@ -447,7 +458,7 @@ scheme**; it refuses the reference forms described above that would reach outsid
 `Project` writes an operational account in this contract. It refuses (`ErrUnrepresentable`) an operational
 account at any version but 1, and a live or sealed one missing its capability, seen, loss, admitted or refused
 block. What the operational account at version 1 does not hold is written `not_carried` and never filled: the
-traffic-scope and retention controls, the traffic filters, the pipelines, processing and requirements. Where
+`write_content` control, the traffic filters and processing. Where
 it could not read a block it says why, and the block is `unavailable` with that reason.
 
 The operational account does not hold the reconstruction either, and what `Project` writes for it is what its
@@ -471,21 +482,17 @@ A field added to the operational account is unlisted until somebody says where i
 
 ## Agreement across the contracts
 
-`CheckAgreement` reads a conformance tree - `bundle/`, `configuration.json`, `runtime.json`, and
+`CheckAgreement` reads a conformance tree - `bundle/`, `configuration.json`, and
 `acceptance/ACCEPTANCE.md`, `acceptance/ROWS.md` and `acceptance/QUESTIONS.md` - and checks that the contracts
 line up across it. Every member is read from INSIDE the tree it is given, so the tree is self-contained: the
-three acceptance documents in it are copies of those in `contract/acceptance/`. `runtime.json` is what the
-runtime has, in the form the configuration contract reads it (`contract/config/CONFIG.md`), such as
-`contract/config/examples/runtime.json`.
+three acceptance documents in it are copies of those in `contract/acceptance/`.
 
 | Check | Refused with |
 |---|---|
 | the bundle validates | `bundle_not_validated` |
 | the account references the configuration beside it as `configuration` at `sha256:` of its bytes | `configuration_not_referenced` |
 | every contract version the account names is one in use, the account names the account and record versions its bundle is written at, and the configuration is at the configuration version | `version_disagrees` |
-| the configuration check accepts `configuration.json` against `runtime.json` with no pack manifests: no structural finding and no composition finding. Each of its findings is carried with its own reason in the detail, and nothing below that reads what the check resolves is compared against a configuration it refused | `configuration_refused` |
-| the account's `provenance.pipelines` is `carried` and holds exactly the effective pipelines the configuration check resolves, in their order. For each: `name`, `input`, `declared_by` and `sinks` are equal, and `slots` are equal in order, with `slot`, `implementation` and `selected_by` those of the resolved slot and `version` the version of the component declaration that implementation names among the runtime's builtins. A resolved pipeline the account does not list and a listed pipeline that was not resolved are each a finding | `pipelines_disagree` |
-| the configuration's policy is decided against the policy inventory the configuration check RESOLVES from `runtime.json`, never against an inventory supplied beside it; every requirement the account lists has the disposition, reason, scope, pipelines and limitation decided for it, in the list that disposition belongs to, and no decided declaration is missing. An accepted requirement's `sink` is present exactly where the decided scope names a sink, with `kind`, `leaves_host` and `retains_plaintext` equal to it | `enforcement_claim_disagrees` |
+| the configuration reader (`contract/config/CONFIG.md`) accepts `configuration.json` with no packs supplied, as the observer reads it. Each of its findings is carried with its key and its own reason in the detail | `configuration_refused` |
 | every connection an observation or a reconstruction names is a connection record in the bundle | `record_reference_unresolved` |
 | every evidence reference the acceptance documents write resolves as described below | `acceptance_reference_unresolved` |
 
@@ -524,6 +531,5 @@ neither.
 ## What this contract does not carry
 
 - The records themselves - the record contracts'.
-- Why a declaration has its disposition beyond the policy vocabulary's own reason - `contract/policy`.
 - The configuration's content: only references to it.
 - Any argument of any process.

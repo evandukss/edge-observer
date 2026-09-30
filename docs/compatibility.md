@@ -22,6 +22,9 @@ to fail.
                        6.17.0-1022-azure (x86-64)                        observed
     TLS library        OpenSSL 3.x, loaded as a shared library           declared
                        OpenSSL 3.5                                       observed
+    execution envelope a cgroup of its own, a memory domain with a       declared
+                       finite memory.max and no swap, every watched
+                       process outside it
     protocol           HTTP/1.1, with JSON bodies described by shape     reconstructed
                        anything else                                     captured, not reconstructed
 
@@ -29,10 +32,12 @@ to fail.
 
     observer preflight <configuration> [--text]
 
-It judges each requirement below against the host, and the TLS library of every process the
-configuration selects. It answers READY only when every requirement is met, NOT READY naming each one
-missing, or INDETERMINATE when nothing is missing and something could not be read. A requirement it
-cannot establish never counts as met, and it exits 0 only on READY. It attaches nothing.
+It judges each requirement below against the host, the TLS library of every process the configuration
+selects, and the envelope it is itself running in, with the check `start` makes before it activates.
+Run it the way `start` will be run (README, "Check the host"). It answers READY only when every
+requirement is met, NOT READY naming each one missing, or INDETERMINATE when nothing is missing and
+something could not be read. A requirement it cannot establish never counts as met, and it exits 0 only
+on READY. It attaches nothing.
 
 ## Kernel
 
@@ -99,8 +104,9 @@ Attaching needs root, or these capabilities:
 
     CAP_BPF  CAP_PERFMON  CAP_SYS_ADMIN  CAP_SYS_PTRACE  CAP_SYS_RESOURCE  CAP_DAC_READ_SEARCH
 
-They are needed to load the programs and place the probes. The observer drops every capability once
-the probes are placed.
+They are needed to load the programs and place the probes, and `CAP_SYS_PTRACE` to read the approved
+processes' threads before and after placement, which is how a call already under way when the probes
+are placed is counted. The observer drops every capability once the probes are placed.
 
 **In a container**, whether the observer needs the host's pid namespace is not established. Its tests
 need it: in one run without it, 27 of their 182 failed. Two of those failures name a cause, the tests
@@ -139,8 +145,8 @@ its size. A JSON body is also described by its shape - field names, nesting and 
 body that is not JSON is reported without a shape, with the reason. The parser is strict: where two
 endpoints could read a message differently, it refuses the message and says why rather than choosing.
 
-**There is no parser for any other protocol, HTTP/2 included.** Such traffic is still captured into the
-spool, and is not reconstructed.
+**There is no parser for any other protocol, HTTP/2 included.** Such traffic can enter the bounded
+volatile intake; the intake does not parse it or make it eligible for durable output.
 
 Reconstruction runs when a finished session is read back with `observer inspect`, never while it is
 capturing.

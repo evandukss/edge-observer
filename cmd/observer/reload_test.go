@@ -14,46 +14,30 @@ import (
 	"time"
 
 	"github.com/evandukss/edge-observer/account"
+	protected "github.com/evandukss/edge-observer/activation"
 	"github.com/evandukss/edge-observer/admission"
 	"github.com/evandukss/edge-observer/policy"
 	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/process"
 )
 
-// The descendant answers a target states, one per admission mode.
+// Three watch entries, one per children answer.
 const (
-	fixedAnswers = `"boundary": "exec_ends_the_grant", "root_exit": "survivors_keep_their_grants", "replacement": "needs_restart"`
-	follow       = `{"existing": true, "future": true, ` + fixedAnswers + `}`
-	existing     = `{"existing": true, "future": false, ` + fixedAnswers + `}`
-	none         = `{"existing": false, "future": false, ` + fixedAnswers + `}`
-
-	gatewayTarget = `{"name": "gateway", "match": {"exe": "/usr/bin/php", "args": ["/srv/gateway/main.php"]}, "descendants": ` + follow + `}`
-	workerTarget  = `{"name": "worker", "match": {"cgroup": "/system.slice/worker.service"}, "descendants": ` + existing + `}`
-	batchTarget   = `{"name": "batch", "match": {"exe": "/usr/bin/batch"}, "descendants": ` + none + `}`
+	gatewayTarget = `{"name": "gateway", "exe": "/usr/bin/php", "args": ["/srv/gateway/main.php"], "children": "all"}`
+	workerTarget  = `{"name": "worker", "cgroup": "/system.slice/worker.service", "children": "existing"}`
+	batchTarget   = `{"name": "batch", "exe": "/usr/bin/batch", "children": "none"}`
 )
 
 // inForce is the policy a running session holds; each case changes one thing.
 const inForce = `{
-  "version": "observer.config/draft",
-  "observer": {"log": "/var/log/observer/observer.log", "directory": "/var/lib/observer"},
-  "observation_scope": {
-    "targets": [
+  "version": "observer.config/1",
+  "output": "/var/lib/observer", "log": "/var/log/observer/observer.log",
+  "watch": [
       ` + gatewayTarget + `,
       ` + workerTarget + `
-    ],
-    "exclude": [{"exe": "/usr/bin/curl"}],
-    "libraries": []
-  },
-  "traffic_scope": {"rules": [{"targets": [], "direction": "any", "local_ports": [], "remote_ports": []}]},
-  "retention_and_export": {"retain_plaintext": true, "export_sinks": []},
-  "packs": [],
-  "sinks": [{"name": "account", "kind": "local_account"}],
-  "pipelines": [
-    {"name": "exchanges", "input": "reconstruction", "slots": [], "sinks": ["account"], "queues": []},
-    {"name": "connections", "input": "connection", "slots": [], "sinks": ["account"], "queues": []}
   ],
-  "subscribers": [],
-  "policy": []
+  "ignore": [{"exe": "/usr/bin/curl"}],
+  "libraries": []
 }`
 
 func loaded(t *testing.T, content string) policy.Policy {
@@ -62,7 +46,7 @@ func loaded(t *testing.T, content string) policy.Policy {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
-	read, err := policy.Load(path)
+	read, err := loadProcessing(path)
 	if err != nil {
 		t.Fatalf("load the policy: %v", err)
 	}
@@ -88,8 +72,8 @@ func TestAReloadThatOnlyAddsIsAdditiveAndNamesWhatItAdds(t *testing.T) {
 	}
 
 	added, refused = additive(current, replaced(t,
-		`"exclude"`,
-		`"exclude"`)) // the same file again, through the helper, as the control for the helper
+		`"ignore"`,
+		`"ignore"`)) // the same file again, through the helper, as the control for the helper
 	if refused != "" || len(added) != 0 {
 		t.Errorf("the helper changed the policy: refused %q, added %v", refused, added)
 	}
@@ -119,13 +103,13 @@ func TestAReloadThatTakesAnythingAwayIsRefusedWithItsReason(t *testing.T) {
 			`"args": ["/srv/gateway/main.php"]`, `"args": ["/srv/gateway/main.php", "--only"]`,
 			"changes target gateway"},
 		"a target's mode narrowed": {
-			`"args": ["/srv/gateway/main.php"]}, "descendants": ` + follow, `"args": ["/srv/gateway/main.php"]}, "descendants": ` + none,
+			`"args": ["/srv/gateway/main.php"], "children": "all"`, `"args": ["/srv/gateway/main.php"], "children": "none"`,
 			"changes target gateway"},
 		"an exclusion added": {
 			`[{"exe": "/usr/bin/curl"}]`, `[{"exe": "/usr/bin/curl"}, {"exe": "/usr/bin/wget"}]`,
 			"adds an exclusion"},
 		"an exclusion removed": {
-			`"exclude": [{"exe": "/usr/bin/curl"}]`, `"exclude": []`,
+			`"ignore": [{"exe": "/usr/bin/curl"}]`, `"ignore": []`,
 			"removes an exclusion"},
 		"where it writes": {
 			`/var/log/observer/observer.log`, `/var/log/observer/elsewhere.log`,
@@ -332,12 +316,13 @@ func reloading(t *testing.T, pid int32) (*daemon, *admitting, reloadRequest) {
 
 	directory := t.TempDir()
 	document := func(targets ...string) string {
-		observer, err := json.Marshal(map[string]any{"log": "stdout", "directory": directory})
+		output, err := json.Marshal(directory)
 		if err != nil {
 			t.Fatalf("encode the configuration: %v", err)
 		}
 		written := strings.Replace(strings.Replace(inForce,
-			`{"log": "/var/log/observer/observer.log", "directory": "/var/lib/observer"}`, string(observer), 1),
+			`"output": "/var/lib/observer", "log": "/var/log/observer/observer.log"`,
+			`"output": `+string(output)+`, "log": "stdout"`, 1),
 			gatewayTarget+`,
       `+workerTarget, strings.Join(targets, ", "), 1)
 		if strings.Contains(written, "gateway") || !strings.Contains(written, directory) {
@@ -345,25 +330,48 @@ func reloading(t *testing.T, pid int32) (*daemon, *admitting, reloadRequest) {
 		}
 		return written
 	}
-	kept := `{"name": "kept", "match": {"exe": "/usr/bin/nonexistent-kept"}, "descendants": ` + none + `}`
-	match, err := json.Marshal(map[string]any{"exe": child.Executable, "args": child.Arguments[1:]})
+	kept := `{"name": "kept", "exe": "/usr/bin/nonexistent-kept", "children": "none"}`
+	entry, err := json.Marshal(map[string]any{"name": "added", "exe": child.Executable, "args": child.Arguments[1:],
+		"children": "none"})
 	if err != nil {
 		t.Fatalf("encode the added target: %v", err)
 	}
-	added := `{"name": "added", "match": ` + string(match) + `, "descendants": ` + none + `}`
+	added := string(entry)
 	current := loaded(t, document(kept))
 	path := filepath.Join(t.TempDir(), "observer.json")
 	if err := os.WriteFile(path, []byte(document(kept, added)), 0o600); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
-	candidate, err := policy.Load(path)
+	candidate, err := loadProcessing(path)
 	if err != nil {
 		t.Fatalf("load the candidate: %v", err)
+	}
+	// The reload must retain the active object even though compiling the
+	// observation-only candidate creates a different object for the same
+	// processing generation. Prove both facts before testing retention.
+	if current.Processing == nil || candidate.Processing == nil || candidate.Processing == current.Processing {
+		t.Fatal("reload fixture did not produce distinct non-nil active and candidate plans")
+	}
+	if current.ProcessingRevision == "" || candidate.ProcessingRevision != current.ProcessingRevision {
+		t.Fatal("reload fixture changed the processing generation instead of observation alone")
 	}
 
 	attached := &admitting{}
 	d := &daemon{policy: current, session: "0123456789abcdef", path: path, attached: attached,
 		plan: account.Account{Policy: account.Policy{Revision: current.Revision, Generation: 1}}}
+	d.gate, err = probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: uint64(current.Settings.AdmittedEventLimit)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// These cases test exec identity around grant writes, using a stand-in
+	// attachment. Isolate that subject from the separately tested kernel
+	// posture boundary; production begin installs protected.VerifyActive.
+	d.verifyParticipants = func(gate *probe.DeliveryGate, participants []process.Process) (protected.Posture, error) {
+		if gate != d.gate || len(participants) == 0 {
+			t.Fatal("reload did not pass its live gate and added participant set")
+		}
+		return protected.Posture{}, nil
+	}
 	request := reloadRequest{
 		Revision:   candidate.Revision,
 		Resolution: candidate.Approval.Resolve(process.Host{Table: process.TableOf(child)}),
@@ -412,11 +420,15 @@ func TestAReloadWritesAGrantOnlyForAProcessStillRunningWhatTheCommandRead(t *tes
 	t.Run("a process that did nothing is admitted and nothing is taken back", func(t *testing.T) {
 		pid, _ := execing(t)
 		d, attached, request := reloading(t, pid)
+		activePlan := d.policy.Processing
 		record := d.reload(time.Now(), encode(t, request))
 		if record.Outcome != "activated" || record.Admitted != 1 || len(attached.admitted) != 1 ||
 			len(attached.retracted) != 0 {
 			t.Errorf("the reload answered %+v, wrote %v and took back %v, want pid %d admitted once and "+
 				"nothing taken back", record, attached.admitted, attached.retracted, pid)
+		}
+		if d.policy.Processing != activePlan {
+			t.Fatal("additive reload replaced the active immutable processing plan")
 		}
 		bounded(t, record)
 	})

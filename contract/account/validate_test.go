@@ -31,13 +31,25 @@ func requiredBlocks(t *testing.T) []string {
 	return blocks
 }
 
+// requiredBlockPaths is the dotted path of every required block: required wherever
+// its parent is Carried, and refused if absent.
+var requiredBlockPaths = []string{
+	"provenance", "provenance.observer", "provenance.configuration",
+	"scope", "scope.requested", "scope.instances", "scope.overlap", "scope.placement", "scope.coverage",
+	"scope.filters",
+	"capture", "capture.capability", "capture.seen", "capture.loss", "capture.loss.under_way", "capture.admitted",
+	"capture.ordering",
+	"capture.refused", "capture.spool",
+	"reconstruction", "processing", "seal", "seal.recorded",
+}
+
 func TestTheDocumentAndThePackageNameTheSameRequiredBlocks(t *testing.T) {
 	documented := requiredBlocks(t)
 	if len(documented) < 20 {
 		t.Fatalf("wiring, not the property: ACCOUNT.md lists %d required blocks", len(documented))
 	}
-	if !slices.Equal(documented, RequiredBlocks) {
-		t.Fatalf("ACCOUNT.md requires %v and the package %v", documented, RequiredBlocks)
+	if !slices.Equal(documented, requiredBlockPaths) {
+		t.Fatalf("ACCOUNT.md requires %v and the package %v", documented, requiredBlockPaths)
 	}
 }
 
@@ -91,7 +103,7 @@ func TestTheContractSurfacesAreClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	contracts := filepath.Dir(here)
-	surfaces := []string{"account", "config", "policy", "record"}
+	surfaces := []string{"account", "config", "record"}
 	for _, surface := range surfaces {
 		if _, err := os.Stat(filepath.Join(contracts, surface)); err != nil {
 			t.Fatalf("wiring, not the property: the %s surface is not beside this one: %v", surface, err)
@@ -99,7 +111,7 @@ func TestTheContractSurfacesAreClosed(t *testing.T) {
 	}
 
 	closure := CheckClosure(os.DirFS(contracts))
-	if closure.Files < 30 {
+	if closure.Files < 15 {
 		t.Fatalf("wiring, not the property: the closure check read %d contract files", closure.Files)
 	}
 	if closure.Outcome != Closed {
@@ -115,7 +127,7 @@ func TestTheContractSurfacesAreClosed(t *testing.T) {
 		t.Fatalf("the copied surfaces came back %+v against %+v", moved, closure)
 	}
 
-	planted := filepath.Join(copied, "policy", "VOCABULARY.md")
+	planted := filepath.Join(copied, "config", "CONFIG.md")
 	content, err := os.ReadFile(planted)
 	if err != nil {
 		t.Fatal(err)
@@ -125,5 +137,27 @@ func TestTheContractSurfacesAreClosed(t *testing.T) {
 	}
 	if reached := CheckClosure(os.DirFS(copied)); reached.Outcome != NotClosed {
 		t.Fatalf("a reference planted outside the surfaces came back %+v", reached)
+	}
+}
+
+// The earlier draft is refused by the version it names, beside the example
+// account at this draft, which reads.
+func TestAnAccountAtTheEarlierDraftIsRefusedByName(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join(up, "examples", "bundle", "account.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, findings, _ := readAccount("account.json", content); len(findings) != 0 {
+		t.Fatalf("wiring, not the property: the example account at %s is refused: %+v", Version, findings)
+	}
+	earlier := strings.Replace(string(content), `"account": "`+Version+`"`, `"account": "observer.account/1-draft"`, 1)
+	if earlier == string(content) {
+		t.Fatal("wiring, not the property: the example account names no version to replace")
+	}
+	_, findings, _ := readAccount("account.json", []byte(earlier))
+	if len(findings) != 1 || findings[0].Reason != UnknownAccountVersion ||
+		!strings.Contains(findings[0].Detail, "observer.account/1-draft") {
+		t.Fatalf("an account at the earlier draft was refused with %+v, want %s naming observer.account/1-draft",
+			findings, UnknownAccountVersion)
 	}
 }

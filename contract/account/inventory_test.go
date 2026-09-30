@@ -81,6 +81,15 @@ var represented = map[string]string{
 	".admitted.known": "capture.admitted.state", ".admitted.why": "capture.admitted.why",
 	".admitted.descendants": "capture.admitted.descendants",
 
+	".loss.under_way.known":        "capture.loss.under_way.state",
+	".loss.under_way.why":          "capture.loss.under_way.why",
+	".loss.under_way.threads":      "capture.loss.under_way.threads",
+	".loss.under_way.undetermined": "capture.loss.under_way.undetermined",
+	".loss.under_way.first.pid":    "capture.loss.under_way.first.pid.value",
+	".loss.under_way.first.tid":    "capture.loss.under_way.first.tid.value",
+	".loss.under_way.first.fd":     "capture.loss.under_way.first.fd.value",
+	".loss.under_way.first.call":   "capture.loss.under_way.first.call.value",
+
 	".admissions.rule": "scope.coverage.rule", ".admissions.covered": "scope.coverage.covered",
 	".admissions.by_target[].target":  "scope.coverage.by_target[].target",
 	".admissions.by_target[].covered": "scope.coverage.by_target[].covered",
@@ -96,6 +105,12 @@ var represented = map[string]string{
 	".spool.connections_dropped": "capture.spool.connections_dropped",
 	".spool.connections_refused": "capture.spool.connections_refused",
 	".spool.bytes":               "capture.spool.bytes", ".spool.limit": "capture.spool.limit",
+
+	".processing.gate_reason":         "processing.aggregate.gate_reason",
+	".processing.processing_failures": "processing.aggregate.processing_failures",
+	".processing.output_failures":     "processing.aggregate.output_failures",
+	".processing.authorized":          "processing.aggregate.authorized",
+	".processing.written":             "processing.aggregate.written",
 
 	".seal.stopped": "seal.stopped.value", ".seal.sealed": "seal.sealed.value",
 	".seal.withdrawal.at": "seal.withdrawal.at.value", ".seal.withdrawal.instances": "seal.withdrawal.instances",
@@ -138,6 +153,7 @@ func init() {
 		from, into := ".admissions."+list+"[]", "scope.coverage."+list+"[]"
 		represented[from+".target"] = into + ".target"
 		represented[from+".inherited"] = into + ".inherited"
+		represented[from+".namespace_by"] = into + ".instance.pid_namespace.established_by"
 		represented[from+".no_later_than"] = into + ".no_later_than.value"
 		represented[from+".read.from"] = into + ".read_from.value"
 		represented[from+".read.to"] = into + ".read_to.value"

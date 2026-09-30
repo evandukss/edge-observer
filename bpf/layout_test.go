@@ -178,6 +178,10 @@ func TestTheEventReaderTakesEachFieldFromWhereTheProgramPutsIt(t *testing.T) {
 		{Field{"local", 16}, 96}, {Field{"peer", 16}, 112},
 		{Field{"lport", 2}, 128}, {Field{"dport", 2}, 130}, {Field{"padding_end", 4}, 132},
 		{Field{"opened", 8}, 136},
+		{Field{"parent_generation", 8}, 144}, {Field{"parent_ns_dev", 8}, 152},
+		{Field{"parent_ns_ino", 8}, 160}, {Field{"parent_pid", 4}, 168},
+		{Field{"target", 4}, 172}, {Field{"rule", 4}, 176}, {Field{"admitted_by", 1}, 180},
+		{Field{"padding_origin", 3}, 181},
 	}
 
 	if len(declared) != len(reader) {
@@ -206,8 +210,8 @@ func TestTheEventReaderTakesEachFieldFromWhereTheProgramPutsIt(t *testing.T) {
 
 	// The payload begins where the fixed part ends (rawHeader in package ebpf). A
 	// field added at the end moves it without moving any offset above.
-	if at != 144 {
+	if at != 184 {
 		t.Errorf("the fixed part of struct event is %d bytes and package ebpf reads its payload "+
-			"from offset 144, so every payload it copies starts in the wrong place", at)
+			"from offset 184, so every payload it copies starts in the wrong place", at)
 	}
 }
