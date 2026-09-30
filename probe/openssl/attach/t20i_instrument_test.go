@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/evandukss/edge-observer/contract/config"
-	cp "github.com/evandukss/edge-observer/contract/policy"
 	"github.com/evandukss/edge-observer/contract/record"
 	"github.com/evandukss/edge-observer/processing"
 )
@@ -93,8 +92,7 @@ func TestT20iAHeaderExclusionRemovesTheHeaderAndRecordsItAsAVersion2Entry(t *tes
 		},
 	}}
 	setup := t20iSetup{
-		pipelines:    []map[string]any{t20iPipeline("t20i", []string{"account"}, t20iSlot("auth", config.RemoveHeaders, map[string]any{"headers": []string{"authorization"}}))},
-		requirements: []cp.Requirement{t20iRequirement("t20i-auth", config.HeaderFieldPrefix+"authorization")},
+		rules: map[string]any{"remove": map[string]any{"headers": []string{"authorization"}}},
 	}
-	t20iAssert(t, t20iRun(t, setup, cases), []string{"t20i"}, cases)
+	t20iAssert(t, t20iRun(t, setup, cases), []string{config.ExchangesPipeline}, cases)
 }

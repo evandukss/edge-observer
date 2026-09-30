@@ -414,16 +414,41 @@ func p3t9bProduce(t *testing.T, destination, name string) {
 
 func p3t9bConfiguration(t *testing.T, implementation, arguments string) []byte {
 	t.Helper()
-	raw, err := config.Examples.ReadFile("examples/no-extension.config.json")
+	raw, err := config.Examples.ReadFile("examples/no-rules.config.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var c config.Configuration
-	if err := json.Unmarshal(raw, &c); err != nil {
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
 		t.Fatal(err)
 	}
-	c.Pipelines = []config.Pipeline{{Name: "exchanges", Input: "reconstruction", Sinks: []string{"account"}, Slots: []config.Slot{{Name: "condition2", Implementation: implementation, Configuration: json.RawMessage(arguments), OnFailure: config.OnFailureDropAndAccount}}}}
-	raw, err = json.Marshal(c)
+	// The one operation, written as the rule a user writes for it.
+	var operation struct {
+		Headers []string `json:"headers"`
+		Value   string   `json:"value"`
+		Length  int      `json:"length"`
+	}
+	if err := json.Unmarshal([]byte(arguments), &operation); err != nil {
+		t.Fatal(err)
+	}
+	each := func(value any) map[string]any {
+		headers := map[string]any{}
+		for _, name := range operation.Headers {
+			headers[name] = value
+		}
+		return map[string]any{"headers": headers}
+	}
+	switch implementation {
+	case config.RemoveHeaders:
+		document["remove"] = map[string]any{"headers": operation.Headers}
+	case config.ReplaceHeaderValues:
+		document["mask"] = each(operation.Value)
+	case config.TruncateHeaderValues:
+		document["truncate"] = each(operation.Length)
+	default:
+		t.Fatalf("no rule a user writes compiles to %s", implementation)
+	}
+	raw, err = json.Marshal(document)
 	if err != nil {
 		t.Fatal(err)
 	}

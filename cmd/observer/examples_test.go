@@ -58,17 +58,17 @@ func installed(t *testing.T, name string) string {
 	return written
 }
 
-// contractConfiguration writes the contract's simplest example with change
+// contractConfiguration writes the contract's no-rules example with change
 // applied, in the shape the program reads.
 func contractConfiguration(t *testing.T, change func(document map[string]any)) string {
 	t.Helper()
-	content, err := config.Examples.ReadFile("examples/no-extension.config.json")
+	content, err := config.Examples.ReadFile("examples/no-rules.config.json")
 	if err != nil {
-		t.Fatalf("read the no-extension example: %v", err)
+		t.Fatalf("read the no-rules example: %v", err)
 	}
 	var document map[string]any
 	if err := json.Unmarshal(content, &document); err != nil {
-		t.Fatalf("decode the no-extension example: %v", err)
+		t.Fatalf("decode the no-rules example: %v", err)
 	}
 	change(document)
 	written, err := json.Marshal(document)
@@ -82,40 +82,40 @@ func contractConfiguration(t *testing.T, change func(document map[string]any)) s
 	return where
 }
 
-// target replaces the example's single target with one matching this
-// executable and arguments, keeping the example's descendant answers.
+// target replaces the example's single watch entry with one matching this
+// executable and arguments. The example watches children; a single-process
+// fixture watches none.
 func target(document map[string]any, name, exe string, args ...string) {
-	scope := document["observation_scope"].(map[string]any)
-	targets := scope["targets"].([]any)
-	first := targets[0].(map[string]any)
-	first["name"] = name
-	first["match"] = map[string]any{"exe": exe, "args": args}
-	// The example admits descendants; a single-process fixture admits none.
-	descendants := first["descendants"].(map[string]any)
-	descendants["existing"] = false
-	descendants["future"] = false
+	entry := map[string]any{"name": name, "exe": exe, "children": config.ChildrenNone}
+	if args != nil {
+		entry["args"] = args
+	}
+	document["watch"] = []any{entry}
 }
 
 // Every example configuration is one this program runs: a dry run over it,
-// with the examples' packs installed beside it, prints a plan. The examples
-// directory holds nothing else but the packs, the illustrative runtime and the
-// index.
+// with the examples' packs installed beside it, prints a plan. A configuration
+// is a document at observer.config/1; the examples directory holds nothing
+// else but the documents listed.
 func TestEveryExampleConfigurationIsRunByTheProgram(t *testing.T) {
-	runs := []string{
-		"configuration-only-pack.config.json",
-		"content-filter-is-not-approval.config.json",
-		"no-extension.config.json",
-	}
-	notConfigurations := []string{"configuration.json", "index.json", "packs/credentials.json", "packs/reversed-masking.json",
-		"runtime.json"}
+	runs := []string{"no-rules.config.json", "observer.config.json"}
+	notConfigurations := []string{"configuration-only-pack.config.json", "content-filter-is-not-approval.config.json",
+		"index.json", "no-extension.config.json", "packs/credentials.json", "packs/reversed-masking.json", "runtime.json"}
 
 	var configurations, others []string
 	err := fs.WalkDir(config.Examples, "examples", func(at string, entry fs.DirEntry, err error) error {
 		if err != nil || entry.IsDir() {
 			return err
 		}
+		content, err := config.Examples.ReadFile(at)
+		if err != nil {
+			return err
+		}
+		var version struct {
+			Version string `json:"version"`
+		}
 		name := strings.TrimPrefix(at, "examples/")
-		if strings.HasSuffix(name, ".config.json") {
+		if json.Unmarshal(content, &version) == nil && version.Version == config.FileVersion {
 			configurations = append(configurations, name)
 		} else {
 			others = append(others, name)
@@ -171,17 +171,20 @@ func TestEveryCommandRefusesWhatTheProgramDoesNotDo(t *testing.T) {
 	readOnlyWhereTheSessionIs := map[string]bool{"stop": true, "inspect": true}
 
 	// The example alone, with no packs directory beside it.
-	written := example(t, "configuration-only-pack.config.json")
+	written := example(t, "observer.config.json")
 	content, err := os.ReadFile(written)
 	if err != nil {
-		t.Fatalf("read the pack example: %v", err)
+		t.Fatalf("read the example: %v", err)
 	}
 	var document map[string]any
 	if err := json.Unmarshal(content, &document); err != nil {
-		t.Fatalf("decode the pack example: %v", err)
+		t.Fatalf("decode the example: %v", err)
 	}
-	document["observer"].(map[string]any)["directory"] = t.TempDir()
-	document["observer"].(map[string]any)["log"] = filepath.Join(t.TempDir(), "observer.log")
+	if packs, _ := document["packs"].([]any); len(packs) != 1 || packs[0] != "credentials" {
+		t.Fatalf("wiring, not the property: the example enables %v, so packs[0] is not the credentials pack", packs)
+	}
+	document["output"] = t.TempDir()
+	document["log"] = filepath.Join(t.TempDir(), "observer.log")
 	rewritten, err := json.Marshal(document)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
@@ -189,7 +192,7 @@ func TestEveryCommandRefusesWhatTheProgramDoesNotDo(t *testing.T) {
 	if err := os.WriteFile(written, rewritten, 0o600); err != nil {
 		t.Fatalf("write %s: %v", written, err)
 	}
-	tried := filepath.Join(filepath.Dir(written), "packs", "reversed-masking.json")
+	tried := filepath.Join(filepath.Dir(written), "packs", "credentials.json")
 	if _, err := os.Stat(tried); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("wiring, not the property: %s is there, so no command below meets a missing pack: %v", tried, err)
 	}
@@ -216,7 +219,7 @@ func TestEveryCommandRefusesWhatTheProgramDoesNotDo(t *testing.T) {
 				t.Fatalf("%v answered %v, want the pack refused by name", arguments, err)
 			}
 			if !slices.ContainsFunc(rejected.Findings, func(f config.Finding) bool {
-				return f.Subject == "pack:reversed-masking" && f.Reason == config.UnknownPack && strings.Contains(f.Detail, tried)
+				return f.Subject == "packs[0]" && f.Reason == config.UnknownPack && strings.Contains(f.Detail, tried)
 			}) {
 				t.Errorf("%v refused naming %+v, without the missing pack and the file it looked for", arguments, rejected.Findings)
 			}

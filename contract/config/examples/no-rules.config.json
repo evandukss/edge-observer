@@ -1,0 +1,9 @@
+{
+  "version": "observer.config/1",
+  "output": "/var/lib/observer",
+  "log": "stdout",
+  "watch": [
+    {"name": "api-server", "exe": "/usr/bin/php", "args": ["/srv/api/main.php"], "children": "all"}
+  ],
+  "limits": {"output_mib": 64, "events": 16384, "state_every_seconds": 30}
+}

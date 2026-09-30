@@ -17,7 +17,6 @@ import (
 
 	"github.com/evandukss/edge-observer/account"
 	"github.com/evandukss/edge-observer/contract/config"
-	"github.com/evandukss/edge-observer/policy"
 )
 
 // moduleRoot is the directory of the nearest go.mod above this package, which
@@ -195,9 +194,9 @@ func (r *openedFS) names() []string {
 	return slices.Compact(slices.Sorted(slices.Values(r.opened)))
 }
 
-// dryRunOne runs one operator configuration through this program's dry run.
-// It was read if the program prints a plan or refuses naming unimplemented
-// sections; anything else is a configuration it cannot execute.
+// dryRunOne runs one configuration through this program's dry run. It was
+// read if the program prints a plan; anything else is a configuration it
+// cannot execute.
 func dryRunOne(examples fs.FS, name string) error {
 	content, err := fs.ReadFile(examples, name)
 	if err != nil {
@@ -241,12 +240,7 @@ func dryRunOne(examples fs.FS, name string) error {
 		}
 	}
 	var out bytes.Buffer
-	err = run([]string{"dry-run", written}, &out)
-	var unimplemented *policy.Unimplemented
-	switch {
-	case errors.As(err, &unimplemented):
-		return nil
-	case err != nil:
+	if err := run([]string{"dry-run", written}, &out); err != nil {
 		return err
 	}
 	var planned account.Account
@@ -256,10 +250,15 @@ func dryRunOne(examples fs.FS, name string) error {
 	return nil
 }
 
+// dryRunEvery dry-runs every *.config.json written at observer.config/1. A
+// file at another version is peeked at without being recorded as opened.
 func dryRunEvery(examples fs.FS) map[string]error {
 	failures := map[string]error{}
 	err := fs.WalkDir(examples, ".", func(at string, entry fs.DirEntry, err error) error {
 		if err != nil || entry.IsDir() || !strings.HasSuffix(at, ".config.json") {
+			return err
+		}
+		if written, err := versionOf(examples, at); err != nil || written != config.FileVersion {
 			return err
 		}
 		if err := dryRunOne(examples, at); err != nil {
@@ -271,6 +270,25 @@ func dryRunEvery(examples fs.FS) map[string]error {
 		failures[""] = err
 	}
 	return failures
+}
+
+// versionOf is the version a document states, read without recording the file
+// as opened, or "" where it states none.
+func versionOf(examples fs.FS, at string) (string, error) {
+	if recorded, ok := examples.(*openedFS); ok {
+		examples = recorded.fsys
+	}
+	content, err := fs.ReadFile(examples, at)
+	if err != nil {
+		return "", err
+	}
+	var version struct {
+		Version string `json:"version"`
+	}
+	if json.Unmarshal(content, &version) != nil {
+		return "", nil
+	}
+	return version.Version, nil
 }
 
 // compileEveryFile compiles every example written at observer.config/1, with
@@ -287,15 +305,8 @@ func compileEveryFile(examples fs.FS) map[string]error {
 		if err != nil || entry.IsDir() || !strings.HasSuffix(at, ".json") {
 			return err
 		}
-		peek, err := fs.ReadFile(source, at)
-		if err != nil {
+		if written, err := versionOf(examples, at); err != nil || written != config.FileVersion {
 			return err
-		}
-		var version struct {
-			Version string `json:"version"`
-		}
-		if json.Unmarshal(peek, &version) != nil || version.Version != config.FileVersion {
-			return nil
 		}
 		content, err := fs.ReadFile(examples, at)
 		if err != nil {

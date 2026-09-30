@@ -73,29 +73,22 @@ func (s *t18HeldSink) Write(record fragment.Record) error {
 // target each, removing the authorization header on its one route.
 func t18Compiled(t *testing.T, peers ...process.Process) policy.Policy {
 	t.Helper()
-	raw, err := config.Examples.ReadFile("examples/no-extension.config.json")
+	raw, err := config.Examples.ReadFile("examples/no-rules.config.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cfg config.Configuration
-	if err := json.Unmarshal(raw, &cfg); err != nil {
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
 		t.Fatal(err)
 	}
-	template := cfg.ObservationScope.Targets[0]
-	cfg.ObservationScope.Targets = nil
+	watch := []any{}
 	for i, peer := range peers {
-		one := template
-		arguments := append([]string{}, peer.Arguments[1:]...)
-		one.Name = fmt.Sprint("peer-", i)
-		one.Match = config.Match{Exe: peer.Executable, Args: &arguments}
-		cfg.ObservationScope.Targets = append(cfg.ObservationScope.Targets, one)
+		watch = append(watch, map[string]any{"name": fmt.Sprint("peer-", i), "exe": peer.Executable,
+			"args": append([]string{}, peer.Arguments[1:]...), "children": config.ChildrenAll})
 	}
-	cfg.Packs, cfg.Subscribers, cfg.Policy = nil, nil, nil
-	cfg.Sinks = []config.Sink{{Name: "account", Kind: "local_account"}}
-	cfg.Pipelines = []config.Pipeline{{Name: "exchanges", Input: "reconstruction", Sinks: []string{"account"},
-		Slots: []config.Slot{{Name: "remove", Implementation: config.RemoveHeaders,
-			Configuration: json.RawMessage(`{"headers":["authorization"]}`), OnFailure: config.OnFailureDropAndAccount}}}}
-	raw, err = json.Marshal(cfg)
+	document["watch"] = watch
+	document["remove"] = map[string]any{"headers": []string{"authorization"}}
+	raw, err = json.Marshal(document)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -18,7 +18,6 @@ import (
 	"github.com/evandukss/edge-observer/capture"
 	"github.com/evandukss/edge-observer/connection"
 	"github.com/evandukss/edge-observer/contract/config"
-	cp "github.com/evandukss/edge-observer/contract/policy"
 	"github.com/evandukss/edge-observer/ebpf"
 	"github.com/evandukss/edge-observer/fragment"
 	"github.com/evandukss/edge-observer/intake"
@@ -30,30 +29,24 @@ const p3t9ProtectedMarker = "P3T9_PROTECTED_MARKER"
 
 func p3t9ProtectedPlan(t *testing.T) *config.ProcessingPlan {
 	t.Helper()
-	raw, err := config.Examples.ReadFile("examples/no-extension.config.json")
+	raw, err := config.Examples.ReadFile("examples/no-rules.config.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cfg config.Configuration
-	if err := json.Unmarshal(raw, &cfg); err != nil {
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
 		t.Fatal(err)
 	}
-	cfg.Packs, cfg.Subscribers = nil, nil
-	cfg.Sinks = []config.Sink{{Name: "account", Kind: "local_account"}}
-	cfg.Pipelines = []config.Pipeline{{Name: "protected", Input: "reconstruction", Sinks: []string{"account"}, Slots: []config.Slot{{Name: "exclude-auth", Implementation: config.RemoveHeaders, Configuration: json.RawMessage(`{"headers":["authorization"]}`), OnFailure: config.OnFailureDropAndAccount}}}}
-	policy, err := json.Marshal(cp.Document{Vocabulary: cp.Vocabulary, Requirements: []cp.Requirement{{ID: "exclude-auth", Target: cp.Target{Kind: "sink", Name: "account"}, Operation: "transform_field", Parameters: map[string]any{"field": "message.headers.authorization", "transformation": "remove"}, FailureAction: cp.DropAndAccount}}})
+	document["remove"] = map[string]any{"headers": []string{"authorization"}}
+	raw, err = json.Marshal(document)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Policy = []json.RawMessage{policy}
-	raw, err = json.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan, findings := config.CompileProcessing(raw, nil)
-	if plan == nil || len(findings) != 0 {
+	compiled, findings := config.Compile(raw, nil)
+	if compiled == nil || len(findings) != 0 {
 		t.Fatalf("published protected-plan control does not compile: %+v", findings)
 	}
+	plan := compiled.Plan
 	if len(plan.Routes()) != 1 || len(plan.Exclusions()) != 1 {
 		t.Fatal("compiled protected route/exclusion not witnessed")
 	}

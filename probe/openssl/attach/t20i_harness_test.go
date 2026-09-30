@@ -268,12 +268,24 @@ func t20iMultipart(parts ...[2]string) string {
 	return b.String()
 }
 
-// t20iSlot is one slot of a pipeline, failing as the requirements do.
+// t20iSetup is what one session is configured with beyond its targets: the
+// rules the configuration writes, keyed as written (remove, mask, truncate).
+// pipelines and requirements are the earlier format's, which no
+// observer.config/1 file can write; a setup holding them is refused as wiring.
+type t20iSetup struct {
+	rules map[string]any
+
+	pipelines    []map[string]any
+	requirements []cp.Requirement
+}
+
+// t20iSlot is one slot of a pipeline in the earlier format.
 func t20iSlot(name, implementation string, configuration any) map[string]any {
 	return map[string]any{"name": name, "implementation": implementation, "configuration": configuration, "on_failure": cp.DropAndAccount}
 }
 
-// t20iPipeline is a reconstruction pipeline to these sinks.
+// t20iPipeline is a reconstruction pipeline to these sinks, in the earlier
+// format.
 func t20iPipeline(name string, sinks []string, slots ...map[string]any) map[string]any {
 	if slots == nil {
 		slots = []map[string]any{}
@@ -281,26 +293,21 @@ func t20iPipeline(name string, sinks []string, slots ...map[string]any) map[stri
 	return map[string]any{"name": name, "input": "reconstruction", "slots": slots, "sinks": sinks, "queues": []any{}}
 }
 
-// t20iRequirement is a mandatory removal of field at the sink account.
+// t20iRequirement is a mandatory removal of field at the sink account, in the
+// earlier format.
 func t20iRequirement(id, field string) cp.Requirement {
 	return cp.Requirement{ID: id, Target: cp.Target{Kind: "sink", Name: "account"}, Operation: "transform_field",
 		Parameters: map[string]any{"field": field, "transformation": "remove"}, FailureAction: cp.DropAndAccount}
 }
 
-// t20iSetup is what one session is configured with beyond its targets.
-type t20iSetup struct {
-	pipelines    []map[string]any
-	requirements []cp.Requirement
-	// sinks are local_account sinks beside account; packs are enabled and
-	// installed from their manifests, keyed by name.
-	sinks []string
-	packs map[string]map[string]any
-}
-
-// t20iConfigure writes c's configuration: these targets, these pipelines
-// beside a connection pipeline, and these requirements as one policy.
+// t20iConfigure writes c's configuration: these targets and these rules.
 func t20iConfigure(t *testing.T, c configured, targets []map[string]any, setup t20iSetup) {
 	t.Helper()
+	if len(setup.pipelines) > 0 || len(setup.requirements) > 0 {
+		t.Fatalf("wiring, not the property: this setup names pipelines %v and requirements %v, which an "+
+			"observer.config/1 file cannot write; raised to the orchestrator as not convertible", setup.pipelines,
+			setup.requirements)
+	}
 	c.rewrite(t, targets, nil)
 	content, err := os.ReadFile(c.path)
 	if err != nil {
@@ -310,39 +317,9 @@ func t20iConfigure(t *testing.T, c configured, targets []map[string]any, setup t
 	if err := json.Unmarshal(content, &document); err != nil {
 		t.Fatalf("decode %s: %v", c.path, err)
 	}
-	pipelines := []any{}
-	for _, p := range setup.pipelines {
-		pipelines = append(pipelines, p)
+	for key, rules := range setup.rules {
+		document[key] = rules
 	}
-	pipelines = append(pipelines, map[string]any{"name": "connections", "input": "connection", "slots": []any{}, "sinks": []any{"account"}, "queues": []any{}})
-	document["pipelines"] = pipelines
-	policy := []any{}
-	if len(setup.requirements) > 0 {
-		policy = append(policy, cp.Document{Vocabulary: cp.Vocabulary, Requirements: setup.requirements, Claims: []cp.Claim{}, Approvals: []cp.Approval{}})
-	}
-	document["policy"] = policy
-	sinks := []any{map[string]any{"name": "account", "kind": "local_account"}}
-	for _, name := range setup.sinks {
-		sinks = append(sinks, map[string]any{"name": name, "kind": "local_account"})
-	}
-	document["sinks"] = sinks
-	packs := []string{}
-	for name, manifest := range setup.packs {
-		packs = append(packs, name)
-		written, err := json.Marshal(manifest)
-		if err != nil {
-			t.Fatalf("encode pack %s: %v", name, err)
-		}
-		directory := filepath.Join(filepath.Dir(c.path), "packs")
-		if err := os.MkdirAll(directory, 0o700); err != nil {
-			t.Fatalf("make %s: %v", directory, err)
-		}
-		if err := os.WriteFile(filepath.Join(directory, name+".json"), written, 0o600); err != nil {
-			t.Fatalf("install pack %s: %v", name, err)
-		}
-	}
-	slices.Sort(packs)
-	document["packs"] = packs
 	written, err := json.Marshal(document)
 	if err != nil {
 		t.Fatalf("encode the configuration: %v", err)
@@ -350,15 +327,6 @@ func t20iConfigure(t *testing.T, c configured, targets []map[string]any, setup t
 	if err := os.WriteFile(c.path, written, 0o600); err != nil {
 		t.Fatalf("write %s: %v", c.path, err)
 	}
-}
-
-// t20iPack is a configuration-only pack adding these pipelines.
-func t20iPack(name string, pipelines ...map[string]any) map[string]any {
-	if pipelines == nil {
-		pipelines = []map[string]any{}
-	}
-	return map[string]any{"version": "observer.pack/draft", "name": name, "pack_version": "0.1.0",
-		"components": []any{}, "pipelines": pipelines, "replacements": []any{}, "policy": []any{}}
 }
 
 // t20iLocked is standard error written from the process's own goroutine.
@@ -811,40 +779,4 @@ func t20iAssert(t *testing.T, o t20iOutput, pipelines []string, cases []t20iCase
 			}
 		})
 	}
-}
-
-// t20iRefused runs start over a configuration that must be refused before
-// anything attaches, and returns what it printed. Each reason given must
-// appear as a finding's reason.
-func t20iRefused(t *testing.T, binary string, targets []map[string]any, setup t20iSetup, reasons ...string) string {
-	t.Helper()
-	c := configuring(t, targets...)
-	t20iConfigure(t, c, targets, setup)
-	command := exec.Command(binary, "start", c.path)
-	intoEnvelope(t, command)
-	type result struct {
-		output []byte
-		err    error
-	}
-	done := make(chan result, 1)
-	go func() { out, err := command.CombinedOutput(); done <- result{out, err} }()
-	var got result
-	select {
-	case got = <-done:
-	case <-time.After(60 * time.Second):
-		_ = command.Process.Kill()
-		t.Fatal("a start that must be refused was still running after 60 seconds")
-	}
-	if got.err == nil || command.ProcessState.ExitCode() == 0 {
-		t.Fatalf("a start over a configuration the contract refuses exited zero:\n%s", got.output)
-	}
-	for _, reason := range reasons {
-		if !strings.Contains(string(got.output), ": "+reason+": ") {
-			t.Errorf("the refusal does not name %s:\n%s", reason, got.output)
-		}
-	}
-	if entries, err := os.ReadDir(c.sessions()); err == nil && len(entries) != 0 {
-		t.Errorf("a refused start left %d session directories", len(entries))
-	}
-	return string(got.output)
 }

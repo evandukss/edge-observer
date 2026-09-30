@@ -35,9 +35,9 @@ func eventCountViews(t *testing.T, read policy.Policy, want float64) {
 
 func TestAdmittedEventCountReachesActivationAndPlan(t *testing.T) {
 	document := processingDocument(t)
-	observer := member(document, "observer")
-	observer["admitted_event_limit"] = 7
-	observer["approved_output_bound_mib"] = 13
+	limits := member(document, "limits")
+	limits["events"] = 7
+	limits["output_mib"] = 13
 	read, err := policy.CompileProcessing([]byte(encoded(t, document)), nil)
 	if err != nil || read.Processing == nil {
 		t.Fatalf("positive event count refused: plan=%v error=%v", read.Processing, err)
@@ -51,9 +51,9 @@ func TestAdmittedEventCountReachesActivationAndPlan(t *testing.T) {
 func TestAdmittedEventCountDefaultsWithoutOutputCoupling(t *testing.T) {
 	for _, outputMiB := range []int{1, 97} {
 		document := processingDocument(t)
-		observer := member(document, "observer")
-		delete(observer, "admitted_event_limit")
-		observer["approved_output_bound_mib"] = outputMiB
+		limits := member(document, "limits")
+		delete(limits, "events")
+		limits["output_mib"] = outputMiB
 		read, err := policy.CompileProcessing([]byte(encoded(t, document)), nil)
 		if err != nil || read.Processing == nil {
 			t.Fatalf("default event count refused: plan=%v error=%v", read.Processing, err)
@@ -65,18 +65,18 @@ func TestAdmittedEventCountDefaultsWithoutOutputCoupling(t *testing.T) {
 func TestNonpositiveAdmittedEventCountRefusesAtItsOwnSetting(t *testing.T) {
 	for _, count := range []int{0, -1} {
 		document := processingDocument(t)
-		observer := member(document, "observer")
-		delete(observer, "admitted_event_limit")
+		limits := member(document, "limits")
+		delete(limits, "events")
 		if read, err := policy.CompileProcessing([]byte(encoded(t, document)), nil); err != nil || read.Processing == nil {
 			t.Fatalf("default neighbour refused: plan=%v error=%v", read.Processing, err)
 		}
-		observer["admitted_event_limit"] = count
+		limits["events"] = count
 		read, err := policy.CompileProcessing([]byte(encoded(t, document)), nil)
 		var refused *policy.Refused
 		if !errors.As(err, &refused) || read.Processing != nil {
 			t.Fatalf("nonpositive event count %d not refused: plan=%v error=%v", count, read.Processing, err)
 		}
-		if len(refused.Findings) != 1 || refused.Findings[0].Subject != "observer.admitted_event_limit" || refused.Findings[0].Reason != config.Malformed {
+		if len(refused.Findings) != 1 || refused.Findings[0].Subject != "limits.events" || refused.Findings[0].Reason != config.InvalidValue {
 			t.Fatalf("nonpositive event count %d did not reach its own setting check: %+v", count, refused.Findings)
 		}
 	}

@@ -408,26 +408,20 @@ func TestTheObserverSettingsResolve(t *testing.T) {
 // applies to a file that states neither, and the answer is held to the
 // contract's.
 func TestTheObserverDefaultsAgreeWithTheObserver(t *testing.T) {
-	content, err := os.ReadFile(filepath.Join("examples", "no-extension.config.json"))
+	content, err := os.ReadFile(filepath.Join("examples", "no-rules.config.json"))
 	if err != nil {
-		t.Fatalf("read the no-extension example: %v", err)
+		t.Fatalf("read the no-rules example: %v", err)
 	}
 	var document map[string]any
 	if err := json.Unmarshal(content, &document); err != nil {
-		t.Fatalf("decode the no-extension example: %v", err)
+		t.Fatalf("decode the no-rules example: %v", err)
 	}
-	observer := document["observer"].(map[string]any)
-	delete(observer, "approved_output_bound_mib")
-	delete(observer, "state_every_seconds")
+	delete(document, "limits")
 	file, err := json.Marshal(document)
 	if err != nil {
 		t.Fatalf("encode the configuration: %v", err)
 	}
-	path := filepath.Join(t.TempDir(), "observer.json")
-	if err := os.WriteFile(path, file, 0o600); err != nil {
-		t.Fatalf("write the observer's configuration: %v", err)
-	}
-	loaded, err := observerpolicy.Load(path)
+	loaded, err := observerpolicy.CompileProcessing(file, nil)
 	if err != nil {
 		t.Fatalf("wiring, not the property: the observer refused a configuration stating neither setting: %v", err)
 	}

@@ -18,6 +18,7 @@ import (
 
 	"github.com/evandukss/edge-observer/account"
 	"github.com/evandukss/edge-observer/attachment"
+	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/privilege"
 	"github.com/evandukss/edge-observer/process"
 	"github.com/evandukss/edge-observer/processing"
@@ -75,49 +76,41 @@ func configuring(t *testing.T, targets ...map[string]any) configured {
 }
 
 // rewrite writes the configuration again with these targets and exclusions and
-// the same observer section, as an operator would before a reload. Each target
-// is put into the contract's shape (contract/config): the conditions become its
-// match and the mode word the two answers the mode gives.
+// the same output, log and limits, as an operator would before a reload. Each
+// target becomes a watch entry (contract/config): its conditions as written
+// and the mode word as the children answer that mode is.
 func (c configured) rewrite(t *testing.T, targets, exclusions []map[string]any) {
 	t.Helper()
-	answers := map[string][2]bool{"none": {false, false}, "existing": {true, false}, "follow": {true, true}}
+	children := map[string]string{"none": config.ChildrenNone, "existing": config.ChildrenExisting,
+		"follow": config.ChildrenAll}
 	written := []any{}
 	for _, one := range targets {
-		match := map[string]any{}
+		entry := map[string]any{}
 		for key, value := range one {
-			if key != "name" && key != "descendants" {
-				match[key] = value
+			if key != "descendants" {
+				entry[key] = value
 			}
 		}
 		word, _ := one["descendants"].(string)
-		pair, known := answers[word]
+		answer, known := children[word]
 		if !known {
 			t.Fatalf("wiring, not the observer: target %v names descendant mode %q", one["name"], word)
 		}
-		written = append(written, map[string]any{"name": one["name"], "match": match, "descendants": map[string]any{
-			"existing": pair[0], "future": pair[1], "boundary": "exec_ends_the_grant",
-			"root_exit": "survivors_keep_their_grants", "replacement": "needs_restart",
-		}})
+		entry["children"] = answer
+		written = append(written, entry)
 	}
 	excluded := []any{}
 	for _, one := range exclusions {
 		excluded = append(excluded, one)
 	}
 	document := map[string]any{
-		"version":           "observer.config/draft",
-		"observer":          map[string]any{"log": c.log, "directory": c.directory, "approved_output_bound_mib": 1, "state_every_seconds": 1},
-		"observation_scope": map[string]any{"targets": written, "exclude": excluded, "libraries": []any{}},
-		"traffic_scope": map[string]any{"rules": []any{map[string]any{
-			"targets": []any{}, "direction": "any", "local_ports": []any{}, "remote_ports": []any{}}}},
-		"retention_and_export": map[string]any{"retain_plaintext": true, "export_sinks": []any{}},
-		"packs":                []any{},
-		"sinks":                []any{map[string]any{"name": "account", "kind": "local_account"}},
-		"pipelines": []any{
-			map[string]any{"name": "exchanges", "input": "reconstruction", "slots": []any{}, "sinks": []any{"account"}, "queues": []any{}},
-			map[string]any{"name": "connections", "input": "connection", "slots": []any{}, "sinks": []any{"account"}, "queues": []any{}},
-		},
-		"subscribers": []any{},
-		"policy":      []any{},
+		"version":   config.FileVersion,
+		"output":    c.directory,
+		"log":       c.log,
+		"limits":    map[string]any{"output_mib": 1, "state_every_seconds": 1},
+		"watch":     written,
+		"ignore":    excluded,
+		"libraries": []any{},
 	}
 	content, err := json.Marshal(document)
 	if err != nil {

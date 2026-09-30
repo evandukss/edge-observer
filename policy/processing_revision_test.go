@@ -4,21 +4,11 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/evandukss/edge-observer/policy"
 )
 
 func TestProcessingRevisionIsProducedAndStable(t *testing.T) {
 	document := processingDocument(t)
-	compile := func() policy.Policy {
-		t.Helper()
-		read, err := policy.CompileProcessing([]byte(encoded(t, document)), nil)
-		if err != nil || read.Processing == nil {
-			t.Fatalf("valid processing configuration refused: %v", err)
-		}
-		return read
-	}
-	first, second := compile(), compile()
+	first, second := compiled(t, document), compiled(t, document)
 	if first.ProcessingRevision == "" || first.ProcessingRevision != second.ProcessingRevision {
 		t.Fatalf("compiler did not produce a stable processing identity: first=%q second=%q", first.ProcessingRevision, second.ProcessingRevision)
 	}
@@ -27,35 +17,30 @@ func TestProcessingRevisionIsProducedAndStable(t *testing.T) {
 	}
 }
 
-func TestProcessingRevisionDistinguishesRetentionFromObservation(t *testing.T) {
-	compile := func(document map[string]any) policy.Policy {
-		t.Helper()
-		read, err := policy.CompileProcessing([]byte(encoded(t, document)), nil)
-		if err != nil || read.Processing == nil {
-			t.Fatalf("valid processing configuration refused: %v", err)
-		}
-		return read
-	}
-	base := compile(processingDocument(t))
+// What is watched and where the observer writes stay out of the processing
+// revision, so reload can apply them; a rule change stays in it, so a restart
+// applies it.
+func TestProcessingRevisionDistinguishesRulesFromObservation(t *testing.T) {
+	base := compiled(t, processingDocument(t))
 	if base.ProcessingRevision == "" {
 		t.Fatal("compiler supplied no processing identity for the control")
 	}
 	observation := processingDocument(t)
-	member(observation, "observation_scope")["targets"] = []any{target("different-observed-process", map[string]any{"exe": "/usr/bin/other"}, true, true)}
-	member(observation, "observer")["approved_output_bound_mib"] = 19
-	changedObservation := compile(observation)
+	observation["watch"] = []any{watching("different-observed-process", map[string]any{"exe": "/usr/bin/other"}, "all")}
+	member(observation, "limits")["output_mib"] = 19
+	changedObservation := compiled(t, observation)
 	if changedObservation.Revision == base.Revision || changedObservation.ProcessingRevision != base.ProcessingRevision {
 		t.Fatalf("observation/settings change did not remain separate: base=%+v changed=%+v", base, changedObservation)
 	}
-	retention := processingDocument(t)
-	member(retention, "retention_and_export")["export_sinks"] = []any{"account"}
-	changedRetention := compile(retention)
-	if changedRetention.ProcessingRevision == base.ProcessingRevision {
-		t.Fatal("retention declaration changed without changing processing identity")
+	rules := processingDocument(t)
+	member(rules, "remove")["query"] = []any{"token"}
+	changedRules := compiled(t, rules)
+	if changedRules.ProcessingRevision == base.ProcessingRevision {
+		t.Fatal("a rule change did not change the processing identity")
 	}
-	// The configured sink stays local, so this declaration changes permission
-	// without changing any present durable route. A route-only digest misses it.
-	if !slices.Equal(changedRetention.Processing.Routes(), base.Processing.Routes()) {
-		t.Fatal("retention fixture unexpectedly changed the existing routes")
+	// The rule adds an operation to the same route, so a route-only digest
+	// misses it.
+	if !slices.Equal(changedRules.Processing.Routes(), base.Processing.Routes()) {
+		t.Fatal("the rule fixture unexpectedly changed the routes")
 	}
 }

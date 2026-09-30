@@ -177,32 +177,21 @@ func t18Edit(t *testing.T, c configured, edits ...func(document map[string]any))
 	}
 }
 
-// t18Setting sets one member of the configuration's observer section.
+// t18Setting sets one member of the configuration's limits.
 func t18Setting(name string, value any) func(map[string]any) {
-	return func(document map[string]any) { document["observer"].(map[string]any)[name] = value }
-}
-
-// t18Slot is one pipeline slot in the configuration's shape.
-func t18Slot(name, implementation, arguments string) map[string]any {
-	return map[string]any{"name": name, "implementation": implementation,
-		"configuration": json.RawMessage(arguments), "on_failure": "drop_and_account"}
-}
-
-// t18Pipeline is one pipeline to the account sink.
-func t18Pipeline(name, input string, slots ...map[string]any) map[string]any {
-	if slots == nil {
-		slots = []map[string]any{}
+	return func(document map[string]any) {
+		limits, _ := document["limits"].(map[string]any)
+		if limits == nil {
+			limits = map[string]any{}
+			document["limits"] = limits
+		}
+		limits[name] = value
 	}
-	return map[string]any{"name": name, "input": input, "slots": slots, "sinks": []any{"account"}, "queues": []any{}}
 }
 
-// t18Removing makes the exchanges pipeline remove the authorization header,
-// beside the connections pipeline configuring wrote.
+// t18Removing makes the configuration remove the authorization header.
 func t18Removing(document map[string]any) {
-	document["pipelines"] = []any{
-		t18Pipeline("exchanges", "reconstruction", t18Slot("remove", "remove-headers", `{"headers":["authorization"]}`)),
-		t18Pipeline("connections", "connection"),
-	}
+	document["remove"] = map[string]any{"headers": []any{"authorization"}}
 }
 
 // t18Session is one foreground observer whose standard output is read as it

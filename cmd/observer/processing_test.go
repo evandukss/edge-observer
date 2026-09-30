@@ -63,18 +63,16 @@ type processingControllerFixture struct {
 
 func processingController(t *testing.T, beforeAuthorize ...func()) *processingControllerFixture {
 	t.Helper()
-	raw, err := config.Examples.ReadFile("examples/no-extension.config.json")
+	raw, err := config.Examples.ReadFile("examples/no-rules.config.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var c config.Configuration
-	if err := json.Unmarshal(raw, &c); err != nil {
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
 		t.Fatal(err)
 	}
-	c.Pipelines = []config.Pipeline{{Name: "exchanges", Input: "reconstruction", Sinks: []string{"account"}, Slots: []config.Slot{
-		{Name: "remove", Implementation: config.RemoveHeaders, Configuration: json.RawMessage(`{"headers":["authorization"]}`), OnFailure: config.OnFailureDropAndAccount},
-	}}}
-	raw, err = json.Marshal(c)
+	document["remove"] = map[string]any{"headers": []string{"authorization"}}
+	raw, err = json.Marshal(document)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,10 +121,13 @@ func processingController(t *testing.T, beforeAuthorize ...func()) *processingCo
 func TestControllerStopsWhileWorkerAuthorizationIsHeld(t *testing.T) {
 	reached, release := make(chan struct{}), make(chan struct{})
 	defer close(release)
-	decisions := 0 // only the worker calls this hook, serially
+	// Only the worker calls this hook, serially. Each closed connection is two
+	// decisions, its exchange and its connection record, so the third is the
+	// second connection's exchange.
+	decisions := 0
 	f := processingController(t, func() {
 		decisions++
-		if decisions == 2 {
+		if decisions == 3 {
 			close(reached)
 			<-release
 		}
@@ -140,7 +141,7 @@ func TestControllerStopsWhileWorkerAuthorizationIsHeld(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("second real worker authorization was not reached")
 	}
-	if stats := f.d.intake.Stats(); stats.Leased == 0 || f.d.output.Stats().Written != 1 {
+	if stats := f.d.intake.Stats(); stats.Leased == 0 || f.d.output.Stats().Written != 2 {
 		t.Fatalf("held authorization has no charged pending batch: %+v", stats)
 	}
 	t.Log("second real worker authorization held with charged intake after useful output")
@@ -198,11 +199,13 @@ func (f *processingControllerFixture) liveControl(t *testing.T) {
 	f.transfer(t, 7, fragment.Sent, "GET /live HTTP/1.1\r\nAuthorization: secret-token\r\nX-Public: useful\r\n\r\n")
 	f.transfer(t, 7, fragment.Received, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
 	f.closed(t, 7)
+	// Two records: the exchange, and the connection's record the connections
+	// pipeline writes for every closed connection.
 	deadline := time.Now().Add(2 * time.Second)
-	for f.d.output.Stats().Written == 0 && time.Now().Before(deadline) {
+	for f.d.output.Stats().Written < 2 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if got := f.d.output.Stats(); got.Written != 1 {
+	if got := f.d.output.Stats(); got.Written != 2 {
 		t.Fatalf("live closed-batch control never reached approved output: %+v", got)
 	}
 	if len(f.producer.calls) != 0 {
@@ -239,7 +242,7 @@ func TestControllerProcessingUsesFinalizationEvidence(t *testing.T) {
 				f.transfer(t, 8, fragment.Received, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
 			}
 			f.halt(t)
-			if f.d.output.Stats().Written != 1 {
+			if f.d.output.Stats().Written != 2 {
 				t.Fatal("still-open batch escaped before producer drain")
 			}
 			var logs bytes.Buffer
@@ -253,9 +256,6 @@ func TestControllerProcessingUsesFinalizationEvidence(t *testing.T) {
 				t.Fatalf("final response did not reach capture during drain: %+v", seen)
 			}
 			t.Logf("final queue reached after withdrawal=%t drain=%t", one.withdrawn, one.drained)
-			if got := f.d.output.Stats(); got.Written != one.want {
-				t.Fatalf("final approved writes=%d want=%d: %+v", got.Written, one.want, got)
-			}
 			content, err := os.ReadFile(filepath.Join(f.d.directory, processing.ArtifactName))
 			if err != nil {
 				t.Fatal(err)
@@ -263,9 +263,24 @@ func TestControllerProcessingUsesFinalizationEvidence(t *testing.T) {
 			if bytes.Contains(content, []byte("secret-token")) || bytes.Contains(content, []byte("/unresolved")) {
 				t.Fatal("protected field or undecidable tail reached durable output")
 			}
-			lines := bytes.Split(bytes.TrimSpace(content), []byte{'\n'})
+			all := bytes.Split(bytes.TrimSpace(content), []byte{'\n'})
+			if got := f.d.output.Stats(); got.Written != uint64(len(all)) {
+				t.Fatalf("final approved writes=%d beside %d records: %+v", got.Written, len(all), got)
+			}
+			// The exchange records, apart from the connection records written
+			// beside them.
+			var lines [][]byte
+			for _, line := range all {
+				var artifact processing.Artifact
+				if err := json.Unmarshal(line, &artifact); err != nil {
+					t.Fatal(err)
+				}
+				if artifact.Route.Pipeline == config.ExchangesPipeline {
+					lines = append(lines, line)
+				}
+			}
 			if uint64(len(lines)) != one.want || !bytes.Contains(lines[0], []byte("useful")) {
-				t.Fatal("writer count is not supported by useful artifact records")
+				t.Fatalf("final exchange records=%d want=%d, or the first is not the useful one", len(lines), one.want)
 			}
 			if one.want == 2 {
 				var artifact processing.Artifact
@@ -276,7 +291,7 @@ func TestControllerProcessingUsesFinalizationEvidence(t *testing.T) {
 					t.Fatal("final useful prefix omitted its indeterminate suffix marker")
 				}
 			}
-			processingAccount(t, f, one.want, logs.Bytes())
+			processingAccount(t, f, uint64(len(all)), logs.Bytes())
 		})
 	}
 }

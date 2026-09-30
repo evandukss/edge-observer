@@ -62,21 +62,7 @@ func t17RemoveAuthorization(t *testing.T, c configured) {
 	if err := json.Unmarshal(content, &document); err != nil {
 		t.Fatalf("decode %s: %v", c.path, err)
 	}
-	document["pipelines"] = []any{
-		map[string]any{
-			"name": "exchanges", "input": "reconstruction",
-			"slots": []any{map[string]any{
-				"name": "strip", "implementation": "remove-headers",
-				"configuration": map[string]any{"headers": []any{"authorization"}},
-				"on_failure":    "drop_and_account",
-			}},
-			"sinks": []any{"account"}, "queues": []any{},
-		},
-		map[string]any{
-			"name": "connections", "input": "connection",
-			"slots": []any{}, "sinks": []any{"account"}, "queues": []any{},
-		},
-	}
+	document["remove"] = map[string]any{"headers": []any{"authorization"}}
 	written, err := json.Marshal(document)
 	if err != nil {
 		t.Fatalf("encode the configuration: %v", err)
@@ -356,18 +342,7 @@ func t17PublicInspection(t *testing.T, s t17Session, forbidden ...string) {
 	if err := json.Unmarshal(content, &document); err != nil {
 		t.Fatalf("decode the capture configuration: %v", err)
 	}
-	document["pipelines"] = []any{
-		map[string]any{
-			"name": "exchanges", "input": "reconstruction",
-			"slots": []any{map[string]any{
-				"name": "strip", "implementation": "remove-headers",
-				"configuration": map[string]any{"headers": []any{"x-public"}},
-				"on_failure":    "drop_and_account",
-			}},
-			"sinks": []any{"account"}, "queues": []any{},
-		},
-		map[string]any{"name": "connections", "input": "connection", "slots": []any{}, "sinks": []any{"account"}, "queues": []any{}},
-	}
+	document["remove"] = map[string]any{"headers": []any{"x-public"}}
 	changed, err := json.Marshal(document)
 	if err != nil {
 		t.Fatalf("encode the changed policy: %v", err)

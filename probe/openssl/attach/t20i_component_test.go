@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/evandukss/edge-observer/contract/config"
-	cp "github.com/evandukss/edge-observer/contract/policy"
 	"github.com/evandukss/edge-observer/contract/record"
 	"github.com/evandukss/edge-observer/processing"
 )
@@ -91,9 +90,8 @@ func TestT20iRemoveBodyOnRequestsDropsEveryRequestBodyAndKeepsTheResponse(t *tes
 				t20iEvidence(t, a, x)
 			}},
 	}
-	setup := t20iSetup{pipelines: []map[string]any{t20iPipeline("t20i", []string{"account"},
-		t20iSlot("body", config.RemoveBody, map[string]any{"messages": []string{"request"}}))}}
-	t20iAssert(t, t20iRun(t, setup, cases), []string{"t20i"}, cases)
+	setup := t20iSetup{rules: map[string]any{"remove": map[string]any{"bodies": []string{"request"}}}}
+	t20iAssert(t, t20iRun(t, setup, cases), []string{config.ExchangesPipeline}, cases)
 }
 
 // remove-body on both messages under the message.body exclusion: both bodies
@@ -128,12 +126,8 @@ func TestT20iRemoveBodyOnBothMessagesSatisfiesTheBodyExclusion(t *testing.T) {
 				t20iEvidence(t, a, x)
 			}},
 	}
-	setup := t20iSetup{
-		pipelines: []map[string]any{t20iPipeline("t20i", []string{"account"},
-			t20iSlot("body", config.RemoveBody, map[string]any{"messages": []string{"request", "response"}}))},
-		requirements: []cp.Requirement{t20iRequirement("t20i-body", config.BodyField)},
-	}
-	t20iAssert(t, t20iRun(t, setup, cases), []string{"t20i"}, cases)
+	setup := t20iSetup{rules: map[string]any{"remove": map[string]any{"bodies": []string{"request", "response"}}}}
+	t20iAssert(t, t20iRun(t, setup, cases), []string{config.ExchangesPipeline}, cases)
 }
 
 // t20iShapeNames is every member name a shape holds, at any depth.
@@ -221,12 +215,8 @@ func TestT20iReduceBodyToStructureDropsValuesAndKeepsMemberNames(t *testing.T) {
 				t20iEvidence(t, a, x)
 			}},
 	}
-	setup := t20iSetup{
-		pipelines: []map[string]any{t20iPipeline("t20i", []string{"account"},
-			t20iSlot("reduce", config.ReduceBodyToStructure, map[string]any{"messages": []string{"request", "response"}}))},
-		requirements: []cp.Requirement{t20iRequirement("t20i-values", config.BodyValuesField)},
-	}
-	t20iAssert(t, t20iRun(t, setup, cases), []string{"t20i"}, cases)
+	setup := t20iSetup{rules: map[string]any{"remove": map[string]any{"body_values": []string{"request", "response"}}}}
+	t20iAssert(t, t20iRun(t, setup, cases), []string{config.ExchangesPipeline}, cases)
 }
 
 // remove-query under message.target.query: the target goes from its first
@@ -267,11 +257,10 @@ func TestT20iRemoveQueryDropsTheTargetFromItsFirstQuestionMark(t *testing.T) {
 	}
 	cases[len(cases)-1].permitted = append(slices.Clone(permitted), t20iPermitted("RQ_PATH"))
 	setup := t20iSetup{
-		pipelines:    []map[string]any{t20iPipeline("t20i", []string{"account"}, t20iSlot("query", config.RemoveQuery, map[string]any{}))},
-		requirements: []cp.Requirement{t20iRequirement("t20i-query", config.TargetQueryField)},
+		rules: map[string]any{"remove": map[string]any{"query_string": true}},
 	}
 	if strings.Contains(semicolon, "?") {
 		t.Fatal("wiring: the path case holds a question mark")
 	}
-	t20iAssert(t, t20iRun(t, setup, cases), []string{"t20i"}, cases)
+	t20iAssert(t, t20iRun(t, setup, cases), []string{config.ExchangesPipeline}, cases)
 }

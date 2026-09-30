@@ -56,7 +56,7 @@ func t18EndedByItself(t *testing.T, binary string, c configured, drive func(s *t
 func t18InputLimit(t *testing.T, binary string) account.Account {
 	client := speaking(t, t18Serving(t))
 	c := configuring(t, target("client", client.process))
-	t18Edit(t, c, t18Removing, t18Setting("admitted_event_limit", 30))
+	t18Edit(t, c, t18Removing, t18Setting("events", 30))
 	return t18EndedByItself(t, binary, c, func(s *t18Session) {
 		for i := 0; i < 40 && !s.ended(); i++ {
 			t18Ask(t, client, fmt.Sprintf("/?asked=t18-reason-limit-%d", i))
@@ -109,7 +109,7 @@ func t18StorageExhausted(t *testing.T, binary string) account.Account {
 func t18IntakeExhausted(t *testing.T, binary string) account.Account {
 	client := speaking(t, t18Serving(t))
 	c := configuring(t, target("client", client.process))
-	t18Edit(t, c, t18Removing, t18Setting("admitted_event_limit", 8192))
+	t18Edit(t, c, t18Removing, t18Setting("events", 8192))
 	return t18EndedByItself(t, binary, c, func(s *t18Session) {
 		for i := 0; i < 400 && !s.ended(); i++ {
 			t18Ask(t, client, fmt.Sprintf("/mega?asked=t18-reason-intake-%d", i))

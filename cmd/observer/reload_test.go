@@ -21,40 +21,23 @@ import (
 	"github.com/evandukss/edge-observer/process"
 )
 
-// The descendant answers a target states, one per admission mode.
+// Three watch entries, one per children answer.
 const (
-	fixedAnswers = `"boundary": "exec_ends_the_grant", "root_exit": "survivors_keep_their_grants", "replacement": "needs_restart"`
-	follow       = `{"existing": true, "future": true, ` + fixedAnswers + `}`
-	existing     = `{"existing": true, "future": false, ` + fixedAnswers + `}`
-	none         = `{"existing": false, "future": false, ` + fixedAnswers + `}`
-
-	gatewayTarget = `{"name": "gateway", "match": {"exe": "/usr/bin/php", "args": ["/srv/gateway/main.php"]}, "descendants": ` + follow + `}`
-	workerTarget  = `{"name": "worker", "match": {"cgroup": "/system.slice/worker.service"}, "descendants": ` + existing + `}`
-	batchTarget   = `{"name": "batch", "match": {"exe": "/usr/bin/batch"}, "descendants": ` + none + `}`
+	gatewayTarget = `{"name": "gateway", "exe": "/usr/bin/php", "args": ["/srv/gateway/main.php"], "children": "all"}`
+	workerTarget  = `{"name": "worker", "cgroup": "/system.slice/worker.service", "children": "existing"}`
+	batchTarget   = `{"name": "batch", "exe": "/usr/bin/batch", "children": "none"}`
 )
 
 // inForce is the policy a running session holds; each case changes one thing.
 const inForce = `{
-  "version": "observer.config/draft",
-  "observer": {"log": "/var/log/observer/observer.log", "directory": "/var/lib/observer"},
-  "observation_scope": {
-    "targets": [
+  "version": "observer.config/1",
+  "output": "/var/lib/observer", "log": "/var/log/observer/observer.log",
+  "watch": [
       ` + gatewayTarget + `,
       ` + workerTarget + `
-    ],
-    "exclude": [{"exe": "/usr/bin/curl"}],
-    "libraries": []
-  },
-  "traffic_scope": {"rules": [{"targets": [], "direction": "any", "local_ports": [], "remote_ports": []}]},
-  "retention_and_export": {"retain_plaintext": true, "export_sinks": []},
-  "packs": [],
-  "sinks": [{"name": "account", "kind": "local_account"}],
-  "pipelines": [
-    {"name": "exchanges", "input": "reconstruction", "slots": [], "sinks": ["account"], "queues": []},
-    {"name": "connections", "input": "connection", "slots": [], "sinks": ["account"], "queues": []}
   ],
-  "subscribers": [],
-  "policy": []
+  "ignore": [{"exe": "/usr/bin/curl"}],
+  "libraries": []
 }`
 
 func loaded(t *testing.T, content string) policy.Policy {
@@ -89,8 +72,8 @@ func TestAReloadThatOnlyAddsIsAdditiveAndNamesWhatItAdds(t *testing.T) {
 	}
 
 	added, refused = additive(current, replaced(t,
-		`"exclude"`,
-		`"exclude"`)) // the same file again, through the helper, as the control for the helper
+		`"ignore"`,
+		`"ignore"`)) // the same file again, through the helper, as the control for the helper
 	if refused != "" || len(added) != 0 {
 		t.Errorf("the helper changed the policy: refused %q, added %v", refused, added)
 	}
@@ -120,13 +103,13 @@ func TestAReloadThatTakesAnythingAwayIsRefusedWithItsReason(t *testing.T) {
 			`"args": ["/srv/gateway/main.php"]`, `"args": ["/srv/gateway/main.php", "--only"]`,
 			"changes target gateway"},
 		"a target's mode narrowed": {
-			`"args": ["/srv/gateway/main.php"]}, "descendants": ` + follow, `"args": ["/srv/gateway/main.php"]}, "descendants": ` + none,
+			`"args": ["/srv/gateway/main.php"], "children": "all"`, `"args": ["/srv/gateway/main.php"], "children": "none"`,
 			"changes target gateway"},
 		"an exclusion added": {
 			`[{"exe": "/usr/bin/curl"}]`, `[{"exe": "/usr/bin/curl"}, {"exe": "/usr/bin/wget"}]`,
 			"adds an exclusion"},
 		"an exclusion removed": {
-			`"exclude": [{"exe": "/usr/bin/curl"}]`, `"exclude": []`,
+			`"ignore": [{"exe": "/usr/bin/curl"}]`, `"ignore": []`,
 			"removes an exclusion"},
 		"where it writes": {
 			`/var/log/observer/observer.log`, `/var/log/observer/elsewhere.log`,
@@ -333,12 +316,13 @@ func reloading(t *testing.T, pid int32) (*daemon, *admitting, reloadRequest) {
 
 	directory := t.TempDir()
 	document := func(targets ...string) string {
-		observer, err := json.Marshal(map[string]any{"log": "stdout", "directory": directory})
+		output, err := json.Marshal(directory)
 		if err != nil {
 			t.Fatalf("encode the configuration: %v", err)
 		}
 		written := strings.Replace(strings.Replace(inForce,
-			`{"log": "/var/log/observer/observer.log", "directory": "/var/lib/observer"}`, string(observer), 1),
+			`"output": "/var/lib/observer", "log": "/var/log/observer/observer.log"`,
+			`"output": `+string(output)+`, "log": "stdout"`, 1),
 			gatewayTarget+`,
       `+workerTarget, strings.Join(targets, ", "), 1)
 		if strings.Contains(written, "gateway") || !strings.Contains(written, directory) {
@@ -346,12 +330,13 @@ func reloading(t *testing.T, pid int32) (*daemon, *admitting, reloadRequest) {
 		}
 		return written
 	}
-	kept := `{"name": "kept", "match": {"exe": "/usr/bin/nonexistent-kept"}, "descendants": ` + none + `}`
-	match, err := json.Marshal(map[string]any{"exe": child.Executable, "args": child.Arguments[1:]})
+	kept := `{"name": "kept", "exe": "/usr/bin/nonexistent-kept", "children": "none"}`
+	entry, err := json.Marshal(map[string]any{"name": "added", "exe": child.Executable, "args": child.Arguments[1:],
+		"children": "none"})
 	if err != nil {
 		t.Fatalf("encode the added target: %v", err)
 	}
-	added := `{"name": "added", "match": ` + string(match) + `, "descendants": ` + none + `}`
+	added := string(entry)
 	current := loaded(t, document(kept))
 	path := filepath.Join(t.TempDir(), "observer.json")
 	if err := os.WriteFile(path, []byte(document(kept, added)), 0o600); err != nil {
