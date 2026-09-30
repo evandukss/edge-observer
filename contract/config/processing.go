@@ -71,14 +71,7 @@ const (
 	JSONFieldPrefix   = "message.body.json"
 )
 
-const (
-	ConfigurationTooLarge Reason = "configuration_too_large"
-	// BodyGrammarConflict is two slots of one pipeline that read request
-	// bodies by different grammars: a JSON field operation selecting the
-	// request beside a form field operation, or request-body-fields beside
-	// either. Each removes what the other reads whole.
-	BodyGrammarConflict Reason = "body_grammar_conflict"
-)
+const ConfigurationTooLarge Reason = "configuration_too_large"
 
 // Arguments is the executor's resolved input, never decoded again by a worker.
 // Only the members of the slot's implementation are set.
@@ -147,40 +140,6 @@ type Exclusion struct {
 	// Messages are the messages the removal applies to: request, response or
 	// both. A header, query or form field is counted as the request.
 	Messages []string `json:"messages,omitempty"`
-}
-
-// bodyGrammars names two slots that read request bodies by different grammars,
-// or two empty names where no two do. A JSON field operation selecting the
-// request and a form field operation each remove the other's bodies whole, and
-// request-body-fields reads by both, so it shares a pipeline with neither. A
-// JSON field operation selecting only the response reads no request body.
-func bodyGrammars(slots []EffectiveSlot) (first, second string) {
-	var jsonSlot, formSlot, bothSlot string
-	for _, s := range slots {
-		switch s.Implementation {
-		case RemoveJSONFields, ReplaceJSONValues:
-			if jsonSlot == "" && s.Arguments != nil && slices.Contains(s.Arguments.Messages, MessageRequest) {
-				jsonSlot = s.Name
-			}
-		case RemoveFormFields:
-			if formSlot == "" {
-				formSlot = s.Name
-			}
-		case RequestBodyFields:
-			if bothSlot == "" {
-				bothSlot = s.Name
-			}
-		}
-	}
-	switch {
-	case jsonSlot != "" && formSlot != "":
-		return jsonSlot, formSlot
-	case bothSlot != "" && jsonSlot != "":
-		return bothSlot, jsonSlot
-	case bothSlot != "" && formSlot != "":
-		return bothSlot, formSlot
-	}
-	return "", ""
 }
 
 // Pipelines returns the ordered execution view of the compiled plan.

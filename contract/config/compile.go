@@ -475,11 +475,6 @@ func generate(file File, m *merged) (*ProcessingPlan, []Finding) {
 			"the rules compiled to %d operations, above the %d the reader's limits allow; this is an observer "+
 				"defect, not the configuration's error", len(slots), MaxCompiledSlots)}}
 	}
-	if first, second := bodyGrammars(slots); first != "" {
-		return nil, []Finding{{Document: "configuration", Subject: second, Reason: InternalDefect, Detail: fmt.Sprintf(
-			"the internal layer refuses %s beside %s on one route (%s); this is an observer defect, not the "+
-				"configuration's error", first, second, BodyGrammarConflict)}}
-	}
 
 	if file.WriteContent {
 		plan.resolved.Pipelines = append(plan.resolved.Pipelines, EffectivePipeline{Name: ExchangesPipeline,
