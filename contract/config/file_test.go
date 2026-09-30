@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -272,4 +274,30 @@ func TestAPackIsReadUnderTheNameItIsEnabledBy(t *testing.T) {
 	_, findings = Compile([]byte(withRules(`"packs": ["credentials"]`)),
 		[]Supplied{{Name: "credentials", Content: []byte(`{"version": "observer.pack/1", "name": "other"}`)}})
 	refused(t, findings, "pack:credentials", "name", PackNameMismatch)
+}
+
+// CONFIG.md's Refusals table and the reasons the reader and the compiler
+// give are one set.
+func TestTheSpecificationAndTheReasonsAgree(t *testing.T) {
+	content, err := os.ReadFile("CONFIG.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, section, found := strings.Cut(string(content), "\n## Refusals\n")
+	if !found {
+		t.Fatal("wiring, not the property: CONFIG.md has no Refusals section")
+	}
+	section, _, _ = strings.Cut(section, "\n## ")
+	var written []Reason
+	for _, line := range strings.Split(section, "\n") {
+		if match := regexp.MustCompile("^\\| `([a-z_]+)` \\|").FindStringSubmatch(line); match != nil {
+			written = append(written, Reason(match[1]))
+		}
+	}
+	if len(written) < 10 {
+		t.Fatalf("wiring, not the property: the Refusals table lists %d reasons", len(written))
+	}
+	if !slices.Equal(written, Reasons) {
+		t.Errorf("CONFIG.md lists %v and the package gives %v", written, Reasons)
+	}
 }

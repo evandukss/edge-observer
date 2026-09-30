@@ -56,24 +56,18 @@ proven, and what does not work. Read it before relying on anything here.
   not reconstructed. Reconstruction runs when a finished session is read back, never while capturing.
 - **Local output**: the session account, on the host. Raw capture records stay in bounded volatile
   storage. Durable payload output requires processing and release authorization. Nothing is exported.
-- **Most of the configuration contract.** [contract/config/CONFIG.md](contract/config/CONFIG.md)
-  specifies packs, processing pipelines, subscribers, policy documents, traffic filtering, turning
-  plaintext retention off, export, and other kinds of sink. The program implements its bounded
-  processing profile: pipelines to the local account, three header operations (`remove-headers`,
-  `replace-header-values`, `truncate-header-values`), seven body and query operations
-  (`remove-body`, `reduce-body-to-structure`, `remove-query`, `remove-json-fields`,
-  `replace-json-values`, `remove-form-fields`, `remove-query-parameters`), mandatory field removal as
-  the one policy form, and configuration-only packs read from `packs/<name>.json` beside the
-  configuration. It refuses the rest - external components, subscribers, queues, traffic filtering,
-  other policy operations, turning plaintext retention off, export and other kinds of sink - naming
-  what it refuses. Of a target's five `descendants` answers, three accept one value each.
+- **One set of rules for every watched program.** The configuration
+  ([contract/config/CONFIG.md](contract/config/CONFIG.md)) removes, masks and truncates headers, query
+  parameters, form fields, JSON members and whole bodies, in one fixed order, and packs add rules from
+  `packs/<name>.json` beside it. Different rules for different watched programs are not in it. Three
+  things the earlier format could write cannot be written: stopping a pipeline at its first undecidable
+  exchange, exchanges written without connection records, and a mask with a truncation on one header.
 - **A reload only adds.** It puts in force a new target that needs no probe beyond those already
   placed. Anything it would take away, and a library nothing has attached to, waits for a restart.
 - **No release**: no archive, no tag, no version number.
 - **Every published format is a draft and not frozen**: the record (`observer.record/1-draft`), the
-  account and bundle (`observer.account/1-draft`, `observer.bundle/1-draft`), the configuration, pack
-  manifest and component interface (`observer.config/draft`, `observer.pack/draft`,
-  `observer.component/draft`) and the policy vocabulary (`observer.policy/draft`).
+  account and bundle (`observer.account/2-draft`, `observer.bundle/1-draft`), and the configuration and
+  pack (`observer.config/1`, `observer.pack/1`).
 - **The account format has no worked example bundle** in this repository;
   [contract/account/ACCOUNT.md](contract/account/ACCOUNT.md) specifies it.
 
@@ -119,45 +113,42 @@ Four steps: configure, check the host, run, inspect. Every command runs the prog
 
 ### 1. Configure
 
-The observer reads one JSON file, the operator configuration specified in
+The observer reads one JSON file, the configuration specified in
 [contract/config/CONFIG.md](contract/config/CONFIG.md). Start from the simplest one the program runs:
 
-    cp contract/config/examples/no-extension.config.json observer.config.json
+    cp contract/config/examples/no-rules.config.json observer.config.json
 
-In a release archive that file is already there, as `observer.config.json`. Four things in it are yours
+In a release archive that file is already there, as `observer.config.json`. Three things in it are yours
 to set.
 
-**Where it writes.** `observer.directory` is where the observer keeps its pid file and one directory per
-run under `sessions`; it is created if missing. `observer.log` is `stdout`, or an absolute path for a
-log file.
+**Where it writes.** `output` is where the observer keeps its pid file and one directory per run under
+`sessions`; it is created if missing. `log` is `stdout`, or an absolute path for a log file.
 
-**What it observes.** `observation_scope.targets` is the list of processes you approve, and no other
-process is observed. For one process already running, find what identifies it:
+**What it watches.** `watch` is the list of processes you approve, and no other process is observed. For
+one process already running, find what identifies it:
 
     pgrep -a <program name>                 # its pid and command line (or find it with ps)
     readlink /proc/<pid>/exe                # the file the kernel runs: this is "exe"
     tr '\0' '\n' < /proc/<pid>/cmdline      # its command line, one entry per line
 
-Then write the target, with `args` being every command-line entry after the first:
+Then write the entry, with `args` being every command-line entry after the first:
 
-    {
-      "name": "api",
-      "match": {"exe": "/usr/bin/python3.11", "args": ["/srv/api/server.py"]},
-      "descendants": {"existing": true, "future": true, "boundary": "exec_ends_the_grant",
-                      "root_exit": "survivors_keep_their_grants", "replacement": "needs_restart"}
-    }
+    {"name": "api", "exe": "/usr/bin/python3.11", "args": ["/srv/api/server.py"], "children": "all"}
 
-Every condition in `match` must hold. Besides `exe` and `args` there are three more: `cgroup`, a path on
+Every condition in an entry must hold. Besides `exe` and `args` there are three more: `cgroup`, a path on
 the unified cgroup hierarchy that the process must be in or below; `port`, a listening TCP port whose
 holders are selected, with an optional `interface`; and `pid`, which names one process as
-`{"pid": N, "start": S, "boot": B}`. `descendants.existing` and `descendants.future` choose whether the
-matched process's children already running, and the ones it creates later, are observed too; the other
-three answers are fixed and must be written exactly as above. `observation_scope.exclude` lists matches
-that are never observed, whatever a target says.
+`{"pid": N, "start": S, "boot": B}`. `children` is `all` (the default), `existing` or `none`: whether
+the matched process's children are watched too - every one, only those already running, or none.
+`ignore` lists matches that are never watched, whatever an entry says.
 
-**Leave every other section as it is in the file.** The program implements what that file asks for -
-every connection of an approved process, kept on this host - and refuses any other value there with a
-message naming the section, rather than ignoring it.
+**What it removes.** Without rules the observer writes every exchange of a watched process as it
+crossed the TLS boundary. `remove` takes headers, query parameters, form fields, JSON members and whole
+bodies out before anything is written, and the observer refuses to start when it cannot enforce
+every one. `mask` replaces a value and `truncate` shortens a header's value. The shipped pack
+`credentials` removes the usual credential headers: copy `contract/config/examples/packs/credentials.json`
+to `packs/credentials.json` beside your configuration and add `"packs": ["credentials"]`. A misspelled
+key is refused by name, never ignored.
 
 Check what it would select, attaching nothing:
 
@@ -192,7 +183,7 @@ path of the account it sealed.
 
 ### 4. Inspect
 
-A finished run is a directory: `<observer.directory>/sessions/<session>`, the session `stop` named.
+A finished run is a directory: `<output>/sessions/<session>`, the session `stop` named.
 
     sudo ./observer inspect /var/lib/observer/sessions/<session> --text
 
