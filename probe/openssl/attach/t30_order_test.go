@@ -16,11 +16,11 @@ import (
 //	                            finds no body, and the name stays
 //	mask before body_values     response mask.json /card/number as "withheld" with
 //	                            response body_values: the kept kind is the mask's,
-//	                            a short string. Reversed, it is the original's, a
-//	                            decimal string
+//	                            short_string. Reversed, it is the original's,
+//	                            decimal_string
 //
 // The control is body_values alone: there the name is in the structure and the
-// kind is a decimal string, so the pair's result is the order's doing and not
+// kind is decimal_string, so the pair's result is the order's doing and not
 // the fixture's.
 func TestT30ThePublishedOrderIsTheOneExecuted(t *testing.T) {
 	binary := built(t)
@@ -50,7 +50,7 @@ func TestT30ThePublishedOrderIsTheOneExecuted(t *testing.T) {
 			}
 			t.Logf("request card fields %+v; response number kind %q; exclusions %v", requestCard.Fields, responseNumber.Kind, one.Exclusions)
 			if !paired {
-				if requestCard.at("number") == nil || responseNumber.Kind != "decimal string" {
+				if requestCard.at("number") == nil || responseNumber.Kind != "decimal_string" {
 					t.Fatalf("wiring, not the property: without the paired rule the name is absent or the kind is %q",
 						responseNumber.Kind)
 				}
@@ -63,8 +63,8 @@ func TestT30ThePublishedOrderIsTheOneExecuted(t *testing.T) {
 				!one.excluded("request", "message.body.values", "values_removed") {
 				t.Errorf("remove before body_values: the evidence lacks removed or values_removed: %v", one.Exclusions)
 			}
-			if responseNumber.Kind != "short string" {
-				t.Errorf("mask before body_values: the kept kind is %q, not the mask's short string", responseNumber.Kind)
+			if responseNumber.Kind != "short_string" {
+				t.Errorf("mask before body_values: the kept kind is %q, not the mask's short_string", responseNumber.Kind)
 			}
 			if n := t30Crossed(w, t30Protected); n != 0 {
 				t.Errorf("the protected marker crossed a write %d times", n)

@@ -214,8 +214,8 @@ func TestT30EveryRefusalHappensAtActivationBesideANeighbourThatWrites(t *testing
 				compiled, findings := config.Compile(content, packs)
 				text := fmt.Sprint(findings)
 				if unnamed := t30Unnamed(text, tc.named); compiled != nil || !strings.Contains(text, string(tc.reason)) || len(unnamed) != 0 {
-					t.Fatalf("wiring, not the property: the published reader does not refuse the fixture as %s naming %q: %s",
-						tc.reason, unnamed, text)
+					t.Fatalf("the published reader does not refuse the fixture as %s naming %q - a fixture without the "+
+						"fault, or a reader missing it; nothing below is measured: %s", tc.reason, unnamed, text)
 				}
 				launched := t18Launch(t, binary, t18Envelope(t, right), "start", c.path)
 				if _, activated := launched.activation(t, 30*time.Second); activated {
@@ -238,7 +238,8 @@ func TestT30EveryRefusalHappensAtActivationBesideANeighbourThatWrites(t *testing
 				c := configuring(t, target("client", client.process))
 				content, packs := tc.build(t, c, []map[string]any{t30Watch("client", client.process)}, false)
 				t30Written(t, c, content)
-				t30Accepted(t, content, packs...)
+				t30Admitted(t, binary, c, content, packs, "the neighbour one change from the refused file is refused "+
+					"too, so the refusal beside it may be a program refusing everything")
 				w := t30Started(t, binary, c)
 				t30Send(t, client, t30Get("/t30-neighbour", "X-Public: "+t30Permitted))
 				t30Find(t, t30Finished(t, binary, c, w, client, 2), "/t30-neighbour")
@@ -262,7 +263,7 @@ func TestT30RemovalWinsAndIsNeverAConflict(t *testing.T) {
 		content := t30Written(t, c, t30Encoded(t, t30Document(c, []map[string]any{t30Watch("client", client.process)}, map[string]any{
 			"packs": []string{"t30-masking"}, "remove": map[string]any{"headers": []string{"x-api-key"}},
 		})))
-		t30Accepted(t, content, pack)
+		t30Admitted(t, binary, c, content, []config.Supplied{pack}, "removal is refused where it wins over a mask")
 		w := t30Started(t, binary, c)
 		t30Send(t, client, t30Get("/t30-removed", "X-Api-Key: "+t30Protected, "X-Public: "+t30Permitted))
 		one := t30Find(t, t30Finished(t, binary, c, w, client, 2), "/t30-removed")
@@ -278,7 +279,7 @@ func TestT30RemovalWinsAndIsNeverAConflict(t *testing.T) {
 			"remove": map[string]any{"json": map[string]any{"request": []string{"/card"}}},
 			"mask":   map[string]any{"json": map[string]any{"request": map[string]any{"/card/number": "withheld"}}},
 		})))
-		t30Accepted(t, content)
+		t30Admitted(t, binary, c, content, nil, "removal is refused where it wins over a mask")
 		w := t30Started(t, binary, c)
 		t30Send(t, client, t30Post("/t30-card", []string{"application/json"},
 			`{"card":{"number":"`+t30Protected+`"},"note":"`+t30Permitted+`"}`))

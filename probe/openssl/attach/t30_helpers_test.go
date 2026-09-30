@@ -246,9 +246,24 @@ func t30Accepted(t *testing.T, content []byte, packs ...config.Supplied) *config
 	t.Helper()
 	compiled, findings := config.Compile(content, packs)
 	if compiled == nil || len(findings) != 0 {
-		t.Fatalf("wiring, not the property: the fixture is not a file the published reader accepts: %+v\n%s", findings, content)
+		t.Fatalf("not the property under test: the published reader refuses the fixture - a fixture error, or a "+
+			"reader refusing a valid file; nothing below is measured: %+v\n%s", findings, content)
 	}
 	return compiled
+}
+
+// t30Admitted is the property itself where acceptance is what a case claims -
+// a neighbour one change from a refused file, a removal beside a rule it wins
+// over: the published reader and the command both accept the file. meaning is
+// what a refusal here says about the subject.
+func t30Admitted(t *testing.T, binary string, c configured, content []byte, packs []config.Supplied, meaning string) {
+	t.Helper()
+	if compiled, findings := config.Compile(content, packs); compiled == nil || len(findings) != 0 {
+		t.Fatalf("%s: the published reader refuses it: %+v", meaning, findings)
+	}
+	if stdout, stderr, err := t18Command(t, 30*time.Second, binary, "dry-run", c.path); err != nil {
+		t.Fatalf("%s: the command refuses it (%v):\n%s%s", meaning, err, stdout, stderr)
+	}
 }
 
 // t30Variants is needle as it reads inside base64 at each of the three byte
