@@ -64,6 +64,7 @@ type executor struct {
 var executors = []executor{
 	{"contract/config/examples", "observer dry-run over every *.config.json", dryRunEvery},
 	{"contract/config/examples", "the configuration check over every example index.json lists", checkAsIndexed},
+	{"contract/config/examples", "the reader over every observer.config/1 example, with the packs it enables", compileEveryFile},
 	{"contract/examples/bundle", "the account validator over the dummy bundle", checkDocumentBundle},
 	{"contract", "the configuration and policy checks over standalone declarations", checkDocumentDeclarations},
 }
@@ -263,6 +264,58 @@ func dryRunEvery(examples fs.FS) map[string]error {
 		}
 		if err := dryRunOne(examples, at); err != nil {
 			failures[at] = err
+		}
+		return nil
+	})
+	if err != nil {
+		failures[""] = err
+	}
+	return failures
+}
+
+// compileEveryFile compiles every example written at observer.config/1, with
+// the packs it enables read from packs/<name>.json beside it. Every other
+// example is peeked at without being recorded as opened, since reading its
+// version is not executing it.
+func compileEveryFile(examples fs.FS) map[string]error {
+	failures := map[string]error{}
+	source := examples
+	if recorded, ok := examples.(*openedFS); ok {
+		source = recorded.fsys
+	}
+	err := fs.WalkDir(source, ".", func(at string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || !strings.HasSuffix(at, ".json") {
+			return err
+		}
+		peek, err := fs.ReadFile(source, at)
+		if err != nil {
+			return err
+		}
+		var version struct {
+			Version string `json:"version"`
+		}
+		if json.Unmarshal(peek, &version) != nil || version.Version != config.FileVersion {
+			return nil
+		}
+		content, err := fs.ReadFile(examples, at)
+		if err != nil {
+			return err
+		}
+		file, findings := config.ReadFile(content)
+		var packs []config.Supplied
+		for _, name := range file.Packs {
+			pack, err := fs.ReadFile(examples, path.Join(path.Dir(at), "packs", name+".json"))
+			if err != nil {
+				failures[at] = err
+				return nil
+			}
+			packs = append(packs, config.Supplied{Name: name, Content: pack})
+		}
+		if len(findings) == 0 {
+			_, findings = config.Compile(content, packs)
+		}
+		if len(findings) > 0 {
+			failures[at] = fmt.Errorf("refused: %+v", findings)
 		}
 		return nil
 	})

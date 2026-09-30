@@ -159,10 +159,14 @@ type DurableRoute struct {
 // trailer occurrences, repeats and case variants. Every slot counted towards
 // the removal must use the declared FailureAction.
 type Exclusion struct {
-	Declaration   string `json:"declaration"`
-	Field         string `json:"field"`
-	Header        string `json:"header,omitempty"`
-	FailureAction string `json:"failure_action"`
+	Declaration string `json:"declaration"`
+	Field       string `json:"field"`
+	Header      string `json:"header,omitempty"`
+	// Messages are the messages the removal applies to, where a document names
+	// them: request, response or both. A header, query or form field is
+	// counted as the request.
+	Messages      []string `json:"messages,omitempty"`
+	FailureAction string   `json:"failure_action"`
 }
 
 // CompileProcessing resolves configuration-only packs and checks the bounded
