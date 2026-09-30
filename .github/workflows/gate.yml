@@ -68,6 +68,16 @@ jobs:
       - run: .github/gate/run.sh static
         env:
           GATE_OUT: ${{ runner.temp }}/gate
+      # The console carries only the verdict line; the logs under GATE_OUT name
+      # what failed. A failed job keeps them for 14 days. The artifact job does
+      # not, because its GATE_OUT holds the release archive it must not publish.
+      - if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gate-static
+          path: ${{ runner.temp }}/gate
+          if-no-files-found: warn
+          retention-days: 14
 
   unit:
     needs: plan
@@ -85,6 +95,13 @@ jobs:
       - run: .github/gate/run.sh unit
         env:
           GATE_OUT: ${{ runner.temp }}/gate
+      - if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gate-unit-${{ matrix.runner }}
+          path: ${{ runner.temp }}/gate
+          if-no-files-found: warn
+          retention-days: 14
 
   bpf:
     needs: plan
@@ -100,6 +117,13 @@ jobs:
       - run: .github/gate/run.sh bpf
         env:
           GATE_OUT: ${{ runner.temp }}/gate
+      - if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gate-bpf
+          path: ${{ runner.temp }}/gate
+          if-no-files-found: warn
+          retention-days: 14
 
   artifact:
     needs: plan
@@ -134,6 +158,13 @@ jobs:
       - run: uname -srm && .github/gate/run.sh attach
         env:
           GATE_OUT: ${{ runner.temp }}/gate
+      - if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gate-attach-${{ matrix.runner }}
+          path: ${{ runner.temp }}/gate
+          if-no-files-found: warn
+          retention-days: 14
 
   verdict:
     needs: [plan, static, unit, bpf, artifact, attach]
