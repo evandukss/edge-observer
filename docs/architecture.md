@@ -6,8 +6,8 @@ one Go module.
 
 ## The flow
 
-    configuration file, and the packs it enables (packs/<name>.json beside it)
-      -> policy            compile them, check them against what this program has, refuse what it does not do
+    configuration file
+      -> policy            compile it, check it against what this program has, refuse what it does not do
       -> process           read /proc, select the approved processes and their descendants
       -> probe             ask each adapter whether it can observe each process (the catalogue)
       -> probe/openssl/attach, ebpf, bpf
@@ -26,8 +26,8 @@ with no kernel and no privilege. The only thing they share is the fragment recor
 
 ## Selecting what to observe
 
-**`cmd/observer`** reads the configuration file and every pack it enables, from `packs/<name>.json`
-beside it, and **`policy`** compiles them together. The file is the operator configuration of
+**`cmd/observer`** reads the configuration file, and **`policy`** compiles it, resolving each
+extension's command against the file's directory. The file is the operator configuration of
 `contract/config/CONFIG.md`, checked by that contract's own code (`contract/config`) against what this
 program has. Every section the contract accepts and this program does not implement is refused by
 name, never read and ignored. `stop` and a running session's `inspect` read only where the session is.
@@ -93,12 +93,18 @@ run outside it.
 compiled `contract/config.ProcessingPlan` and leased intake entries. `processing.Artifact` defines
 the versioned `approved.jsonl` representation for the public reader; every durable route shares one
 encoded-byte allowance in that file. The interface declarations state input validation, completion
-evidence, authorization ordering and output refusal. The serial worker keeps intake leases through
-processing and output, executes the compiled slots on separate pipeline copies, and authorizes each
-encoded route result through the shared delivery gate immediately before writing. The writer refuses
-a line that would exceed the remaining allowance without writing any of it; failure stops further
-worker output. Connection routes carry metadata only. Still-open batches require explicit withdrawal
-and callback-drain evidence at finalization, which never substitutes for a transport close.
+evidence, authorization ordering and output refusal. Processing runs on `limits.workers` workers.
+One owner takes the intake's entries and routes each by its connection (process and connection id) to
+the worker that owns that connection, so one worker processes a connection's entries in order. A
+worker's queue holds leased entries, so the intake's one allowance bounds every queue together and
+routing never waits on a worker. An entry arriving for a connection already processed is released at
+once and counted. Each worker keeps intake leases through processing and output, executes the
+compiled slots on separate pipeline copies, and authorizes each encoded route result through the
+shared delivery gate immediately before writing, at one release point every worker shares, so writes
+are serialised. The writer refuses a line that would exceed the remaining allowance without writing
+any of it; a failure stops output by every worker. Connection routes carry metadata only.
+Still-open batches require explicit withdrawal and callback-drain evidence at finalization, which
+never substitutes for a transport close.
 An approved prefix is not a whole stream. `reconstruction_truncation` explicitly marks its suffix
 indeterminate and records the affected directions, the first excluded offsets, the structural reasons,
 and the evidence offsets (which can lie inside a withheld message). In the same artifact,
@@ -117,16 +123,17 @@ evidence, not known-empty evidence. Empty evidence says nothing about an unpubli
 indeterminate suffix. These encoded bytes share the approved-output allowance with the rest of the
 artifact.
 
-The command runs the worker on one serial goroutine, separate from the controller that selects
-stop, gate withdrawal and writer exhaustion. It takes queued intake on a 10 ms cadence; elapsed
-time never establishes batch completeness. Live accounts carry only session aggregates: processing
-failures, output failures, authorized and written route records, stopped-pipeline identities, and one
-gate reason. The counts come from the last returned worker outcome and the gate is read later; these
-are not an atomic reading and do not wait for a write to finish. At stop the producer withdraws and drains, capture
-publishes its final records, and the worker receives the actual withdrawal and drain results. Both
-must be complete to release a still-open batch. The worker releases all remaining leases and closes
-approved output before the final account is written. This integration does not impose a whole-session
-finalization deadline; the producer drain bound does not bound a held worker or writer.
+The command routes on one goroutine, separate from the controller that selects stop, gate
+withdrawal and writer exhaustion, and each worker runs on its own. Routing takes queued intake on a
+10 ms cadence; elapsed time never establishes batch completeness. Live accounts carry only session
+aggregates: processing failures, output failures, authorized and written route records,
+stopped-pipeline identities, and one gate reason. The counts are the workers' last returned outcomes,
+summed, and the gate is read later; these are not an atomic reading and do not wait for a write to
+finish. At stop the producer withdraws and drains, capture publishes its final records, and every
+worker receives the actual withdrawal and drain results. Both must be complete to release a
+still-open batch. The workers release all remaining leases and approved output is closed before the
+final account is written. This integration does not impose a whole-session finalization deadline;
+the producer drain bound does not bound a held worker or writer.
 
 **`spool`** implements the legacy raw disk format. Production capture does not wire it into either
 sink, and starting a new session does not open it. Legacy readers still recognize its filenames.
@@ -175,7 +182,8 @@ and process before authorized output; capture callbacks themselves hold no recon
 `contract/` holds the published formats as documents, with Go code that encodes and checks each one.
 Where a document and its code disagree, the document is corrected first.
 
-    contract/config       the configuration and the pack a user writes, and the plan they compile to
+    contract/config       the configuration a user writes, and the plan it compiles to
+    contract/extension    the protocol between the observer and an extension
     contract/record       the records the observer produces: observation, connection, reconstruction,
                           reassembly
     contract/account      the account of a session, and the bundle that carries it with its records

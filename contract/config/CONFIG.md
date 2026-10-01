@@ -1,15 +1,15 @@
-# The configuration and the pack
+# The configuration
 
-Status: Live, draft contracts `observer.config/1` and `observer.pack/1`. **These remain draft
-contracts.** No machine-readable schema is published; the examples, such as
+Status: Live, draft contract `observer.config/1`. **This remains a draft contract.** No
+machine-readable schema is published; the examples, such as
 [examples/observer.config.json](examples/observer.config.json), show the shapes, and the reader in this
-directory ([read.go](read.go), [compile.go](compile.go)) enforces them. This document is the contract.
-Where the two disagree this document is corrected first.
+directory ([read.go](read.go), [compile.go](compile.go), [extensions.go](extensions.go)) enforces them.
+This document is the contract. Where the two disagree this document is corrected first.
 
-A user writes one configuration file: what to watch, where the output goes, and what to remove, mask and
-truncate. A pack is a second file of rules, installed beside it. The observer compiles the two directly
-into the plan it runs. **There are no pipelines, slots or components to write**: the observer runs the
-rules in one fixed, published order.
+A user writes one configuration file: what to watch, where the output goes, what to remove, mask and
+truncate, and which extensions to run. The observer compiles it directly into the plan it runs. **There
+are no pipelines, slots or components to write**: the observer runs the rules in one fixed, published
+order, and the extensions after them in the order listed.
 
 ## The configuration file
 
@@ -34,8 +34,11 @@ rules in one fixed, published order.
       },
       "mask": {"headers": {"x-api-key": "withheld"}, "json": {"response": {"/email": "withheld"}}},
       "truncate": {"headers": {"x-trace-id": 8}},
-      "limits": {"output_mib": 64, "events": 16384, "state_every_seconds": 30},
-      "packs": ["credentials"]
+      "extensions": [
+        {"name": "inventory", "command": ["/usr/local/lib/observer/inventory", "--batch", "100"],
+         "fields": ["request.line", "response.line"], "timeout_ms": 250}
+      ],
+      "limits": {"output_mib": 64, "events": 16384, "state_every_seconds": 30, "workers": 1}
     }
 
 **Required:** `version`, `output` and `watch`. Every other key is optional; absent means the value shown
@@ -44,8 +47,7 @@ above for `log`, `write_content`, `limits` and each `children`, and empty for th
 **The reader is strict at every level.** An unknown key (`"remvoe"`), a key written in another case
 (`"Remove"`), a key written twice, a value of the wrong type, a missing required key and anything after
 the document are each refused, naming the key by its path (`remove.remvoe`, `watch[0].children`). A
-document at another version is refused as `unknown_version`, naming the version this reader reads, and
-a pack given as a configuration, or the reverse, is refused by its version.
+document at another version is refused as `unknown_version`, naming the version this reader reads.
 
 ### Keys
 
@@ -58,8 +60,8 @@ a pack given as a configuration, or the reverse, is refused by its version.
 | `libraries` | approved TLS library builds, `{build_id, symbols: {SSL_read: <offset>}}`. Empty means any. The shape is stated; no tool prints it |
 | `write_content` | `true` writes exchanges and connection records. `false` writes connection records only; **plaintext is still read into memory and processed, and never written** |
 | `remove`, `mask`, `truncate` | the rules, below |
-| `limits` | `output_mib`, the approved output's allowance; `events`, the events admitted to processing; `state_every_seconds`, how often the log restates the session's state |
-| `packs` | pack names, each read from `packs/<name>.json` beside the configuration (below) |
+| `extensions` | the extensions to run, in order, each a `name`, a `command`, the `fields` it receives and `timeout_ms` (below) |
+| `limits` | `output_mib`, the approved output's allowance; `events`, the events admitted to processing; `state_every_seconds`, how often the log restates the session's state; `workers`, the fixed number of processing workers, each holding a share of the connections (default 1; measurements are in the observer user guide's Processing capacity section) |
 
 **A watch entry's conditions are matched as the observer's admission reads them.** `exe` is an absolute
 path. `args` are the arguments after `argv[0]`; an empty list means a process run with none, and absent
@@ -104,15 +106,16 @@ argument rules below.
 ### How rules combine
 
 **Removal wins over every other rule and is never a conflict. Two rules that would keep different values
-for one field are refused** (`rule_conflict`), naming both documents and keys. That covers two masks of
-one field, two truncations of one header, a mask and a truncation of one header, and the same conflicts
-between the configuration and a pack. The same value written twice is one rule. JSON pointers overlap
+for one field are refused** (`rule_conflict`), naming both keys. That covers two masks of one field,
+including one header written in two cases, two truncations of one header, and a mask and a truncation
+of one header. The same value written twice is one rule. JSON pointers overlap
 where they MAY match one field: one token list is a prefix of the other, and each pair of tokens is equal
 under simple case folding or one of them is `*`.
 
 **The rules run in one fixed order: remove, then mask, then truncate, then body_values.** Within
 remove, the order is headers, the query string, query parameters, bodies, form, request JSON, response
 JSON. A rule that runs later sees what earlier rules left. Nothing a user writes changes the order.
+Extensions run after every rule, in the order `extensions` lists them, and see only what the rules left.
 
 **Every rule applies to every `watch` entry.** Different rules for different watched programs are not in
 this draft.
@@ -253,8 +256,8 @@ where the run is last. Empty parameters and every other byte are kept.
 
 ## Exclusions, and what the approved output says
 
-Every `remove` entry, the configuration's or a pack's, is a mandatory exclusion of one field, named by
-GRAMMAR, so its name promises nothing about a framework:
+Every `remove` entry is a mandatory exclusion of one field, named by GRAMMAR, so its name promises
+nothing about a framework:
 
 | field | written as | what is removed |
 |---|---|---|
@@ -267,7 +270,7 @@ GRAMMAR, so its name promises nothing about a framework:
 | `message.body.values` | `remove.body_values` | every body value of the message named; names, nesting and value kinds may stay |
 
 **The observer refuses to start unless the plan it compiled enforces every one.** It checks the plan
-against the documents as it read them: every `remove` entry must have its exclusion AND an operation that
+against the configuration as it read it: every `remove` entry must have its exclusion AND an operation that
 removes that field on the exchanges route. A plan that does not is refused as `internal_defect` - the
 observer's defect, and it fails closed. A mask or a truncation satisfies no removal. Connection records
 carry metadata only and cannot contain these fields.
@@ -281,114 +284,96 @@ no entry.
 ## Limits
 
 The reader checks every limit a user can reach, in the user's terms, naming the key and the index of the
-entry past the limit (`limit_exceeded`). The limits count the configuration and its packs together, as
-merged:
+entry past the limit (`limit_exceeded`):
 
 | what | at most |
 |---|---|
 | names in `remove.headers`, `mask.headers` and `truncate.headers`, each | `MaxHeaderNames` |
 | names in `remove.query` and `remove.form`, each | `MaxFieldSelectors` |
 | pointers in `remove.json` and `mask.json`, each per message | `MaxFieldSelectors` |
-| enabled packs | `MaxProcessingPacks` |
-| the configuration and its enabled packs, in bytes | `MaxProcessingBytes` |
-| `limits.output_mib`, `limits.events`, `limits.state_every_seconds` | `MaxOutputMiB`, `MaxEvents`, `MaxStateEverySeconds`, and at least 1 |
+| entries in `extensions` | `MaxExtensions` (8) |
+| an extension's `timeout_ms` | `MaxExtensionTimeoutMS` (60000), and at least 1 |
+| the configuration, in bytes | `MaxProcessingBytes` |
+| `limits.output_mib`, `limits.events`, `limits.state_every_seconds`, `limits.workers` | `MaxOutputMiB`, `MaxEvents`, `MaxStateEverySeconds`, `MaxWorkers` (256), and at least 1 |
 
 The internal bounds are sized from what the reader can emit, so a configuration the reader accepts
 compiles within them. `MaxJSONFieldDepth` and `MaxJSONFieldNodes` bound what a JSON rule reads at run
 time; a body past either is removed whole as undecidable. The constants are defined once, in
-[file.go](file.go) and [processing.go](processing.go).
+[file.go](file.go), [processing.go](processing.go) and [extensions.go](extensions.go).
 
 ## Refusals
 
-Each refusal names its document - `configuration`, or `pack:<name>` - and the key it is about.
+Each refusal names the key it is about.
 
 | reason | when |
 |---|---|
-| `unknown_version` | the document is at another version, or is a pack given as a configuration or the reverse |
+| `unknown_version` | the document is at another version |
 | `malformed` | the document is not JSON |
 | `unknown_key` | a key the format does not define, including a defined key written in another case |
 | `duplicate_key` | a key written twice in one object |
 | `wrong_type` | a value of the wrong JSON type |
 | `trailing_content` | anything after the document |
 | `missing_key` | a required key is absent |
-| `invalid_value` | a value outside its rules: a relative path, a header name that is not a token, a pointer, a length, a limit below 1 |
+| `invalid_value` | a value outside its rules: a relative path, a header name that is not a token, a pointer, a length, a limit below 1, an extension name, field or timeout outside its rules, a content field with `write_content` false |
 | `limit_exceeded` | an entry past one of the limits above |
-| `duplicate_name` | two watch entries with one name, or a pack enabled twice |
+| `duplicate_name` | two watch entries or two extensions with one name, or a field an extension lists twice |
 | `rule_conflict` | two rules that would keep different values for one field |
-| `unknown_pack` | an enabled pack that was not supplied |
-| `configuration_too_large` | the configuration and its enabled packs exceed `MaxProcessingBytes` |
-| `pack_name_invalid` | a pack name that does not meet the name rule (below) |
-| `pack_name_mismatch` | a pack that names itself other than the name it is enabled by |
+| `configuration_too_large` | the configuration exceeds `MaxProcessingBytes` |
+| `command_not_executable` | an extension's command is not an executable regular file when the configuration is compiled |
 | `internal_defect` | the observer's own check refused what it compiled, or the plan does not enforce a `remove` entry. Never the user's error |
 
-## The pack
+## Extensions
 
-    {
-      "version": "observer.pack/1",
-      "name": "credentials",
-      "remove": {"headers": ["authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key"]}
-    }
+An extension is a user's own executable that the observer starts and feeds records to, over the protocol
+in [../extension/PROTOCOL.md](../extension/PROTOCOL.md). Each entry:
 
-A pack is `version`, `name` and any of `remove`, `mask` and `truncate`, in the configuration's shapes.
-**A pack adds rules; it cannot weaken the configuration's.** Its rules combine with the configuration's
-as above. The shipped example pack is `credentials`,
-[examples/packs/credentials.json](examples/packs/credentials.json).
-
-### Where the observer reads a pack
-
-**A pack named N that the configuration enables is read from `packs/N.json` in the directory holding the
-configuration file.** That directory is the lexical parent of the configuration's path, made absolute
-once where the command receives it, so a relative path means the same thing to a detached session and to
-a reload as to the command that named it. Only enabled packs are read, in the order `packs` lists them.
-Nothing is found by listing the directory, by a search path or by fetching, and a file there that the
-configuration does not enable is never opened. A configuration with no `packs` reads nothing there.
-
-**Installing a pack is placing its file there; activating it is naming it in `packs` and starting a
-session.** The pack's `name` must equal N. N must match `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`, checked
-before any file is opened, so a name cannot reach outside that directory. The file is opened without
-waiting for a writer and must be a regular file before a byte of it is read. The configuration and its
-enabled packs together are held to `MaxProcessingBytes`, and no more than one byte past it is read. A
-link is followed, as the configuration's own path is.
-
-A pack that cannot be read as the one named is refused before capture, with a nonzero exit. The finding
-names the `packs` entry that enabled it, and its detail names the path tried. It never means continuing
-without the pack:
-
-| reason | when |
+| key | value |
 |---|---|
-| `unknown_pack` | no file exists at `packs/N.json`, including a link to nothing |
-| `pack_unreadable` | the file exists and cannot be opened or read, including a loop of links |
-| `pack_not_regular_file` | the path is a directory, a named pipe, a socket or a device |
-| `configuration_too_large` | the configuration and the enabled packs read so far exceed `MaxProcessingBytes`; no pack after it is read |
+| `name` | `[a-z][a-z0-9_-]{0,62}`, unique. It keys the extension's counts in the account and names its output. Lowercase, so two names never name one file where a filesystem ignores case |
+| `command` | the argument vector: the executable, then its arguments. Nothing is run through a shell |
+| `fields` | the fields it receives, at least one, each once, from `request.line`, `request.headers`, `request.body`, `response.line`, `response.headers`, `response.body` and `connection` |
+| `timeout_ms` | how long the observer waits for its answer to one exchange, from 1 to `MaxExtensionTimeoutMS` |
 
-A pack that is read is then refused by the reader, under document `pack:N`, as any document is.
+All four are required. There is no failure setting: an extension that fails, times out or crashes never
+stops an exchange, which is written without that extension's changes. So an extension never protects
+data; that belongs in `remove`, which applies before any extension and always applies.
 
-**The observer does not authenticate packs.** The operator controls the integrity of the configuration,
-the packs and the directories through which either can be replaced: an observed participant or any
-other untrusted user must not be able to write them. There is no ownership, signature or link rule on
-the pack file, because the configuration file is read without one and a rule on the pack alone would be
-an assurance the rest of the path does not back. The pack's identity in a session is its exact bytes,
-bound into the session's revisions; that is identity, not authentication.
+**With `write_content` false only `connection` is selectable**: a content field there is refused as
+`invalid_value`, naming the field.
+
+**The command's executable is resolved once, when the configuration is compiled.** An absolute path is
+used as written. A relative path is resolved against the directory holding the configuration file - the
+lexical parent of the configuration's path, made absolute where the command receives it - never against
+the directory a command runs from, and never by a search path. The resolved file must be a regular file
+with an execute permission bit set, a link being followed; anything else is refused as
+`command_not_executable`, naming the entry and the path, before anything attaches. `start`,
+`start --daemonize`, `restart`, `dry-run`, `preflight` and `reload` all compile, so all of them refuse it.
+
+**The observer does not authenticate an extension.** The operator controls the integrity of the
+configuration, the executable and every directory through which either can be replaced: an observed
+participant or any other untrusted user must not be able to write them. An executable replaced behind an
+unchanged path is run at the next start of that extension; that is the operator's responsibility.
 
 ## Reload and restart
 
-**The processing revision covers `remove`, `mask`, `truncate`, `write_content`, `packs` and the packs'
-bytes, and nothing else. Reload adds `watch` entries; every other change needs a restart,** including
-reordering `ignore`.
+**The processing revision covers `remove`, `mask`, `truncate`, `write_content` and `extensions`, each
+command with its executable resolved, and nothing else. Reload adds `watch` entries; every other change
+needs a restart,** including reordering `ignore` and changing any limit, `limits.workers` included. A
+limit is a setting and is not part of the processing revision, which is stamped on the output as the
+policy revision.
 
-A running session executes the plan it compiled when it started. `reload` rereads the configuration and
-every enabled pack, in the command and again in the running session after it has given up its
-capabilities, so both must be readable to the session then. Any change to the rules or to an enabled
-pack's bytes - a value, a version, whitespace - changes the processing revision and is refused as a
-processing change a restart applies, leaving the plan and generation in force. `restart` compiles the
-new configuration before it stops the running session, so a pack that cannot be read leaves that session
-running.
+A running session executes the plan it compiled when it started. `reload` rereads the configuration, in
+the command and again in the running session after it has given up its capabilities, so the
+configuration and every extension's executable must be reachable to the session then. Any change to the
+rules or to an extension entry changes the processing revision and is refused as a processing change a
+restart applies, leaving the plan and generation in force. `restart` compiles the new configuration
+before it stops the running session, so a command that is not there leaves that session running.
 
 **`stop`, and `inspect` of a running session, read only where the session is** - the configuration's
-`output`, read with the reader and nothing more - and never a pack. A pack that is broken, removed or
-changed never prevents stopping or inspecting a session. `start`, `start --daemonize`, `restart`,
-`dry-run`, `preflight` and `reload` compile everything, packs included. `inspect` of a finished
-session's directory reads no configuration at all.
+`output`, read with the reader and nothing more - and never look for a command. A missing or changed
+extension executable never prevents stopping or inspecting a session. `start`, `start --daemonize`,
+`restart`, `dry-run`, `preflight` and `reload` compile everything, commands included. `inspect` of a
+finished session's directory reads no configuration at all.
 
 ## Lost with the earlier format
 

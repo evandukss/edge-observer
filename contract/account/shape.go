@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"reflect"
 	"regexp"
 	"slices"
 	"strings"
 
+	observed "github.com/evandukss/edge-observer/account"
 	"github.com/evandukss/edge-observer/contract/record"
 )
 
@@ -350,10 +352,6 @@ var permitted = map[string]map[Moment][]BlockState{
 	"seal": {Planned: {NotReached}, Live: {NotReached}, Sealed: {Carried, Unavailable}},
 }
 
-// namespace is an extension namespace: lower-case dotted, at least two parts,
-// so it can never be a core block's name.
-var namespace = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`)
-
 // readAccount reads one account document: presence first, then the moment's
 // rules, then values. It returns the decoded account only when nothing was
 // found.
@@ -409,17 +407,6 @@ func readAccount(member string, content []byte) (Account, []Finding, int) {
 		}
 	}
 
-	if raw, present := members["extensions"]; present {
-		if extensions, ok := object(raw); ok {
-			for _, name := range slices.Sorted(mapsKeys(extensions)) {
-				if !namespace.MatchString(name) {
-					s.find("extensions."+name, ExtensionNamespaceInvalid,
-						"a namespace is a lower-case dotted name of at least two parts, and %q is not", name)
-				}
-			}
-		}
-	}
-
 	if len(s.findings) > 0 {
 		return Account{}, s.findings, s.blocks
 	}
@@ -464,6 +451,9 @@ func (s *shape) vocabulary(a Account) {
 		}
 	}
 	if a.Processing.State == Carried {
+		for _, name := range slices.Sorted(maps.Keys(a.Processing.Extensions)) {
+			s.extension("processing.extensions."+name, name, a.Processing.Extensions[name])
+		}
 		for index, pipeline := range a.Processing.Pipelines {
 			at := fmt.Sprintf("processing.pipelines[%d]", index)
 			oneOf(at+".activation", pipeline.Activation, "active", "refused")
@@ -505,6 +495,56 @@ func (s *shape) vocabulary(a Account) {
 		}
 		for index, identity := range a.Seal.Conserved {
 			oneOf(fmt.Sprintf("seal.conserved[%d].holds", index), identity.Holds, "holds", "does_not_hold", "not_evaluated")
+		}
+	}
+}
+
+// extensionName is the configuration's rule for an extension's name
+// (contract/config/CONFIG.md, Extensions).
+var extensionName = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,62}$`)
+
+// extensionFields is every field an extension entry may select, in the
+// protocol's order.
+var extensionFields = []string{"request.line", "request.headers", "request.body", "response.line",
+	"response.headers", "response.body", "connection"}
+
+// extension checks one extension's entry: its name, its label, its fields, and
+// that each count map holds exactly its vocabulary.
+func (s *shape) extension(at, name string, one ExtensionAccount) {
+	if !extensionName.MatchString(name) {
+		s.find(at, ValueNotInContract, "%q is not an extension name: %s", name, extensionName.String())
+	}
+	if one.Effects != observed.ExtensionEffects {
+		s.find(at+".effects", ValueNotInContract, "%q is not %s", one.Effects, observed.ExtensionEffects)
+	}
+	last := -1
+	for index, field := range one.Fields {
+		position := slices.Index(extensionFields, field)
+		if position <= last {
+			s.find(fmt.Sprintf("%s.fields[%d]", at, index), ValueNotInContract,
+				"%q is not a field, or not in the protocol's order once", field)
+		}
+		last = max(last, position)
+	}
+	for _, counted := range []struct {
+		member     string
+		counts     map[string]string
+		vocabulary []string
+	}{
+		{"failed_by", one.FailedBy, observed.ExtensionFailureReasons},
+		{"retired_by", one.RetiredBy, observed.ExtensionRetirementCauses},
+		{"derived_refused_by", one.DerivedRefusedBy, observed.DerivedRefusalReasons},
+	} {
+		for _, key := range slices.Sorted(maps.Keys(counted.counts)) {
+			if !slices.Contains(counted.vocabulary, key) {
+				s.find(at+"."+counted.member+"."+key, ValueNotInContract, "%q is not one of %v", key, counted.vocabulary)
+			}
+		}
+		for _, key := range counted.vocabulary {
+			if _, present := counted.counts[key]; !present {
+				s.find(at+"."+counted.member+"."+key, RequiredMemberAbsent, "every %s is counted, %q included",
+					counted.member, key)
+			}
 		}
 	}
 }

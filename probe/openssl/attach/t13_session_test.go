@@ -199,6 +199,9 @@ func TestARestartSealsTheFirstSessionBeforeTheSecondBeginsAndTheSecondNamesIt(t 
 	}
 }
 
+// credential is an Authorization value a client sends.
+const credential = "Bearer b7c1f4e09a2d"
+
 // A finished session's contract account, bundled, passes the account
 // contract's validator and carries none of the plaintext the session approved.
 // The session seals no record in the record contracts, so the bundle's record
@@ -274,7 +277,7 @@ func TestAFinishedSessionsContractAccountPassesTheValidatorAndCarriesNoPlaintext
 			t.Fatal(err)
 		}
 	}
-	result := contract.Validate(os.DirFS(root), contract.Options{})
+	result := contract.Validate(os.DirFS(root))
 	if result.Outcome != contract.Validated || result.Examined.Members != len(contract.Roles) || result.Examined.Blocks == 0 {
 		t.Errorf("the validator answers %s over %s for the session's contract account, examining %+v: %+v",
 			result.Outcome, result.Validated, result.Examined, result.Findings)

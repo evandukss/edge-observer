@@ -135,7 +135,7 @@ fall back to guessing plaintext from socket traffic.
 the catalogued functions, so a start on such a process is outside what is declared, and it has not been
 observed.
 
-[extension-guide.md](extension-guide.md) says what adding another library takes, and what currently stops
+[adding-support.md](adding-support.md) says what adding another library takes, and what currently stops
 a second one from attaching.
 
 ## Protocols

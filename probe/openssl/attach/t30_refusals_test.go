@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -24,8 +25,8 @@ type t30Refusal struct {
 	// of a conflict.
 	named []string
 	// build writes the refused (fault true) or neighbouring file into c and
-	// returns its bytes and the packs it enables.
-	build func(t *testing.T, c configured, watch []map[string]any, fault bool) ([]byte, []config.Supplied)
+	// returns its bytes.
+	build func(t *testing.T, c configured, watch []map[string]any, fault bool) []byte
 }
 
 // t30Unnamed is the names text does not carry whole. A name continued by more
@@ -53,9 +54,9 @@ func t30Replace(t *testing.T, content []byte, old, new string) []byte {
 }
 
 func t30Refusals() []t30Refusal {
-	simple := func(keys func(fault bool) map[string]any) func(*testing.T, configured, []map[string]any, bool) ([]byte, []config.Supplied) {
-		return func(t *testing.T, c configured, watch []map[string]any, fault bool) ([]byte, []config.Supplied) {
-			return t30Encoded(t, t30Document(c, watch, keys(fault))), nil
+	simple := func(keys func(fault bool) map[string]any) func(*testing.T, configured, []map[string]any, bool) []byte {
+		return func(t *testing.T, c configured, watch []map[string]any, fault bool) []byte {
+			return t30Encoded(t, t30Document(c, watch, keys(fault)))
 		}
 	}
 	headers := func(n int) []string {
@@ -68,56 +69,56 @@ func t30Refusals() []t30Refusal {
 	base := map[string]any{"write_content": true, "remove": map[string]any{"headers": []string{"authorization"}}}
 	return []t30Refusal{
 		{"an unknown key at the top level", config.UnknownKey, []string{"remvoe"},
-			func(t *testing.T, c configured, watch []map[string]any, fault bool) ([]byte, []config.Supplied) {
+			func(t *testing.T, c configured, watch []map[string]any, fault bool) []byte {
 				content := t30Encoded(t, t30Document(c, watch, base))
 				if fault {
 					content = t30Replace(t, content, `"remove":`, `"remvoe":`)
 				}
-				return content, nil
+				return content
 			}},
 		{"an unknown key inside remove", config.UnknownKey, []string{"remove.heders"},
-			func(t *testing.T, c configured, watch []map[string]any, fault bool) ([]byte, []config.Supplied) {
+			func(t *testing.T, c configured, watch []map[string]any, fault bool) []byte {
 				content := t30Encoded(t, t30Document(c, watch, base))
 				if fault {
 					content = t30Replace(t, content, `"headers":`, `"heders":`)
 				}
-				return content, nil
+				return content
 			}},
 		{"a duplicate key at the top level", config.DuplicateKey, []string{"write_content"},
-			func(t *testing.T, c configured, watch []map[string]any, fault bool) ([]byte, []config.Supplied) {
+			func(t *testing.T, c configured, watch []map[string]any, fault bool) []byte {
 				content := t30Encoded(t, t30Document(c, watch, base))
 				if fault {
 					content = t30Replace(t, content, `"write_content":true`, `"write_content":true,"write_content":true`)
 				}
-				return content, nil
+				return content
 			}},
 		{"a duplicate key inside remove", config.DuplicateKey, []string{"remove.headers"},
-			func(t *testing.T, c configured, watch []map[string]any, fault bool) ([]byte, []config.Supplied) {
+			func(t *testing.T, c configured, watch []map[string]any, fault bool) []byte {
 				content := t30Encoded(t, t30Document(c, watch, base))
 				if fault {
 					content = t30Replace(t, content, `"remove":{`, `"remove":{"headers":["cookie"],`)
 				}
-				return content, nil
+				return content
 			}},
 		{"a wrong type", config.WrongType, []string{"write_content"}, simple(func(fault bool) map[string]any {
 			return map[string]any{"write_content": map[bool]any{true: "yes", false: true}[fault]}
 		})},
 		// Trailing content follows every key, so the refusal names its reason.
 		{"trailing content", config.TrailingContent, []string{string(config.TrailingContent)},
-			func(t *testing.T, c configured, watch []map[string]any, fault bool) ([]byte, []config.Supplied) {
+			func(t *testing.T, c configured, watch []map[string]any, fault bool) []byte {
 				content := t30Encoded(t, t30Document(c, watch, base))
 				if fault {
 					content = append(content, []byte(`{"write_content":false}`)...)
 				}
-				return content, nil
+				return content
 			}},
 		{"a missing required key", config.MissingKey, []string{"watch"},
-			func(t *testing.T, c configured, watch []map[string]any, fault bool) ([]byte, []config.Supplied) {
+			func(t *testing.T, c configured, watch []map[string]any, fault bool) []byte {
 				document := t30Document(c, watch, base)
 				if fault {
 					delete(document, "watch")
 				}
-				return t30Encoded(t, document), nil
+				return t30Encoded(t, document)
 			}},
 		{"a mask and a truncation of one header", config.RuleConflict,
 			[]string{"truncate.headers.x-api-key", "mask.headers.x-api-key"}, simple(func(fault bool) map[string]any {
@@ -127,28 +128,6 @@ func t30Refusals() []t30Refusal {
 				}
 				return keys
 			})},
-		{"the operator and a pack masking one header differently", config.RuleConflict,
-			[]string{"t30-masking", "configuration", "mask.headers.x-api-key"},
-			func(t *testing.T, c configured, watch []map[string]any, fault bool) ([]byte, []config.Supplied) {
-				value := map[bool]string{true: "hidden", false: "withheld"}[fault]
-				pack := t30PackBytes(t, c, "t30-masking", map[string]any{"mask": map[string]any{"headers": map[string]any{"x-api-key": value}}})
-				return t30Encoded(t, t30Document(c, watch, map[string]any{
-					"packs": []string{"t30-masking"},
-					"mask":  map[string]any{"headers": map[string]any{"x-api-key": "withheld"}},
-				})), []config.Supplied{pack}
-			}},
-		// The pack writes the header in another case, so the two are one field
-		// only under the header names' case folding.
-		{"the operator and a pack truncating one header differently", config.RuleConflict,
-			[]string{"t30-truncating", "configuration", "truncate.headers.x-trace-id", "truncate.headers.X-Trace-Id"},
-			func(t *testing.T, c configured, watch []map[string]any, fault bool) ([]byte, []config.Supplied) {
-				length := map[bool]int{true: 4, false: 8}[fault]
-				pack := t30PackBytes(t, c, "t30-truncating", map[string]any{"truncate": map[string]any{"headers": map[string]any{"X-Trace-Id": length}}})
-				return t30Encoded(t, t30Document(c, watch, map[string]any{
-					"packs":    []string{"t30-truncating"},
-					"truncate": map[string]any{"headers": map[string]any{"x-trace-id": 8}},
-				})), []config.Supplied{pack}
-			}},
 		{"overlapping pointers masked differently", config.RuleConflict,
 			[]string{"mask.json.response./card/number", "mask.json.response./card"}, simple(func(fault bool) map[string]any {
 				masks := map[string]any{"/card/number": "withheld", "/email": "hidden"}
@@ -175,20 +154,20 @@ func t30Refusals() []t30Refusal {
 			return map[string]any{"remove": map[string]any{"query": []string{name}}}
 		})},
 		{"a relative output", config.InvalidValue, []string{"output"},
-			func(t *testing.T, c configured, watch []map[string]any, fault bool) ([]byte, []config.Supplied) {
+			func(t *testing.T, c configured, watch []map[string]any, fault bool) []byte {
 				document := t30Document(c, watch, base)
 				if fault {
 					document["output"] = "state"
 				}
-				return t30Encoded(t, document), nil
+				return t30Encoded(t, document)
 			}},
 		{"an old-format file", config.UnknownVersion, []string{config.FileVersion},
-			func(t *testing.T, c configured, watch []map[string]any, fault bool) ([]byte, []config.Supplied) {
+			func(t *testing.T, c configured, watch []map[string]any, fault bool) []byte {
 				document := t30Document(c, watch, base)
 				if fault {
 					document["version"] = "observer.config/draft"
 				}
-				return t30Encoded(t, document), nil
+				return t30Encoded(t, document)
 			}},
 	}
 }
@@ -209,9 +188,9 @@ func TestT30EveryRefusalHappensAtActivationBesideANeighbourThatWrites(t *testing
 			t.Run("refused", func(t *testing.T) {
 				client := speaking(t, port)
 				c := configuring(t, target("client", client.process))
-				content, packs := tc.build(t, c, []map[string]any{t30Watch("client", client.process)}, true)
+				content := tc.build(t, c, []map[string]any{t30Watch("client", client.process)}, true)
 				t30Written(t, c, content)
-				compiled, findings := config.Compile(content, packs)
+				compiled, findings := config.Compile(content, filepath.Dir(c.path))
 				text := fmt.Sprint(findings)
 				if unnamed := t30Unnamed(text, tc.named); compiled != nil || !strings.Contains(text, string(tc.reason)) || len(unnamed) != 0 {
 					t.Fatalf("the published reader does not refuse the fixture as %s naming %q - a fixture without the "+
@@ -236,9 +215,9 @@ func TestT30EveryRefusalHappensAtActivationBesideANeighbourThatWrites(t *testing
 			t.Run("neighbour", func(t *testing.T) {
 				client := speaking(t, port)
 				c := configuring(t, target("client", client.process))
-				content, packs := tc.build(t, c, []map[string]any{t30Watch("client", client.process)}, false)
+				content := tc.build(t, c, []map[string]any{t30Watch("client", client.process)}, false)
 				t30Written(t, c, content)
-				t30Admitted(t, binary, c, content, packs, "the neighbour one change from the refused file is refused "+
+				t30Admitted(t, binary, c, content, "the neighbour one change from the refused file is refused "+
 					"too, so the refusal beside it may be a program refusing everything")
 				w := t30Started(t, binary, c)
 				t30Send(t, client, t30Get("/t30-neighbour", "X-Public: "+t30Permitted))
@@ -249,21 +228,21 @@ func TestT30EveryRefusalHappensAtActivationBesideANeighbourThatWrites(t *testing
 }
 
 // Removal wins over every other rule and is never a conflict: the operator
-// removes x-api-key while a pack masks it, and the request removes /card while
+// removes x-api-key while also masking it, and the request removes /card while
 // it masks /card/number. Both files activate, and what is removed is absent -
 // no mask value in its place - with the protected marker crossing no write. A
 // reader that refuses too much fails here.
 func TestT30RemovalWinsAndIsNeverAConflict(t *testing.T) {
 	binary := built(t)
 	port := t30Serving(t)
-	t.Run("the operator removes a header a pack masks", func(t *testing.T) {
+	t.Run("the operator removes a header it masks", func(t *testing.T) {
 		client := speaking(t, port)
 		c := configuring(t, target("client", client.process))
-		pack := t30PackBytes(t, c, "t30-masking", map[string]any{"mask": map[string]any{"headers": map[string]any{"x-api-key": "withheld"}}})
 		content := t30Written(t, c, t30Encoded(t, t30Document(c, []map[string]any{t30Watch("client", client.process)}, map[string]any{
-			"packs": []string{"t30-masking"}, "remove": map[string]any{"headers": []string{"x-api-key"}},
+			"mask":   map[string]any{"headers": map[string]any{"x-api-key": "withheld"}},
+			"remove": map[string]any{"headers": []string{"x-api-key"}},
 		})))
-		t30Admitted(t, binary, c, content, []config.Supplied{pack}, "removal is refused where it wins over a mask")
+		t30Admitted(t, binary, c, content, "removal is refused where it wins over a mask")
 		w := t30Started(t, binary, c)
 		t30Send(t, client, t30Get("/t30-removed", "X-Api-Key: "+t30Protected, "X-Public: "+t30Permitted))
 		one := t30Find(t, t30Finished(t, binary, c, w, client, 2), "/t30-removed")
@@ -279,7 +258,7 @@ func TestT30RemovalWinsAndIsNeverAConflict(t *testing.T) {
 			"remove": map[string]any{"json": map[string]any{"request": []string{"/card"}}},
 			"mask":   map[string]any{"json": map[string]any{"request": map[string]any{"/card/number": "withheld"}}},
 		})))
-		t30Admitted(t, binary, c, content, nil, "removal is refused where it wins over a mask")
+		t30Admitted(t, binary, c, content, "removal is refused where it wins over a mask")
 		w := t30Started(t, binary, c)
 		t30Send(t, client, t30Post("/t30-card", []string{"application/json"},
 			`{"card":{"number":"`+t30Protected+`"},"note":"`+t30Permitted+`"}`))

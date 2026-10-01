@@ -1,12 +1,8 @@
 package config
 
-// The two documents a user writes, each with a version of its own, so a pack
-// given as a configuration, or the reverse, is refused by its version and a
-// later format cannot silently reinterpret an older file.
-const (
-	FileVersion = "observer.config/1"
-	PackVersion = "observer.pack/1"
-)
+// FileVersion is the version of the configuration a user writes, so a later
+// format cannot silently reinterpret an older file.
+const FileVersion = "observer.config/1"
 
 // Which descendants of a watched process are watched too.
 const (
@@ -27,6 +23,7 @@ const (
 	// It is not measured headroom or an execution-memory budget, and remains
 	// independent of the approved durable-output allowance.
 	DefaultAdmittedEventLimit int64 = 16384
+	DefaultWorkers            int64 = 1
 )
 
 // LogStdout is the log value that sends the log to standard output alone. It is
@@ -48,10 +45,9 @@ const (
 	ConnectionInput     = "connection"
 )
 
-// What a user can reach, per rule key, counted over the configuration and its
-// packs together: distinct names or pointers. One operation takes at most
-// MaxFieldSelectors of them, so the merged rules never compile to one the
-// internal layer would refuse.
+// What a user can reach, per rule key: distinct names or pointers. One
+// operation takes at most MaxFieldSelectors of them, so the rules never
+// compile to one the internal layer would refuse.
 const (
 	MaxRemovedHeaders   = MaxHeaderNames
 	MaxMaskedHeaders    = MaxHeaderNames
@@ -63,12 +59,14 @@ const (
 // The largest values of limits, so a limit a user can write never overflows
 // what it is multiplied into: output_mib into bytes, events into the intake's
 // byte allowance at the decoder's per-event payload ceiling, and
-// state_every_seconds into a duration.
+// state_every_seconds into a duration. MaxWorkers bounds the processing loops
+// a session starts, each holding its own queue.
 const (
 	MaxOutputMiB         int64 = (1<<63 - 1) >> 20
 	MaxEventPayloadBytes int64 = 4096
 	MaxEvents            int64 = (1<<63 - 1) / MaxEventPayloadBytes
 	MaxStateEverySeconds int64 = (1<<63 - 1) / 1_000_000_000
+	MaxWorkers           int64 = 256
 )
 
 // Refusal reasons of the reader and the compiler, in the user's terms. Every
@@ -85,15 +83,12 @@ const (
 	// Removal is never one of them: it wins over every other rule.
 	RuleConflict Reason = "rule_conflict"
 	// InternalDefect is a refusal from the layer below the reader, or a plan that
-	// does not enforce what the documents ask. It is the observer's defect,
+	// does not enforce what the configuration asks. It is the observer's defect,
 	// never the user's error, and it fails closed.
 	InternalDefect Reason = "internal_defect"
-
-	// PackNameInvalid is an enabled pack whose name does not meet PackName, so
-	// no file is looked for. PackNameMismatch is a pack that names itself other
-	// than the name it is enabled by.
-	PackNameInvalid  Reason = "pack_name_invalid"
-	PackNameMismatch Reason = "pack_name_mismatch"
+	// CommandNotExecutable is an extension whose command is not an executable
+	// regular file when the configuration is compiled.
+	CommandNotExecutable Reason = "command_not_executable"
 )
 
 // File is the configuration a user writes, as read.
@@ -112,8 +107,9 @@ type File struct {
 	Rules  Rules
 	Limits Limits
 
-	// Packs are the packs enabled, by name, in the order written.
-	Packs []string
+	// Extensions are the extensions, in the order written, which is the order
+	// they run in. A command is as written; Compile resolves it.
+	Extensions []Extension
 }
 
 // Watch is one program to watch: a name, the conditions that select it, and
@@ -124,22 +120,17 @@ type Watch struct {
 	Children string
 }
 
-// Limits are the three observer settings, with every absent one resolved to
-// its default.
+// Limits are the observer settings, with every absent one resolved to its
+// default.
 type Limits struct {
 	OutputMiB         int64
 	Events            int64
 	StateEverySeconds int64
+	Workers           int64
 }
 
-// Pack is a pack as read: rules it adds to the configuration's. It cannot
-// weaken them.
-type Pack struct {
-	Rules Rules
-}
-
-// Rules are what one document asks to be removed, masked and truncated, in the
-// order written. Header names are kept as written; they compare ignoring case.
+// Rules are what the configuration asks to be removed, masked and truncated,
+// in the order written. Header names are kept as written; they compare ignoring case.
 type Rules struct {
 	Remove   Remove
 	Mask     Mask

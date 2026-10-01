@@ -102,7 +102,6 @@ permits at `live` and `sealed`. Nothing further is owed for that direction.
     reconstruction  block
     processing      block
     seal            block
-    extensions      object, possibly empty
 
 ### Required blocks
 
@@ -140,9 +139,8 @@ it is `unavailable` - and the reasons that exist only for some values: a placed 
 `through` and `refusal`, an admission's `why`, an instance coverage's `why`, a cgroup's `why`, a withheld claim's `reason`, and a withdrawal's and a drain's
 `because`. A list is `[]`, and `null` is
 absent. A count is a decimal string, and a value outside its vocabulary, or a count that is not decimal, is
-`value_not_in_contract`. A member the contract does not name, anywhere outside an extension's `content`, is
-refused with `member_not_in_contract`.
-**That is what stops a pack writing a second `capture` or a `loss` of its own at the top level.**
+`value_not_in_contract`. A member the contract does not name, anywhere, is refused with
+`member_not_in_contract`.
 
 ### provenance
 
@@ -270,6 +268,42 @@ When only this aggregate is supplied, `pipelines` is empty because attribution w
 that is not a per-pipeline zero. Aggregate counts must never be copied onto a synthetic pipeline
 or onto every pipeline. The aggregate adds no intake, writer-capacity or cleanup diagnostics.
 
+`exchange_ids` is the number of exchange ids the session issued: one per exchange the reconstructor
+produced from a dispatched batch where content is written, numbered from `"1"`
+([PROTOCOL.md](../extension/PROTOCOL.md), Ids). Every line of the approved output carries its connection's
+range, and the ranges together cover `"1"` to this count.
+
+`extensions` holds one entry per configured extension, keyed by its configured name, and `{}` where none is
+configured. **Every value in it is the observer's own count of what it did with the extension; an
+extension never supplies one**, and text an extension writes - a `failed` reason, a line of its standard
+error - is never carried here. Each entry:
+
+| Member | Meaning |
+|---|---|
+| `effects` | `extension_declared_not_observer_enforced`: what the extension changes and emits is its own declaration, which the observer checks for shape and attribution and never for truth |
+| `fields[]` | the fields the entry selects, in the protocol's order |
+| `timeout_ms` | the entry's `timeout_ms` |
+| `considered` | exchange ids this extension accounted for |
+| `changed`, `unchanged` | exchanges its accepted answer changed, or left unchanged |
+| `failed` | exchanges it failed or skipped, for any reason |
+| `pending` | exchanges outstanding at it when the account was taken |
+| `failed_by` | `{reason: count}` with every reason of the protocol, each present: `timeout`, `crash`, `protocol`, `oversized_frame`, `unknown_id`, `flood`, `malformed`, `not_given`, `read_only`, `removed_content`, `excluded`, `declined`, `unavailable`, `busy`, `too_large` |
+| `retired_by` | `{cause: count}`, generations retired, with every cause of the protocol, each present: `start_failed`, `startup_timeout`, `timeout`, `crash`, `protocol`, `oversized_frame`, `unknown_id`, `flood` |
+| `restarts` | generations started after a retirement |
+| `state_resets` | generations that answered `ready` after an earlier one had: each one started with nothing the earlier one held |
+| `late`, `duplicate` | answers discarded: from a generation being retired, or a second answer to one id |
+| `derived_written`, `derived_bytes` | derived lines written to the extension's own file, and their bytes |
+| `derived_refused` | derived records refused |
+| `derived_refused_by` | `{reason: count}` with every reason of the protocol, each present: `malformed`, `unknown_source`, `rate`, `queue_full`, `budget`, `stopped`, `write_failed` |
+| `stderr_dropped` | lines of its standard error not copied into the log |
+
+**The counts conserve**: `considered` = `changed` + `unchanged` + `failed` + `pending`, `failed` is the sum
+of `failed_by`, and `derived_refused` the sum of `derived_refused_by`. **At `sealed`, every extension's
+`considered` equals `exchange_ids`**, and `pending` is `"0"` after a clean shutdown. An extension is
+considered for every id, including the ones that skipped it, so an extension that missed an exchange says
+so rather than holding a smaller total. With `write_content` false no id is issued and every one of these
+exchange counts is `"0"`.
+
 ### seal
 
 `stopped` and `sealed` instants; `complete` and `because[]`; `withdrawal` `{at, instances, complete, because}`;
@@ -288,17 +322,6 @@ and `unavailable` where any of the three counts could not be read; then `members
 number of records in it, taken when the session's records stopped changing. A seal that could not be taken
 is `unavailable` with `why`, and a bundle of it cannot be bound to its session.
 
-### extensions
-
-`{namespace: {schema, content}}`. A namespace is a lower-case dotted name of at least two parts
-(`example.tally`), so it can never be a core block's name; any other form is refused with
-`extension_namespace_invalid`. `schema` is a schema id. `content` is the extension's own and nothing in this
-contract constrains it.
-
-**Extension material is added, never substituted.** It lives only under `extensions`, a member the contract
-does not name elsewhere is refused, and so an extension can say anything about the session except in the
-core's voice: it cannot replace what the core said about capture loss or coverage.
-
 ## The bundle
 
 A directory. Its root holds `bundle.json`:
@@ -306,7 +329,6 @@ A directory. Its root holds `bundle.json`:
     bundle      "observer.bundle/1-draft"
     session     the session id
     members[]   {role, path, contract, sha256}
-    schemas[]   {id, path}
 
 | `role` | `contract` | File |
 |---|---|---|
@@ -317,8 +339,7 @@ A directory. Its root holds `bundle.json`:
 | `reassembly` | `observer.record/1-draft` | JSON Lines, exactly one `reassembly` |
 
 Every role is required, once. `path` is relative to the bundle root, `sha256` is the lower-case hex digest of
-the file's bytes. `schemas[]` are extension schemas the bundle carries; they are optional, and a bundle with
-none is complete.
+the file's bytes.
 
 **A bundle is of a session that ended**: its account's `moment` is `sealed`.
 
@@ -342,21 +363,13 @@ causes are several findings.
 5. **The records.** Every line a record of its member's kind, at a known record version.
 6. **The session.** The manifest's `session` is the account's. The seal is `carried`. Every record member's
    digest is the one `seal.members` names for its role, and holds the number of records it names.
-7. **Extensions.** Each namespace well formed. Each section's schema id executed where the validator has an
-   executor for it.
 
 ### The result
 
 | `outcome` | `validated` | Means |
 |---|---|---|
 | `refused` | `none` | not a conforming bundle, and nothing in it is vouched for; `findings[]` say why, each `{member, at, reason, detail}` |
-| `core_validated_extension_not_checked` | `core_envelope` | the core envelope validated, and at least one extension section was not checked. **Nothing is said about the unchecked sections** |
-| `validated` | `core_envelope_and_extensions` | the core envelope validated, and every extension section present was checked and conforms. A bundle with no extensions is this |
-
-`extensions[]` has one `{namespace, schema, state, why}` per section: `conforms`, `nonconforming`, or
-`not_checked` with `schema_unavailable` - neither the bundle nor the validator has that id - or
-`schema_not_executable` - the bundle carries a schema file and the validator has no checker for its id.
-A nonconforming section refuses the bundle with `extension_invalid`.
+| `validated` | `core_envelope` | the manifest, the account, the record members and their binding to the session validated |
 
 `examined` says how much was looked at - `members`, `records`, `blocks` - so a result can be told from one
 that examined nothing.
@@ -368,8 +381,7 @@ that examined nothing.
                reference_outside_bundle, link_not_permitted, reference_unresolved
     account    account_malformed, unknown_account_version, required_block_absent,
                required_member_absent, value_not_in_contract, unknown_block_state,
-               block_state_not_permitted, member_not_in_contract, account_not_sealed,
-               extension_namespace_invalid, extension_invalid
+               block_state_not_permitted, member_not_in_contract, account_not_sealed
     records    record_malformed, unknown_record_version, record_kind_mismatch
     session    session_mismatch, session_binding_unavailable, member_not_of_session,
                member_count_disagrees
@@ -427,9 +439,9 @@ knows:
 
 | Where | Form | Kind |
 |---|---|---|
-| `bundle.json` at the tree root | `members[].path`, `schemas[].path` | path, relative to the root |
+| `bundle.json` at the tree root | `members[].path` | path, relative to the root |
 | any `.json` or `.jsonl` file | the value of a member named `$ref`, with any `#fragment` removed | path, relative to the file's directory |
-| any `.json` or `.jsonl` file | the value of a member named `$schema` or `$id`; `schemas[].id` in `bundle.json` | identifier |
+| any `.json` or `.jsonl` file | the value of a member named `$schema` or `$id` | identifier |
 | any `.md` file, outside code | a link target `[text](target)`, with any `#fragment` removed | path, relative to the file's directory |
 
 A member name beginning `$` is never data in these contracts, which is why those are the generic forms: a
@@ -450,8 +462,8 @@ that protects any case where the cause does not block inspection, and not the ca
 reference.** A refused link beside a member genuinely absent elsewhere is two findings.
 
 The result says how many files it read and how many references it found, so a tree with none is told from a
-check that read nothing. **This check does not execute carried schemas or fetch identifiers with a
-scheme**; it refuses the reference forms described above that would reach outside by location.
+check that read nothing. **This check does not fetch identifiers with a scheme**; it refuses the reference
+forms described above that would reach outside by location.
 
 ## Writing an account and a bundle
 
@@ -492,7 +504,7 @@ three acceptance documents in it are copies of those in `contract/acceptance/`.
 | the bundle validates | `bundle_not_validated` |
 | the account references the configuration beside it as `configuration` at `sha256:` of its bytes | `configuration_not_referenced` |
 | every contract version the account names is one in use, the account names the account and record versions its bundle is written at, and the configuration is at the configuration version | `version_disagrees` |
-| the configuration reader (`contract/config/CONFIG.md`) accepts `configuration.json` with no packs supplied, as the observer reads it. Each of its findings is carried with its key and its own reason in the detail | `configuration_refused` |
+| the configuration reader (`contract/config/CONFIG.md`) accepts `configuration.json` as the observer reads it, apart from looking for its extensions' commands, which are on the host that ran the session. Each of its findings is carried with its key and its own reason in the detail | `configuration_refused` |
 | every connection an observation or a reconstruction names is a connection record in the bundle | `record_reference_unresolved` |
 | every evidence reference the acceptance documents write resolves as described below | `acceptance_reference_unresolved` |
 

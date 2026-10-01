@@ -22,6 +22,7 @@ import (
 	"github.com/evandukss/edge-observer/attachment"
 	"github.com/evandukss/edge-observer/capture"
 	"github.com/evandukss/edge-observer/connection"
+	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/contract/record"
 	"github.com/evandukss/edge-observer/ebpf"
 	"github.com/evandukss/edge-observer/probe"
@@ -225,6 +226,9 @@ type Account struct {
 	// is not read as a quiet host.
 	Limits []string `json:"limits"`
 
+	// Extensions is every configured extension, in the order it runs.
+	Extensions []Extension `json:"extensions"`
+
 	// Everything below exists only once something has attached.
 	Processes  []attachment.Observed `json:"processes,omitempty"`
 	Capability *probe.Capability     `json:"capability,omitempty"`
@@ -256,6 +260,81 @@ type Run struct {
 	Processing  *Processing
 }
 
+// ExtensionEffects labels what an extension changes and emits: its own
+// declaration, which the observer checks for shape and attribution and never
+// for truth.
+const ExtensionEffects = "extension_declared_not_observer_enforced"
+
+// Extension is one configured extension as the account lists it. Its command
+// is not listed: arguments can hold secrets, and the account may leave the
+// host.
+type Extension struct {
+	Name      string   `json:"name"`
+	Fields    []string `json:"fields"`
+	TimeoutMS int64    `json:"timeout_ms"`
+	Effects   string   `json:"effects"`
+}
+
+// ExtensionsOf lists configured extensions, each labelled.
+func ExtensionsOf(configured []config.Extension) []Extension {
+	list := make([]Extension, 0, len(configured))
+	for _, one := range configured {
+		list = append(list, Extension{Name: one.Name, Fields: slices.Clone(one.Fields), TimeoutMS: one.TimeoutMS,
+			Effects: ExtensionEffects})
+	}
+	return list
+}
+
+// The fixed vocabularies an extension's counts are kept by, from the extension
+// protocol (contract/extension/PROTOCOL.md).
+var (
+	ExtensionFailureReasons = []string{"timeout", "crash", "protocol", "oversized_frame", "unknown_id", "flood",
+		"malformed", "not_given", "read_only", "removed_content", "excluded", "declined", "unavailable", "busy",
+		"too_large"}
+	ExtensionRetirementCauses = []string{"start_failed", "startup_timeout", "timeout", "crash", "protocol",
+		"oversized_frame", "unknown_id", "flood"}
+	DerivedRefusalReasons = []string{"malformed", "unknown_source", "rate", "queue_full", "budget", "stopped",
+		"write_failed"}
+)
+
+// NoCounts is the counts of an extension nothing has been done with: every
+// count zero and every vocabulary member present.
+func NoCounts(name string) ExtensionCounts {
+	zero := func(vocabulary []string) map[string]uint64 {
+		counts := make(map[string]uint64, len(vocabulary))
+		for _, key := range vocabulary {
+			counts[key] = 0
+		}
+		return counts
+	}
+	return ExtensionCounts{Name: name, FailedBy: zero(ExtensionFailureReasons),
+		RetiredBy: zero(ExtensionRetirementCauses), DerivedRefusedBy: zero(DerivedRefusalReasons)}
+}
+
+// ExtensionCounts is the observer's own count of what it did with one
+// extension (contract/account/ACCOUNT.md, processing). Considered is Changed +
+// Unchanged + Failed + Pending; the maps hold every member of the protocol's
+// vocabularies.
+type ExtensionCounts struct {
+	Name             string            `json:"name"`
+	Considered       uint64            `json:"considered"`
+	Changed          uint64            `json:"changed"`
+	Unchanged        uint64            `json:"unchanged"`
+	Failed           uint64            `json:"failed"`
+	Pending          uint64            `json:"pending"`
+	FailedBy         map[string]uint64 `json:"failed_by"`
+	RetiredBy        map[string]uint64 `json:"retired_by"`
+	Restarts         uint64            `json:"restarts"`
+	StateResets      uint64            `json:"state_resets"`
+	Late             uint64            `json:"late"`
+	Duplicate        uint64            `json:"duplicate"`
+	DerivedWritten   uint64            `json:"derived_written"`
+	DerivedBytes     uint64            `json:"derived_bytes"`
+	DerivedRefused   uint64            `json:"derived_refused"`
+	DerivedRefusedBy map[string]uint64 `json:"derived_refused_by"`
+	StderrDropped    uint64            `json:"stderr_dropped"`
+}
+
 // Processing carries session aggregates, never per-pipeline attribution.
 // Authorized and Written count route records: permission is not completion or
 // durable flush. ProcessingFailures counts affected durable routes for each
@@ -276,6 +355,10 @@ type Processing struct {
 	OutputFailures     uint64           `json:"output_failures"`
 	Authorized         uint64           `json:"authorized"`
 	Written            uint64           `json:"written"`
+	// ExchangeIDs is the number of exchange ids the session issued, and
+	// Extensions one entry per configured extension, in the order it runs.
+	ExchangeIDs uint64            `json:"exchange_ids"`
+	Extensions  []ExtensionCounts `json:"extensions"`
 }
 
 // Plan is the account of a policy resolved and not attached. inspect, where
@@ -284,7 +367,7 @@ func Plan(at time.Time, policy Policy, resolution process.Resolution, build prob
 	inspect func(process.Process) probe.Report) Account {
 	a := Account{
 		Version: Version, Kind: Planned, At: at, Policy: policy, Build: build, Floor: floor(),
-		Targets: []Target{}, Exclusions: []Exclusion{}, Limits: []string{},
+		Targets: []Target{}, Exclusions: []Exclusion{}, Limits: []string{}, Extensions: []Extension{},
 	}
 	for _, one := range resolution.Targets {
 		target := Target{
@@ -605,6 +688,10 @@ func Render(to io.Writer, a Account, local bool) {
 	for _, limit := range a.Limits {
 		say("limit      %s", limit)
 	}
+	for _, one := range a.Extensions {
+		say("extension  %s: %s; timeout %d ms; extension-declared, not observer-enforced", one.Name,
+			strings.Join(one.Fields, ", "), one.TimeoutMS)
+	}
 
 	if a.Capability == nil {
 		return
@@ -718,6 +805,15 @@ func Render(to io.Writer, a Account, local bool) {
 		say("approved   %d route records authorized, %d written", p.Authorized, p.Written)
 		if p.GateReason != "" {
 			say("release    refused: %s", p.GateReason)
+		}
+		if len(p.Extensions) > 0 {
+			say("ids        %d exchange ids issued", p.ExchangeIDs)
+		}
+		for _, one := range p.Extensions {
+			say("extension  %s: %d considered, %d changed, %d unchanged, %d failed, %d pending; %d restarts, "+
+				"%d state resets; %d derived lines written, %d refused", one.Name, one.Considered, one.Changed,
+				one.Unchanged, one.Failed, one.Pending, one.Restarts, one.StateResets, one.DerivedWritten,
+				one.DerivedRefused)
 		}
 	}
 }

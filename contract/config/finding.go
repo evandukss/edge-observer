@@ -18,18 +18,16 @@ const StructurallyRefused Outcome = "structurally_refused"
 // Reason is why a finding was made.
 type Reason string
 
-// Reasons that decide on one document alone, and the one that decides on the
-// configuration and the packs supplied beside it.
+// Reasons that decide on the document's form.
 const (
 	UnknownVersion Reason = "unknown_version"
 	Malformed      Reason = "malformed"
 	DuplicateName  Reason = "duplicate_name"
-	UnknownPack    Reason = "unknown_pack"
 )
 
 // Finding is one refusal.
 type Finding struct {
-	// Document is "configuration" or "pack:<name>".
+	// Document is "configuration".
 	Document string `json:"document"`
 
 	// Subject is the key the finding is about, as a path: "remove.headers[2]",
@@ -54,6 +52,7 @@ type ResolvedObserver struct {
 	ApprovedOutputBoundMiB int64  `json:"approved_output_bound_mib"`
 	StateEverySeconds      int64  `json:"state_every_seconds"`
 	AdmittedEventLimit     int64  `json:"admitted_event_limit"`
+	Workers                int64  `json:"workers"`
 }
 
 // EffectivePipeline is a pipeline as it will be composed.
@@ -72,7 +71,7 @@ type EffectiveSlot struct {
 	// Arguments is the configuration after validation.
 	Arguments *Arguments `json:"arguments,omitempty"`
 
-	// SelectedBy is the documents whose rules the operation carries,
-	// "configuration" or "pack:<name>", joined by commas.
+	// SelectedBy is the document whose rules the operation carries,
+	// "configuration".
 	SelectedBy string `json:"selected_by"`
 }

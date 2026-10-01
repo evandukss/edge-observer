@@ -30,9 +30,12 @@ func install(t *testing.T, source, path string) string {
 	return path
 }
 
-// run starts path and returns its pid once the kernel is running that file,
-// killing it at test end. Until the exec, /proc describes the child as a copy
-// of the test binary.
+// run starts path and returns its pid once /proc describes the child as path
+// running with these arguments, killing it at test end. Until the exec the
+// child is a copy of the test binary. During it the executable link already
+// names path while the arguments read empty, because the kernel places argv
+// after replacing the memory, so a wait on the link alone returns a process no
+// rule naming its arguments matches.
 func run(t *testing.T, path string, arguments ...string) int32 {
 	t.Helper()
 
@@ -47,12 +50,12 @@ func run(t *testing.T, path string, arguments ...string) int32 {
 
 	pid := int32(command.Process.Pid)
 	for range 200 {
-		if p, ok := read(t).Lookup(pid); ok && p.Executable == path {
+		if p, ok := read(t).Lookup(pid); ok && p.Executable == path && slices.Equal(p.Arguments, command.Args) {
 			return pid
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("pid %d is not running %s after two seconds", pid, path)
+	t.Fatalf("pid %d is not running %q after two seconds", pid, command.Args)
 	return 0
 }
 

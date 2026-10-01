@@ -18,7 +18,7 @@ import (
 )
 
 func checkDocumentBundle(examples fs.FS) map[string]error {
-	result := contractaccount.Validate(examples, contractaccount.Options{})
+	result := contractaccount.Validate(examples)
 	if result.Outcome != contractaccount.Validated || result.Examined.Members != 5 ||
 		result.Examined.Records == 0 || result.Examined.Blocks == 0 {
 		return map[string]error{"": fmt.Errorf("dummy bundle validation: %+v", result)}

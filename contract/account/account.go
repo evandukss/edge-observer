@@ -8,11 +8,7 @@
 // required block refuses rather than reading zeros.
 package account
 
-import (
-	"encoding/json"
-
-	"github.com/evandukss/edge-observer/contract/record"
-)
+import "github.com/evandukss/edge-observer/contract/record"
 
 // The versions this draft names. No machine-readable schema is published;
 // example JSON files show the shapes, and the Go validators enforce the contracts.
@@ -73,16 +69,6 @@ type Account struct {
 	Reconstruction Reconstruction `json:"reconstruction"`
 	Processing     Processing     `json:"processing"`
 	Seal           Seal           `json:"seal"`
-
-	// Extensions is namespaced pack material, under its own member so nothing in
-	// it can stand where a core block stands.
-	Extensions map[string]Extension `json:"extensions"`
-}
-
-// Extension is one namespace's material and the schema it declares.
-type Extension struct {
-	Schema  string          `json:"schema"`
-	Content json.RawMessage `json:"content"`
 }
 
 // Provenance is what produced the account and against what configuration.
@@ -533,6 +519,36 @@ type Processing struct {
 	Block
 	Pipelines []Processed          `json:"pipelines"`
 	Aggregate *ProcessingAggregate `json:"aggregate,omitempty" account:"optional"`
+	// ExchangeIDs is the number of exchange ids the session issued.
+	ExchangeIDs string `json:"exchange_ids" account:"count"`
+	// Extensions is one entry per configured extension, by its name.
+	Extensions map[string]ExtensionAccount `json:"extensions"`
+}
+
+// ExtensionAccount is the observer's own count of what it did with one
+// extension. Considered is Changed + Unchanged + Failed + Pending; Failed is
+// the sum of FailedBy and DerivedRefused of DerivedRefusedBy. The three maps
+// hold every member of their vocabulary.
+type ExtensionAccount struct {
+	Effects          string            `json:"effects"`
+	Fields           []string          `json:"fields"`
+	TimeoutMS        string            `json:"timeout_ms" account:"count"`
+	Considered       string            `json:"considered" account:"count"`
+	Changed          string            `json:"changed" account:"count"`
+	Unchanged        string            `json:"unchanged" account:"count"`
+	Failed           string            `json:"failed" account:"count"`
+	Pending          string            `json:"pending" account:"count"`
+	FailedBy         map[string]string `json:"failed_by"`
+	RetiredBy        map[string]string `json:"retired_by"`
+	Restarts         string            `json:"restarts" account:"count"`
+	StateResets      string            `json:"state_resets" account:"count"`
+	Late             string            `json:"late" account:"count"`
+	Duplicate        string            `json:"duplicate" account:"count"`
+	DerivedWritten   string            `json:"derived_written" account:"count"`
+	DerivedBytes     string            `json:"derived_bytes" account:"count"`
+	DerivedRefused   string            `json:"derived_refused" account:"count"`
+	DerivedRefusedBy map[string]string `json:"derived_refused_by"`
+	StderrDropped    string            `json:"stderr_dropped" account:"count"`
 }
 
 // ProcessingAggregate is session-wide evidence without per-pipeline counts.

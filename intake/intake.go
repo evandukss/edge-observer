@@ -35,7 +35,7 @@ type Stats struct {
 	Closed             bool
 }
 
-// Store is a FIFO shared by both capture sinks and one processing worker.
+// Store is a FIFO shared by both capture sinks and one processing owner.
 // Construct it with New; a zero value refuses work. Do not copy it.
 //
 // The limit's unit is accounted record bytes: the fixed entry and record
@@ -151,6 +151,15 @@ func (s *Store) Take() *Entry {
 	s.stats.Queued--
 	s.stats.Leased++
 	return e
+}
+
+// Bytes is the entry's charge: the accounted record bytes it holds until
+// Release.
+func (e *Entry) Bytes() int64 {
+	if e == nil {
+		return 0
+	}
+	return e.bytes
 }
 
 // Release discards the entry and returns its charge. It is idempotent and safe

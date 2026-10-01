@@ -18,7 +18,7 @@ func compileRules(t *testing.T, rules string) (*config.ProcessingPlan, []config.
 	if rules != "" {
 		document += ", " + rules
 	}
-	compiled, findings := config.Compile([]byte(document+"}"), nil)
+	compiled, findings := config.Compile([]byte(document+"}"), "")
 	if compiled == nil {
 		return nil, findings
 	}

@@ -17,40 +17,46 @@ import (
 // never what refuses a file the reader accepts.
 const MaxCompiledSlots = 7 + MaxMaskedHeaders + 2*MaxRulePointers + MaxTruncatedHeaders + 1
 
-// Compiled is a configuration and the packs it enables, read and compiled.
+// Compiled is a configuration, read and compiled.
 type Compiled struct {
 	File File
 
 	Plan *ProcessingPlan
 
-	// ProcessingRevision binds remove, mask, truncate, write_content, the packs
-	// enabled and their bytes, and nothing else, so a file that only adds a
-	// watch entry keeps it and one that changes any of these does not.
+	// ProcessingRevision binds remove, mask, truncate, write_content and the
+	// extensions with their resolved commands, and nothing else, so a file that
+	// only adds a watch entry keeps it and one that changes any of these does
+	// not.
 	ProcessingRevision string
 }
 
-// Compile reads the configuration and the packs it enables and compiles them
-// directly into the plan, in the fixed published order: remove, then mask,
-// then truncate, then body_values. packs are the packs supplied, each under the
-// name the configuration enables it by; one the configuration does not enable
-// is not read.
+// Compile reads the configuration and compiles it directly into the plan, in
+// the fixed published order: remove, then mask, then truncate, then
+// body_values, then the extensions in the order written. directory is the
+// absolute directory holding the configuration file: each extension's
+// executable written relative is resolved against it once, here, and each must
+// be an executable regular file when this runs.
 //
-// Rules merge by two rules. Removal wins over every other rule and is never a
-// conflict. Two rules that would keep different values for one field are
-// refused, naming both documents and keys. Every refusal names what the user
-// wrote; a refusal from the layer below is an internal defect.
-func Compile(configuration []byte, packs []Supplied) (*Compiled, []Finding) {
+// Removal wins over every other rule and is never a conflict. Two rules that
+// would keep different values for one field are refused, naming both keys.
+// Every refusal names what the user wrote; a refusal from the layer below is an
+// internal defect.
+func Compile(configuration []byte, directory string) (*Compiled, []Finding) {
+	return compile(configuration, directory, true)
+}
+
+// CheckDocument is every refusal Compile makes that the configuration's bytes
+// decide alone, for reading a configuration away from the host it runs on: an
+// extension's command is neither resolved nor looked for.
+func CheckDocument(configuration []byte) []Finding {
+	_, findings := compile(configuration, "", false)
+	return findings
+}
+
+func compile(configuration []byte, directory string, onThisHost bool) (*Compiled, []Finding) {
 	if len(configuration) > MaxProcessingBytes {
 		return nil, []Finding{{Document: "configuration", Reason: ConfigurationTooLarge,
 			Detail: fmt.Sprintf("the configuration exceeds %d bytes", MaxProcessingBytes)}}
-	}
-	remaining := MaxProcessingBytes - len(configuration)
-	for _, pack := range packs {
-		if len(pack.Content) > remaining {
-			return nil, []Finding{{Document: "pack:" + pack.Name, Reason: ConfigurationTooLarge,
-				Detail: fmt.Sprintf("the configuration and its packs exceed %d bytes", MaxProcessingBytes)}}
-		}
-		remaining -= len(pack.Content)
 	}
 
 	file, findings := ReadFile(configuration)
@@ -59,22 +65,6 @@ func Compile(configuration []byte, packs []Supplied) (*Compiled, []Finding) {
 	}
 	compiled := &Compiled{File: file}
 	documents := []document{{name: "configuration", rules: file.Rules}}
-	var bytesOf [][]byte
-	for i, name := range file.Packs {
-		at := slices.IndexFunc(packs, func(s Supplied) bool { return s.Name == name })
-		if at < 0 {
-			findings = append(findings, Finding{Document: "configuration", Subject: fmt.Sprintf("packs[%d]", i),
-				Reason: UnknownPack, Detail: fmt.Sprintf("no pack named %q was supplied", name)})
-			continue
-		}
-		pack, failures := ReadPack(packs[at])
-		findings = append(findings, failures...)
-		documents = append(documents, document{name: "pack:" + name, rules: pack.Rules})
-		bytesOf = append(bytesOf, packs[at].Content)
-	}
-	if len(findings) > 0 {
-		return nil, findings
-	}
 
 	m := merge(documents)
 	if len(m.findings) > 0 {
@@ -87,12 +77,19 @@ func Compile(configuration []byte, packs []Supplied) (*Compiled, []Finding) {
 	if failures := assertCoverage(documents, plan); len(failures) > 0 {
 		return nil, failures
 	}
+	extensions := file.Extensions
+	if onThisHost {
+		if extensions, failures = resolveCommands(file.Extensions, directory); len(failures) > 0 {
+			return nil, failures
+		}
+	}
+	plan.extensions = extensions
 	compiled.Plan = plan
-	compiled.ProcessingRevision = revision(file, bytesOf)
+	compiled.ProcessingRevision = revision(file, extensions)
 	return compiled, nil
 }
 
-// document is one source of rules: the configuration, or one pack.
+// document is one source of rules.
 type document struct {
 	name  string
 	rules Rules
@@ -180,7 +177,7 @@ func (m *merged) refuse(at origin, reason Reason, detail string, arguments ...an
 // limit refuses a distinct entry past the most one operation takes.
 func (m *merged) limit(fresh bool, l *list, most int, at origin, what string) {
 	if fresh && len(l.entries) == most+1 {
-		m.refuse(at, LimitExceeded, "the configuration and its packs name more than %d distinct %s together, "+
+		m.refuse(at, LimitExceeded, "the configuration names more than %d distinct %s, "+
 			"and one operation takes at most %d", most, what, most)
 	}
 }
@@ -330,6 +327,7 @@ func generate(file File, m *merged) (*ProcessingPlan, []Finding) {
 	plan := &ProcessingPlan{resolved: Resolved{Observer: ResolvedObserver{
 		Log: file.Log, Directory: file.Output, ApprovedOutputBoundMiB: file.Limits.OutputMiB,
 		StateEverySeconds: file.Limits.StateEverySeconds, AdmittedEventLimit: file.Limits.Events,
+		Workers: file.Limits.Workers,
 	}}}
 	var failures []Finding
 	var slots []EffectiveSlot
@@ -629,25 +627,18 @@ func assertCoverage(documents []document, plan *ProcessingPlan) []Finding {
 }
 
 // revision digests what the processing revision binds: the rules as read,
-// write_content, the packs enabled, and each pack's bytes.
-func revision(file File, packs [][]byte) string {
+// write_content, and the extensions as resolved.
+func revision(file File, extensions []Extension) string {
 	declaration, _ := json.Marshal(struct {
 		Rules        Rules
 		WriteContent bool
-		Packs        []string
-	}{file.Rules, file.WriteContent, file.Packs})
+		Extensions   []Extension
+	}{file.Rules, file.WriteContent, extensions})
 	digest := sha256.New()
 	digest.Write([]byte("observer.processing.generation/2"))
-	add := func(raw []byte) {
-		var size [8]byte
-		binary.BigEndian.PutUint64(size[:], uint64(len(raw)))
-		digest.Write(size[:])
-		digest.Write(raw)
-	}
-	add(declaration)
-	for i, content := range packs {
-		add([]byte(file.Packs[i]))
-		add(content)
-	}
+	var size [8]byte
+	binary.BigEndian.PutUint64(size[:], uint64(len(declaration)))
+	digest.Write(size[:])
+	digest.Write(declaration)
 	return "sha256:" + hex.EncodeToString(digest.Sum(nil))
 }

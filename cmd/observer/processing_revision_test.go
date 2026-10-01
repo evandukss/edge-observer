@@ -8,7 +8,7 @@ import (
 )
 
 func TestReloadRequiresTheSameNonemptyCompiledProcessingRevision(t *testing.T) {
-	current, err := policy.CompileProcessing([]byte(inForce), nil)
+	current, err := policy.CompileProcessing([]byte(inForce), "")
 	if err != nil || current.Processing == nil {
 		t.Fatalf("processing fixture refused: %v", err)
 	}

@@ -107,6 +107,13 @@ func TestT25AFatalDiagnosticCarriesNoProtectedPlaintext(t *testing.T) {
 // it cannot run while plaintext is held. The Go runtime's own dump on SIGQUIT
 // is no site in this source and is provoked by the SIGQUIT case above.
 var t25FatalSites = map[string]string{
+	"internal/cmd/broken-extension/main.go: os.Exit(": "a separate fault-injection peer: crash mode exits while " +
+		"sanitized exchanges are pending; every mode exits on an invalid invocation or a closed output pipe. " +
+		"It can hold only the sanitized input the observer sent, never removed values",
+	"internal/cmd/broken-extension/main.go: panic(": "a separate fault-injection peer: descendant mode reports " +
+		"failure to start its child; every mode with recording reports audit open/write failures, and every " +
+		"mode reports invalid protocol input. These peer failures may occur while sanitized input is held",
+
 	"cmd/observer/main.go: os.Exit(": "run's error printed to stderr, then exit 1. Reached after capture when the " +
 		"sealed account cannot be written: TestT25AFatalDiagnosticCarriesNoProtectedPlaintext",
 	"cmd/observer/control.go: panic(": "newIdentity finding no system random source. Its two callers run before " +

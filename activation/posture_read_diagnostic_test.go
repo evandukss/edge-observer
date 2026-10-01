@@ -167,7 +167,7 @@ func postureReadDiagnosticChild(t *testing.T, mode string, classify bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	read, err := policy.CompileProcessing(written, nil)
+	read, err := policy.CompileProcessing(written, "")
 	if err != nil {
 		t.Fatalf("setup: supported policy refused: %v", err)
 	}

@@ -133,9 +133,8 @@ func t30Sets() []t30Set {
 	}
 }
 
-// Case 1 and row 18. Each group of rules, written once in the operator's file
-// with no pack and once in a pack the file enables, changes what the session
-// writes, and at the write boundary no protected marker crosses a write in any
+// Case 1 and row 18. Each group of rules, written in the operator's file,
+// changes what the session writes, and at the write boundary no protected marker crosses a write in any
 // form - plainly or inside the base64 of a kept body - while the permitted
 // marker beside it does. The control writes every one of these exchanges with
 // no rules at all: there each field is written, and the protected marker
@@ -143,32 +142,24 @@ func t30Sets() []t30Set {
 func TestT30EveryRuleChangesWhatIsWrittenAndNoProtectedValueCrossesAWrite(t *testing.T) {
 	binary := built(t)
 	port := t30Serving(t)
-	for _, source := range []string{"the operator's file", "a pack"} {
-		for _, set := range t30Sets() {
-			t.Run(source+"/"+set.name, func(t *testing.T) {
-				client := speaking(t, port)
-				c := configuring(t, target("client", client.process))
-				watch := []map[string]any{t30Watch("client", client.process)}
-				var packs []config.Supplied
-				keys := set.rules
-				if source == "a pack" {
-					packs = append(packs, t30PackBytes(t, c, "t30-rules", set.rules))
-					keys = map[string]any{"packs": []string{"t30-rules"}}
-				}
-				content := t30Written(t, c, t30Encoded(t, t30Document(c, watch, keys)))
-				t30Accepted(t, content, packs...)
-				w := t30Started(t, binary, c)
-				for _, request := range set.requests {
-					t30Send(t, client, request)
-				}
-				records := t30Finished(t, binary, c, w, client, 2)
-				set.check(t, records)
-				if n := t30Crossed(w, t30Protected); n != 0 {
-					t.Errorf("the protected marker crossed a write %d times, plainly or base64-encoded", n)
-				}
-				t25Clean(t, w)
-			})
-		}
+	for _, set := range t30Sets() {
+		t.Run("the operator's file/"+set.name, func(t *testing.T) {
+			client := speaking(t, port)
+			c := configuring(t, target("client", client.process))
+			watch := []map[string]any{t30Watch("client", client.process)}
+			content := t30Written(t, c, t30Encoded(t, t30Document(c, watch, set.rules)))
+			t30Accepted(t, content)
+			w := t30Started(t, binary, c)
+			for _, request := range set.requests {
+				t30Send(t, client, request)
+			}
+			records := t30Finished(t, binary, c, w, client, 2)
+			set.check(t, records)
+			if n := t30Crossed(w, t30Protected); n != 0 {
+				t.Errorf("the protected marker crossed a write %d times, plainly or base64-encoded", n)
+			}
+			t25Clean(t, w)
+		})
 	}
 	t.Run("the control, with no rules", func(t *testing.T) {
 		client := speaking(t, port)

@@ -20,21 +20,27 @@ type batch struct {
 	invalid    bool
 }
 
-func (w *Worker) accept(e *intake.Entry) {
-	var id fragment.ConnectionID
-	var process fragment.Process
-	if e.Fragment != nil {
-		id, process = e.Fragment.Connection, e.Fragment.Process
-	} else {
-		id, process = e.Connection.ID, e.Connection.Process
+// keyOf is the batch an entry belongs to.
+func keyOf(e *intake.Entry) batchKey {
+	if f := e.Fragment; f != nil {
+		return batchKey{process: f.Process, id: f.Connection}
 	}
-	key := batchKey{process: process, id: id}
-	if w.completed[key] {
+	return batchKey{process: e.Connection.Process, id: e.Connection.ID}
+}
+
+func (w *Worker) accept(in routed) {
+	e := in.entry
+	key := keyOf(e)
+	process, id := key.process, key.id
+	if w.options.Taken != nil {
+		w.options.Taken(w.index, process, id)
+	}
+	b := w.batches[key]
+	if b == nil && !in.first {
 		e.Release()
 		w.withhold(connection.Uncounted("late_batch_entry"))
 		return
 	}
-	b := w.batches[key]
 	if b == nil {
 		b = &batch{process: process, fragments: make(map[uint64]fragment.Record)}
 		w.batches[key] = b

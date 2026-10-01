@@ -6,7 +6,7 @@
       "role": "account",
       "path": "account.json",
       "contract": "observer.account/2-draft",
-      "sha256": "2e3601c1e9ab31ba5dc29eb9633baf2e67e2cec6a1b9a37687a31870dfec75bc"
+      "sha256": "1e7d92234f30c9ff53bca49e24031b0008e2e19372dbaae1d1ada872c48c6d09"
     },
     {
       "role": "observations",
@@ -32,6 +32,5 @@
       "contract": "observer.record/1-draft",
       "sha256": "35922dcdca287ebab289cd207945ad3610bba2d59f3b2ff890634848ab8af0cc"
     }
-  ],
-  "schemas": []
+  ]
 }

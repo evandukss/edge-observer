@@ -92,7 +92,7 @@ func t18Compiled(t *testing.T, peers ...process.Process) policy.Policy {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := policy.CompileProcessing(raw, nil)
+	p, err := policy.CompileProcessing(raw, "")
 	if err != nil || p.Processing == nil {
 		t.Fatalf("the protected plan did not compile: %v", err)
 	}

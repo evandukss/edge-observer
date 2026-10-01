@@ -1,4 +1,4 @@
-# Extending the observer
+# Adding support to the observer
 
 For somebody adding to the observer who has not worked on it before: a TLS library it does not read
 yet, a protocol or body format it does not reconstruct yet, or an output it does not write to yet.
@@ -80,7 +80,7 @@ protocol is reached from that read.
 A capture hands records to two storage interfaces: `capture.Sink` (`Write(fragment.Record) error`,
 in `capture/capture.go`) and `connection.Sink` (`Connection(connection.Record) error`, in
 `connection/record.go`). Production supplies the same `intake.Store` to both. These are volatile
-storage boundaries, not extension points for durable output: neither may parse payload, grant
+storage boundaries, not places to add durable output: neither may parse payload, grant
 admission, decide completeness, or write raw records to disk.
 
 A processing consumer calls `Take` and later `Release`. It keeps no intake lock while parsing or

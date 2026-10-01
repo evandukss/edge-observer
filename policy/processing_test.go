@@ -30,7 +30,7 @@ func exchanges(t *testing.T, read policy.Policy) config.EffectivePipeline {
 
 func TestProcessingActivationConfiguration(t *testing.T) {
 	c := processingDocument(t)
-	read, err := policy.CompileProcessing([]byte(encoded(t, c)), nil)
+	read, err := policy.CompileProcessing([]byte(encoded(t, c)), "")
 	if err != nil {
 		t.Fatalf("valid processing neighbour refused: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestProcessingActivationConfiguration(t *testing.T) {
 		t.Fatalf("activation configuration incomplete: %+v", read)
 	}
 	c["remove"] = map[string]any{"headers": []any{"authorization", "bad name"}}
-	read, err = policy.CompileProcessing([]byte(encoded(t, c)), nil)
+	read, err = policy.CompileProcessing([]byte(encoded(t, c)), "")
 	var refused *policy.Refused
 	if !errors.As(err, &refused) || read.Processing != nil || len(refused.Findings) != 1 ||
 		refused.Findings[0].Reason != config.InvalidValue || refused.Findings[0].Subject != "remove.headers[1]" {
@@ -60,35 +60,15 @@ func TestProcessingActivationPreservesObservationValidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := processingDocument(t)
 			c["watch"] = []any{watching("server", tc.valid, "all")}
-			read, err := policy.CompileProcessing([]byte(encoded(t, c)), nil)
+			read, err := policy.CompileProcessing([]byte(encoded(t, c)), "")
 			if err != nil || read.Processing == nil {
 				t.Fatalf("valid observation neighbour refused: %v", err)
 			}
 			c["watch"] = []any{watching("server", tc.invalid, "all")}
-			read, err = policy.CompileProcessing([]byte(encoded(t, c)), nil)
+			read, err = policy.CompileProcessing([]byte(encoded(t, c)), "")
 			if err == nil || read.Processing != nil || !strings.Contains(err.Error(), tc.detail) {
 				t.Fatalf("observation fault not reached: read=%+v err=%v", read, err)
 			}
 		})
-	}
-}
-
-func TestProcessingRevisionIncludesSelectedPack(t *testing.T) {
-	c := processingDocument(t)
-	c["packs"] = []any{"profile"}
-	pack := func(header string) []config.Supplied {
-		return []config.Supplied{{Name: "profile", Content: []byte(`{"version": "observer.pack/1", "name": "profile", ` +
-			`"remove": {"headers": ["` + header + `"]}}`)}}
-	}
-	first, err := policy.CompileProcessing([]byte(encoded(t, c)), pack("authorization"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := policy.CompileProcessing([]byte(encoded(t, c)), pack("cookie"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.Revision == second.Revision || first.Revision == "" || second.Revision == "" {
-		t.Fatalf("selected pack change invisible in policy revision: %q %q", first.Revision, second.Revision)
 	}
 }

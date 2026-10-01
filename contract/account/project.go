@@ -99,7 +99,7 @@ func Bundle(account Account, records Records) (map[string][]byte, error) {
 	}
 	members[RoleAccount] = append(encoded, '\n')
 
-	manifest := Manifest{Bundle: BundleVersion, Session: account.Session, Members: []Member{}, Schemas: []Schema{}}
+	manifest := Manifest{Bundle: BundleVersion, Session: account.Session, Members: []Member{}}
 	for _, role := range Roles {
 		files[Paths[role]] = members[role]
 		manifest.Members = append(manifest.Members, Member{Role: role, Path: Paths[role],
@@ -178,7 +178,6 @@ func Project(source observed.Account, supply Supply) (Account, error) {
 	}
 	a := Account{
 		Account: Version, Session: source.Session, Moment: Moment(source.Kind), At: wall(source.At),
-		Extensions: map[string]Extension{},
 	}
 	switch a.Moment {
 	case Planned, Live, Sealed:
@@ -221,15 +220,59 @@ func Project(source observed.Account, supply Supply) (Account, error) {
 	}
 	a.Processing = Processing{Block: Block{State: NotCarried}}
 	if p := source.Processing; p != nil {
+		extensions, err := extensionsOf(source.Extensions, p.Extensions)
+		if err != nil {
+			return Account{}, err
+		}
 		a.Processing = Processing{Block: Block{State: Carried}, Pipelines: []Processed{},
 			Aggregate: &ProcessingAggregate{
 				GateReason: string(p.GateReason), ProcessingFailures: decimalOf(p.ProcessingFailures),
 				OutputFailures: decimalOf(p.OutputFailures), Authorized: decimalOf(p.Authorized),
 				Written: decimalOf(p.Written),
 			},
+			ExchangeIDs: decimalOf(p.ExchangeIDs), Extensions: extensions,
 		}
 	}
 	return a, nil
+}
+
+// extensionsOf is one entry per configured extension, each from the counts the
+// operational account holds for it. A configured extension with no counts, or
+// counts for one not configured, is refused: an entry is never filled in.
+func extensionsOf(configured []observed.Extension, counted []observed.ExtensionCounts) (map[string]ExtensionAccount, error) {
+	out := make(map[string]ExtensionAccount, len(configured))
+	for _, one := range configured {
+		at := slices.IndexFunc(counted, func(c observed.ExtensionCounts) bool { return c.Name == one.Name })
+		if at < 0 {
+			return nil, refuse("the extension %q is configured and the processing block holds no counts for it", one.Name)
+		}
+		c := counted[at]
+		out[one.Name] = ExtensionAccount{
+			Effects: one.Effects, Fields: slices.Clone(one.Fields), TimeoutMS: decimalOf(one.TimeoutMS),
+			Considered: decimalOf(c.Considered), Changed: decimalOf(c.Changed), Unchanged: decimalOf(c.Unchanged),
+			Failed: decimalOf(c.Failed), Pending: decimalOf(c.Pending),
+			FailedBy: decimalsOf(c.FailedBy), RetiredBy: decimalsOf(c.RetiredBy),
+			Restarts: decimalOf(c.Restarts), StateResets: decimalOf(c.StateResets),
+			Late: decimalOf(c.Late), Duplicate: decimalOf(c.Duplicate),
+			DerivedWritten: decimalOf(c.DerivedWritten), DerivedBytes: decimalOf(c.DerivedBytes),
+			DerivedRefused: decimalOf(c.DerivedRefused), DerivedRefusedBy: decimalsOf(c.DerivedRefusedBy),
+			StderrDropped: decimalOf(c.StderrDropped),
+		}
+	}
+	for _, c := range counted {
+		if _, found := out[c.Name]; !found {
+			return nil, refuse("the processing block counts the extension %q, which is not configured", c.Name)
+		}
+	}
+	return out, nil
+}
+
+func decimalsOf(counts map[string]uint64) map[string]string {
+	out := make(map[string]string, len(counts))
+	for key, value := range counts {
+		out[key] = decimalOf(value)
+	}
+	return out
 }
 
 func decimalOf[T ~int | ~int32 | ~int64 | ~uint64](v T) string { return fmt.Sprint(v) }

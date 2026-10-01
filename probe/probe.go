@@ -167,7 +167,7 @@ type Inspector interface {
 
 // Request is what a caller asks an adapter to attach to, and what it demands.
 type Request struct {
-	// DeliveryGate is shared by every placement and the processing worker for
+	// DeliveryGate is shared by every placement and the processing workers for
 	// this capture. Nil preserves ungated delivery for callers that explicitly
 	// permit retention; protected activation must refuse a missing gate.
 	// Refusals reports DeliveryWithoutGate for every decoded event taking the

@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io/fs"
 	"maps"
@@ -62,13 +61,16 @@ type executor struct {
 // executes it. A directory with examples no entry names is refused.
 var executors = []executor{
 	{"contract/config/examples", "observer dry-run over every *.config.json", dryRunEvery},
-	{"contract/config/examples", "the reader over every observer.config/1 example, with the packs it enables", compileEveryFile},
+	{"contract/config/examples", "the reader over every observer.config/1 example", compileEveryFile},
 	{"contract/examples/bundle", "the account validator over the dummy bundle", checkDocumentBundle},
+	{"examples/endpoint-inventory", "Python tests and import check over the endpoint inventory", checkInventoryExample},
 }
 
 // notExecuted is every example file deliberately executed by nothing, each
 // with why.
-var notExecuted = map[string]string{}
+var notExecuted = map[string]string{
+	"examples/endpoint-inventory/README.md": "documentation for the Python program, executed by nothing",
+}
 
 // isExample: a directory named examples on the path, or "example" in the name.
 // Go source is the program, not an example.
@@ -209,34 +211,6 @@ func dryRunOne(examples fs.FS, name string) error {
 	if err := os.WriteFile(written, content, 0o600); err != nil {
 		return err
 	}
-	// The program reads the packs a configuration enables from packs/ beside
-	// it, so the example's packs are copied with it. The copy reads past the
-	// recording: copying a pack is not a program executing it, so a pack
-	// counts as opened only where a program opens it.
-	source := examples
-	if recorded, ok := examples.(*openedFS); ok {
-		source = recorded.fsys
-	}
-	packs := path.Join(path.Dir(name), "packs")
-	entries, err := fs.ReadDir(source, packs)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		pack, err := fs.ReadFile(source, path.Join(packs, entry.Name()))
-		if err != nil {
-			return err
-		}
-		if err := os.MkdirAll(filepath.Join(directory, "packs"), 0o700); err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(directory, "packs", entry.Name()), pack, 0o600); err != nil {
-			return err
-		}
-	}
 	var out bytes.Buffer
 	if err := run([]string{"dry-run", written}, &out); err != nil {
 		return err
@@ -289,10 +263,9 @@ func versionOf(examples fs.FS, at string) (string, error) {
 	return version.Version, nil
 }
 
-// compileEveryFile compiles every example written at observer.config/1, with
-// the packs it enables read from packs/<name>.json beside it. Every other
-// example is peeked at without being recorded as opened, since reading its
-// version is not executing it.
+// compileEveryFile compiles every example written at observer.config/1. Every
+// other example is peeked at without being recorded as opened, since reading
+// its version is not executing it.
 func compileEveryFile(examples fs.FS) map[string]error {
 	failures := map[string]error{}
 	source := examples
@@ -310,20 +283,7 @@ func compileEveryFile(examples fs.FS) map[string]error {
 		if err != nil {
 			return err
 		}
-		file, findings := config.ReadFile(content)
-		var packs []config.Supplied
-		for _, name := range file.Packs {
-			pack, err := fs.ReadFile(examples, path.Join(path.Dir(at), "packs", name+".json"))
-			if err != nil {
-				failures[at] = err
-				return nil
-			}
-			packs = append(packs, config.Supplied{Name: name, Content: pack})
-		}
-		if len(findings) == 0 {
-			_, findings = config.Compile(content, packs)
-		}
-		if len(findings) > 0 {
+		if findings := config.CheckDocument(content); len(findings) > 0 {
 			failures[at] = fmt.Errorf("refused: %+v", findings)
 		}
 		return nil

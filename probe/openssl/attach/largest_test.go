@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -34,8 +33,8 @@ func largestValues(prefix string, n int, value func(i int) any) map[string]any {
 	return values
 }
 
-// largestRules is every rule key at its limit, every limit at its largest value
-// and the most packs. With form rules, the form and the request JSON rules are
+// largestRules is every rule key at its limit and every limit at its largest
+// value. With form rules, the form and the request JSON rules are
 // one operation; without them, every key is operations of its own.
 func largestRules(form bool) map[string]any {
 	remove := map[string]any{
@@ -57,8 +56,7 @@ func largestRules(form bool) map[string]any {
 		"truncate": map[string]any{"headers": largestValues("x-t", config.MaxTruncatedHeaders,
 			func(i int) any { return i + 1 })},
 		"limits": map[string]any{"output_mib": config.MaxOutputMiB, "events": config.MaxEvents,
-			"state_every_seconds": config.MaxStateEverySeconds},
-		"packs": largestNames("p", config.MaxProcessingPacks),
+			"state_every_seconds": config.MaxStateEverySeconds, "workers": config.MaxWorkers},
 	}
 }
 
@@ -92,18 +90,6 @@ func TestTheLargestConfigurationStartsAndWrites(t *testing.T) {
 			}
 			if err := os.WriteFile(c.path, written, 0o600); err != nil {
 				t.Fatal(err)
-			}
-			packs := filepath.Join(filepath.Dir(c.path), "packs")
-			if err := os.MkdirAll(packs, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			for _, name := range largestNames("p", config.MaxProcessingPacks) {
-				// Each pack repeats one of the configuration's removals, which adds no
-				// name to any limit.
-				pack := `{"version": "observer.pack/1", "name": "` + name + `", "remove": {"headers": ["x-r0"]}}`
-				if err := os.WriteFile(filepath.Join(packs, name+".json"), []byte(pack), 0o600); err != nil {
-					t.Fatal(err)
-				}
 			}
 
 			observer := started(t, binary, c)

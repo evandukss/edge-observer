@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/evandukss/edge-observer/connection"
 	"github.com/evandukss/edge-observer/contract/config"
@@ -18,24 +20,28 @@ import (
 	"github.com/evandukss/edge-observer/reconstruct"
 )
 
-func (w *Worker) process(ctx context.Context, b *batch) error {
+// process takes one ready batch to its lines. It reports whether the batch
+// now waits on an extension: then it keeps the batch's leases, and its lines
+// are written once the last result arrives (settle).
+func (w *Worker) process(ctx context.Context, b *batch) (bool, error) {
 	if b.invalid {
 		w.withhold(connection.Uncounted("invalid_input"))
 		w.countProcessingFailure("")
-		return nil
+		return false, nil
 	}
 	fragments, prefix, valid := b.placed()
 	if !valid {
 		w.withhold(connection.Uncounted("invalid_input"))
 		w.countProcessingFailure("")
-		return nil
+		return false, nil
 	}
 	metadata, err := record.FromConnection(*b.retirement)
 	if err != nil {
 		w.withhold(connection.Uncounted("invalid_input"))
 		w.countProcessingFailure("")
-		return nil
+		return false, nil
 	}
+	d := &dispatch{b: b, metadata: metadata, reconstruction: -1, ids: IDRange{Count: "0"}}
 	var source reconstruct.Connection
 	var truncation *ReconstructionTruncation
 	refused := connection.Counted(0)
@@ -49,12 +55,12 @@ func (w *Worker) process(ctx context.Context, b *batch) error {
 		if w.options.BeforeParse != nil {
 			if err := w.options.BeforeParse(ctx); err != nil {
 				w.withhold(connection.Uncounted("unsettled_input"))
-				return err
+				return false, err
 			}
 		}
 		if err := ctx.Err(); err != nil {
 			w.withhold(connection.Uncounted("unsettled_input"))
-			return err
+			return false, err
 		}
 		done := reconstruct.Run(fragments, w.options.Limits)
 		if len(done.Connections) == 1 && len(done.Discards) == 0 && len(done.Duplicates) == 0 {
@@ -68,72 +74,196 @@ func (w *Worker) process(ctx context.Context, b *batch) error {
 			}
 			refused = reconstructionRefusals(source, good, prefix)
 			truncation = describeTruncation(source, good, prefix)
-			source.Exchanges = source.Exchanges[:good]
-			// Undecidable source content and parser diagnostics never enter output.
+			d.good = good
+			d.excluded = exclusionReasons(source, good, truncation)
+			// Every exchange of the established prefix is kept, for extensions;
+			// only the first good ones are written. Undecidable source content
+			// and parser diagnostics never enter output or reach an extension.
 			// Numeric Unplaced is not erased: the approved projection explicitly
 			// marks it undetermined when the remaining stream is indeterminate.
 			source.Note = ""
 		} else if len(b.fragments) != 0 || prefix.truncated() {
 			refused = connection.Uncounted("reconstruction_incomplete")
+			d.refusedWhole = true
 		}
 		w.withhold(refused)
 	}
-	for _, p := range w.pipelines {
-		artifact := Artifact{Version: ArtifactVersion, PolicyRevision: w.options.PolicyRevision, Connection: metadata, PolicyExclusions: []PolicyExclusion{}}
+	for i, p := range w.pipelines {
+		artifact := &Artifact{Version: ArtifactVersion, PolicyRevision: w.options.PolicyRevision, Connection: metadata,
+			PolicyExclusions: []PolicyExclusion{}, ExtensionOutcomes: []ExtensionOutcome{},
+			ReplacementExclusions: []ReplacementExclusion{}}
 		switch p.Input {
 		case "connection":
 			// The compiler's connection-route exception rests on this separate
 			// construction: a metadata pipeline never receives source messages.
+			d.lines = append(d.lines, pipelineLine{name: p.Name, input: p.Input, artifact: artifact})
 		case "reconstruction":
-			processed := copyConnection(source)
-			run := slotRun{source: source, evidence: exclusionEvidence{fields: []PolicyExclusion{}}, bodies: map[*reconstruct.Message]string{}, shapes: w.options.Limits.JSON}
+			// Extensions are sent every exchange of the established prefix as
+			// the chain leaves it. Without one, only the exchanges the output
+			// writes go through the chain: the rest have no reader.
+			chained := source
+			if w.extensions == nil {
+				chained.Exchanges = source.Exchanges[:d.good]
+			}
+			processed := copyConnection(chained)
+			run := &slotRun{source: chained, evidence: exclusionEvidence{fields: []PolicyExclusion{}}, bodies: map[*reconstruct.Message]string{}, shapes: w.options.Limits.JSON}
 			failed := false
 			for _, slot := range p.Slots {
 				if !run.apply(&processed, slot) {
-					w.countProcessingFailure(p.Name)
 					failed = true
 					break
 				}
 			}
+			if !failed && w.extensions != nil && len(processed.Exchanges) != 0 {
+				// Every exchange is projected now, so none can fail to reach an
+				// extension later for want of a record.
+				if _, _, err := record.FromReconstruction(reconstruct.Reconstruction{Connections: []reconstruct.Connection{processed}}, nil); err != nil {
+					failed = true
+				}
+			}
 			if failed {
+				w.countProcessingFailure(p.Name)
 				continue
 			}
-			if len(processed.Exchanges) != 0 {
-				projected, _, err := record.FromReconstruction(reconstruct.Reconstruction{Connections: []reconstruct.Connection{processed}}, nil)
-				if err != nil {
-					w.countProcessingFailure(p.Name)
-					continue
-				}
-				run.mark(&projected[0], processed)
-				artifact.Reconstruction = &projected[0]
-				artifact.ReconstructionTruncation = truncation
-				artifact.PolicyExclusions = run.evidence.fields
-				if truncation != nil {
-					artifact.Reconstruction.Unplaced = record.Count{State: record.Undetermined, Unit: record.Bytes, Why: "reconstruction_truncated"}
-				}
+			if d.reconstruction < 0 {
+				d.reconstruction, d.source, d.processed, d.run, d.truncation = i, source, processed, run, truncation
 			}
+			// The first slot cannot accept an undecidable message, and nothing
+			// later can repair that missing input.
+			d.lines = append(d.lines, pipelineLine{name: p.Name, input: p.Input, artifact: artifact,
+				refused: !refused.Known || refused.Value != 0})
 		default:
 			w.countProcessingFailure(p.Name)
-			continue
 		}
-		if p.Input == "connection" || artifact.Reconstruction != nil {
+	}
+	n := 0
+	if d.reconstruction >= 0 {
+		n = len(d.source.Exchanges)
+	}
+	if n > 0 {
+		last := w.release.issued.Add(uint64(n))
+		d.first = last - uint64(n) + 1
+		d.ids = IDRange{First: strconv.FormatUint(d.first, 10), Last: strconv.FormatUint(last, 10),
+			Count: strconv.Itoa(n)}
+		if w.extensions != nil {
+			w.extensions.issue(uint64(n))
+		}
+	}
+	if w.extensions != nil && !d.refusedWhole {
+		d.changedBy = make([]map[string]int, n)
+		for i := range d.changedBy {
+			d.changedBy[i] = map[string]int{}
+		}
+		for _, e := range b.entries {
+			d.bytes += e.Bytes()
+		}
+		if n == 0 {
+			for k := range w.extensions.supervisors {
+				w.connectionDone(d, k)
+			}
+		} else {
+			waits, err := w.step(d)
+			if err != nil {
+				return false, err
+			}
+			if waits {
+				w.waiting[d] = struct{}{}
+				return true, nil
+			}
+		}
+	}
+	return false, w.write(ctx, d)
+}
+
+// write writes d's lines, in pipeline order, each to its routes, and counts a
+// refused suffix against its pipeline once written.
+func (w *Worker) write(ctx context.Context, d *dispatch) error {
+	for _, line := range d.lines {
+		artifact := line.artifact
+		artifact.ExchangeIDs = &d.ids
+		emit := true
+		if line.input == "reconstruction" {
+			emit = false
+			if d.good != 0 {
+				written := d.processed
+				written.Exchanges = d.processed.Exchanges[:d.good]
+				projected, _, err := record.FromReconstruction(reconstruct.Reconstruction{Connections: []reconstruct.Connection{written}}, nil)
+				if err != nil {
+					w.countProcessingFailure(line.name)
+					continue
+				}
+				d.run.mark(&projected[0], written)
+				artifact.Reconstruction = &projected[0]
+				artifact.ReconstructionTruncation = d.truncation
+				if d.truncation != nil {
+					artifact.Reconstruction.Unplaced = record.Count{State: record.Undetermined, Unit: record.Bytes, Why: "reconstruction_truncated"}
+				}
+				for _, entry := range d.run.evidence.fields {
+					if entry.Exchange < d.good {
+						artifact.PolicyExclusions = append(artifact.PolicyExclusions, entry)
+					}
+				}
+				for _, outcome := range d.outcomes {
+					if outcome.Exchange < d.good {
+						artifact.ExtensionOutcomes = append(artifact.ExtensionOutcomes, outcome)
+					}
+				}
+				for _, entry := range d.replaced {
+					if entry.Exchange < d.good {
+						artifact.ReplacementExclusions = append(artifact.ReplacementExclusions, entry)
+					}
+				}
+				emit = true
+			}
+		}
+		if emit {
 			for _, route := range w.routes {
-				if route.Pipeline != p.Name {
+				if route.Pipeline != line.name {
 					continue
 				}
 				artifact.Route = route
-				if err := w.emit(ctx, artifact); err != nil {
+				if err := w.emit(ctx, *artifact); err != nil {
 					return err
 				}
 			}
 		}
-		if p.Input == "reconstruction" && (!refused.Known || refused.Value != 0) {
-			// The first slot cannot accept an undecidable message, and nothing
-			// later can repair that missing input.
-			w.countProcessingFailure(p.Name)
+		if line.refused {
+			w.countProcessingFailure(line.name)
 		}
 	}
 	return nil
+}
+
+// exclusionReasons is, for each exchange after the first good ones, the
+// truncation reason its line records for it: the stop in the direction of the
+// side that kept it out - the request where that is not a supported message,
+// otherwise the response - or the line's other stop where that direction has
+// none.
+func exclusionReasons(source reconstruct.Connection, good int, truncation *ReconstructionTruncation) []string {
+	reasons := make([]string, len(source.Exchanges))
+	request, response := fragment.Sent, fragment.Received
+	if source.Role == reconstruct.Server {
+		request, response = response, request
+	}
+	for i := good; i < len(source.Exchanges); i++ {
+		e := source.Exchanges[i]
+		direction := response
+		if e.Request == nil || !supportedMessage(e.Request) {
+			direction = request
+		}
+		reasons[i] = "unparsed_suffix"
+		if truncation == nil {
+			continue
+		}
+		for _, stop := range truncation.Stops {
+			if stop.Direction == direction.String() {
+				reasons[i] = stop.Reason
+				break
+			}
+			reasons[i] = stop.Reason
+		}
+	}
+	return reasons
 }
 
 func reconstructionRefusals(source reconstruct.Connection, good int, prefix batchPrefix) connection.Count {
@@ -254,30 +384,76 @@ func (w *Worker) emit(ctx context.Context, artifact Artifact) error {
 		return errors.New("internal observer defect: cannot serialize its approved artifact")
 	}
 	line = append(line, '\n')
+	return w.release.write(ctx, Approved{line: line}, &w.outcome)
+}
+
+// releaseEvidence is what every release states: processing has settled its
+// inputs and the batch's lifecycle.
+var releaseEvidence = probe.ReleaseEvidence{InputsSettled: true, LifecycleSettled: true}
+
+// release is the one point where lines are authorized and written, shared by
+// every worker of a Run. Authorization happens immediately before each write,
+// and both happen under one lock, so writes are serialised and the first
+// worker failure is terminal for every worker: after it nothing is authorized
+// or written, and nothing more is counted.
+type release struct {
+	mutex  sync.Mutex
+	gate   *probe.DeliveryGate
+	output Output
+	err    error
+	// issued is the exchange ids issued so far, from 1: a batch takes its
+	// range with one addition, so ranges are contiguous and never overlap.
+	issued atomic.Uint64
+}
+
+// write authorizes and writes one line, counting into outcome.
+func (r *release) write(ctx context.Context, line Approved, outcome *Outcome) error {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	if r.err != nil {
+		return r.err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	decision := w.options.Gate.Authorize(probe.ReleaseEvidence{InputsSettled: true, LifecycleSettled: true})
+	decision := r.gate.Authorize(releaseEvidence)
 	if !decision.Authorized {
-		w.outcome.GateReason = decision.Reason
+		outcome.GateReason = decision.Reason
 		return nil
 	}
-	w.outcome.Authorized++
-	if err := w.options.Output.WriteApproved(ctx, Approved{line: line}); err != nil {
-		w.outcome.OutputFailures++
+	outcome.Authorized++
+	if err := r.output.WriteApproved(ctx, line); err != nil {
+		outcome.OutputFailures++
 		switch {
 		case errors.Is(err, ErrOutputLimit):
-			return ErrOutputLimit
+			r.err = ErrOutputLimit
 		case errors.Is(err, context.Canceled):
-			return context.Canceled
+			r.err = context.Canceled
 		case errors.Is(err, context.DeadlineExceeded):
-			return context.DeadlineExceeded
+			r.err = context.DeadlineExceeded
 		default:
-			return errors.New("approved output failed")
+			r.err = errors.New("approved output failed")
 		}
+		return r.err
 	}
-	w.outcome.Written++
+	outcome.Written++
 	return nil
+}
+
+// fail makes err terminal for every worker sharing this release, unless an
+// earlier failure already is.
+func (r *release) fail(err error) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	if r.err == nil {
+		r.err = err
+	}
+}
+
+func (r *release) failure() error {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	return r.err
 }
 
 func supportedExchange(e reconstruct.Exchange) bool {
@@ -380,6 +556,11 @@ func (r *slotRun) apply(c *reconstruct.Connection, slot config.EffectiveSlot) bo
 	}
 	for index, e := range c.Exchanges {
 		for side, m := range []*reconstruct.Message{e.Request, e.Response} {
+			// A one-sided exchange, which is never written and is still sent
+			// to extensions, has no message on its missing side.
+			if m == nil {
+				continue
+			}
 			message := config.MessageRequest
 			if side == 1 {
 				message = config.MessageResponse

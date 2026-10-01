@@ -42,7 +42,7 @@ func p3t9ProtectedPlan(t *testing.T) *config.ProcessingPlan {
 	if err != nil {
 		t.Fatal(err)
 	}
-	compiled, findings := config.Compile(raw, nil)
+	compiled, findings := config.Compile(raw, "")
 	if compiled == nil || len(findings) != 0 {
 		t.Fatalf("published protected-plan control does not compile: %+v", findings)
 	}

@@ -221,30 +221,11 @@ func t30Encoded(t *testing.T, value any) []byte {
 	return content
 }
 
-// t30PackBytes installs a pack of these rules, named name, beside c's
-// configuration, and returns it as supplied.
-func t30PackBytes(t *testing.T, c configured, name string, rules map[string]any) config.Supplied {
-	t.Helper()
-	document := map[string]any{"version": config.PackVersion, "name": name}
-	for key, value := range rules {
-		document[key] = value
-	}
-	content := t30Encoded(t, document)
-	directory := filepath.Join(filepath.Dir(c.path), "packs")
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		t.Fatalf("make %s: %v", directory, err)
-	}
-	if err := os.WriteFile(filepath.Join(directory, name+".json"), content, 0o600); err != nil {
-		t.Fatalf("install pack %s: %v", name, err)
-	}
-	return config.Supplied{Name: name, Content: content}
-}
-
 // t30Accepted is the guard that a fixture is a file the published reader
 // accepts, so a later red is about the program and not about the fixture.
-func t30Accepted(t *testing.T, content []byte, packs ...config.Supplied) *config.Compiled {
+func t30Accepted(t *testing.T, content []byte) *config.Compiled {
 	t.Helper()
-	compiled, findings := config.Compile(content, packs)
+	compiled, findings := config.Compile(content, "")
 	if compiled == nil || len(findings) != 0 {
 		t.Fatalf("not the property under test: the published reader refuses the fixture - a fixture error, or a "+
 			"reader refusing a valid file; nothing below is measured: %+v\n%s", findings, content)
@@ -256,9 +237,9 @@ func t30Accepted(t *testing.T, content []byte, packs ...config.Supplied) *config
 // a neighbour one change from a refused file, a removal beside a rule it wins
 // over: the published reader and the command both accept the file. meaning is
 // what a refusal here says about the subject.
-func t30Admitted(t *testing.T, binary string, c configured, content []byte, packs []config.Supplied, meaning string) {
+func t30Admitted(t *testing.T, binary string, c configured, content []byte, meaning string) {
 	t.Helper()
-	if compiled, findings := config.Compile(content, packs); compiled == nil || len(findings) != 0 {
+	if compiled, findings := config.Compile(content, filepath.Dir(c.path)); compiled == nil || len(findings) != 0 {
 		t.Fatalf("%s: the published reader refuses it: %+v", meaning, findings)
 	}
 	if stdout, stderr, err := t18Command(t, 30*time.Second, binary, "dry-run", c.path); err != nil {

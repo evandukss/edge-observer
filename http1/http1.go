@@ -614,8 +614,8 @@ func readHeader(line string) (Header, bool) {
 	return Header{Name: name, Value: value}, true
 }
 
-// chunkSize reads a chunk size line, whose extensions after the first
-// semicolon this package does not interpret.
+// chunkSize reads a chunk size line. What follows its first semicolon is not
+// interpreted.
 func chunkSize(line string) (uint64, bool) {
 	if semicolon := strings.IndexByte(line, ';'); semicolon >= 0 {
 		line = line[:semicolon]

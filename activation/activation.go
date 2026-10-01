@@ -98,7 +98,7 @@ type Posture struct {
 	ParticipantsExited int `json:"participants_exited"`
 }
 
-// Capture is shared with the serial processing worker. Both capture
+// Capture is shared with the processing workers. Both capture
 // sinks write only to Intake. Gate is the one shared delivery and release gate,
 // used by every placement. Intake exhaustion stops input; it does not make
 // already-admitted work unreleasable and is not the gate's storage reason.

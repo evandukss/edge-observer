@@ -3,7 +3,7 @@
 Anyone may open an issue or a pull request, and the maintainer reviews every one
 ([GOVERNANCE.md](GOVERNANCE.md)). This file says how to build and test a change and how to propose it.
 [docs/architecture.md](docs/architecture.md) says what each package does, and
-[docs/extension-guide.md](docs/extension-guide.md) says where a new TLS library, protocol or output
+[docs/adding-support.md](docs/adding-support.md) says where a new TLS library, protocol or output
 goes.
 
 A security problem is reported privately, never in an issue or a pull request: see

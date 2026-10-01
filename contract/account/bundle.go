@@ -22,7 +22,6 @@ var roleKind = map[string]string{
 
 type validation struct {
 	bundle   fs.FS
-	options  Options
 	result   Result
 	manifest Manifest
 	// members is each role's member, once the manifest stage found each once.
@@ -41,20 +40,14 @@ func (v *validation) refuse(finding Finding) {
 func (v *validation) refused() bool { return len(v.result.Findings) > 0 }
 
 func (v *validation) run() {
-	for _, stage := range []func(){v.readManifest, v.closure, v.readMembers, v.readAccount, v.readRecords, v.session, v.extensions} {
+	for _, stage := range []func(){v.readManifest, v.closure, v.readMembers, v.readAccount, v.readRecords, v.session} {
 		stage()
 		if v.refused() {
 			v.result.Outcome, v.result.Validated = Refused, ExtentNone
 			return
 		}
 	}
-	for _, one := range v.result.Extensions {
-		if one.State == ExtensionNotChecked {
-			v.result.Outcome, v.result.Validated = CoreValidatedExtensionNotChecked, ExtentCoreEnvelope
-			return
-		}
-	}
-	v.result.Outcome, v.result.Validated = Validated, ExtentCoreEnvelopeAndExtensions
+	v.result.Outcome, v.result.Validated = Validated, ExtentCoreEnvelope
 }
 
 func (v *validation) readManifest() {
@@ -74,9 +67,9 @@ func (v *validation) readManifest() {
 			Detail: fmt.Sprintf("%q is not %s", v.manifest.Bundle, BundleVersion)})
 		return
 	}
-	if v.manifest.Session == "" || v.manifest.Members == nil || v.manifest.Schemas == nil {
+	if v.manifest.Session == "" || v.manifest.Members == nil {
 		v.refuse(Finding{Member: ManifestName, Reason: ManifestMalformed,
-			Detail: "a manifest names its session, its members and its schemas, an empty list where it has none"})
+			Detail: "a manifest names its session and its members"})
 	}
 	v.result.Session = v.manifest.Session
 	v.result.Examined.Members = len(v.manifest.Members)
@@ -266,38 +259,5 @@ func (v *validation) session() {
 						pair.written, v.counts[pair.role])})
 			}
 		}
-	}
-}
-
-func (v *validation) extensions() {
-	carried := map[string]bool{}
-	for _, schema := range v.manifest.Schemas {
-		carried[schema.ID] = true
-	}
-	for _, name := range slices.Sorted(func(yield func(string) bool) {
-		for name := range v.account.Extensions {
-			if !yield(name) {
-				return
-			}
-		}
-	}) {
-		extension := v.account.Extensions[name]
-		one := ExtensionResult{Namespace: name, Schema: extension.Schema}
-		checker, executable := v.options.Extensions[extension.Schema]
-		switch {
-		case executable:
-			if problems := checker(extension.Content); len(problems) > 0 {
-				one.State = ExtensionNonconforming
-				v.refuse(Finding{Member: v.members[RoleAccount].Path, At: "extensions." + name,
-					Reason: ExtensionInvalid, Detail: strings.Join(problems, "; ")})
-			} else {
-				one.State = ExtensionConforms
-			}
-		case carried[extension.Schema]:
-			one.State, one.Why = ExtensionNotChecked, SchemaNotExecutable
-		default:
-			one.State, one.Why = ExtensionNotChecked, SchemaUnavailable
-		}
-		v.result.Extensions = append(v.result.Extensions, one)
 	}
 }

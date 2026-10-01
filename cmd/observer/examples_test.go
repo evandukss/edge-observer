@@ -33,31 +33,6 @@ func example(t *testing.T, name string) string {
 	return written
 }
 
-// installed writes one of the contract's example configurations with the
-// examples' packs directory beside it, as an operator installs a pack.
-func installed(t *testing.T, name string) string {
-	t.Helper()
-	written := example(t, name)
-	packs := filepath.Join(filepath.Dir(written), "packs")
-	if err := os.Mkdir(packs, 0o700); err != nil {
-		t.Fatalf("make %s: %v", packs, err)
-	}
-	entries, err := fs.ReadDir(config.Examples, "examples/packs")
-	if err != nil || len(entries) == 0 {
-		t.Fatalf("wiring, not the program: the examples hold no packs to install: %v", err)
-	}
-	for _, entry := range entries {
-		content, err := config.Examples.ReadFile(path.Join("examples/packs", entry.Name()))
-		if err != nil {
-			t.Fatalf("read the example pack %s: %v", entry.Name(), err)
-		}
-		if err := os.WriteFile(filepath.Join(packs, entry.Name()), content, 0o600); err != nil {
-			t.Fatalf("install %s: %v", entry.Name(), err)
-		}
-	}
-	return written
-}
-
 // contractConfiguration writes the contract's no-rules example with change
 // applied, in the shape the program reads.
 func contractConfiguration(t *testing.T, change func(document map[string]any)) string {
@@ -93,13 +68,12 @@ func target(document map[string]any, name, exe string, args ...string) {
 	document["watch"] = []any{entry}
 }
 
-// Every example configuration is one this program runs: a dry run over it,
-// with the examples' packs installed beside it, prints a plan. A configuration
-// is a document at observer.config/1; the examples directory holds nothing
-// else but its packs.
+// Every example configuration is one this program runs: a dry run over it
+// prints a plan. A configuration is a document at observer.config/1; the
+// examples directory holds nothing else.
 func TestEveryExampleConfigurationIsRunByTheProgram(t *testing.T) {
-	runs := []string{"no-rules.config.json", "observer.config.json"}
-	notConfigurations := []string{"packs/credentials.json"}
+	runs := []string{"credentials.config.json", "no-rules.config.json", "observer.config.json"}
+	var notConfigurations []string
 
 	var configurations, others []string
 	err := fs.WalkDir(config.Examples, "examples", func(at string, entry fs.DirEntry, err error) error {
@@ -136,7 +110,7 @@ func TestEveryExampleConfigurationIsRunByTheProgram(t *testing.T) {
 	for _, name := range configurations {
 		t.Run(name, func(t *testing.T) {
 			var out bytes.Buffer
-			if err := run([]string{"dry-run", installed(t, name)}, &out); err != nil {
+			if err := run([]string{"dry-run", example(t, name)}, &out); err != nil {
 				t.Fatalf("the program refused its own example: %v", err)
 			}
 			var planned account.Account
@@ -147,13 +121,14 @@ func TestEveryExampleConfigurationIsRunByTheProgram(t *testing.T) {
 	}
 }
 
-// Every command that compiles refuses a configuration enabling a pack that is
-// not installed, naming the pack and the file it looked for. Stop and inspect
-// of a running session are the exception, asserted here by name: they read
-// only where the session is, so they answer that nothing is running rather than
-// refusing the pack. The commands are read off the usage text, so a new command
-// is covered automatically; inspect's usage line names a configuration or a
-// session directory, so the pattern does not read it and it is added by name.
+// Every command that compiles refuses a configuration whose extension command
+// is not there, naming the entry and the path it looked for, before anything
+// attaches. Stop and inspect of a running session are the exception, asserted
+// here by name: they read only where the session is, so they answer that
+// nothing is running rather than refusing the command. The commands are read
+// off the usage text, so a new command is covered automatically; inspect's
+// usage line names a configuration or a session directory, so the pattern
+// does not read it and it is added by name.
 func TestEveryCommandRefusesWhatTheProgramDoesNotDo(t *testing.T) {
 	commands := regexp.MustCompile(`(?m)^  observer (\S+) <configuration>( \[?(--[a-z]+))?`).FindAllStringSubmatch(usage(), -1)
 	if len(commands) < 6 {
@@ -169,31 +144,15 @@ func TestEveryCommandRefusesWhatTheProgramDoesNotDo(t *testing.T) {
 	commands = append(commands, []string{"", "inspect", " --text", "--text"})
 	readOnlyWhereTheSessionIs := map[string]bool{"stop": true, "inspect": true}
 
-	// The example alone, with no packs directory beside it.
-	written := example(t, "observer.config.json")
-	content, err := os.ReadFile(written)
-	if err != nil {
-		t.Fatalf("read the example: %v", err)
-	}
-	var document map[string]any
-	if err := json.Unmarshal(content, &document); err != nil {
-		t.Fatalf("decode the example: %v", err)
-	}
-	if packs, _ := document["packs"].([]any); len(packs) != 1 || packs[0] != "credentials" {
-		t.Fatalf("wiring, not the property: the example enables %v, so packs[0] is not the credentials pack", packs)
-	}
-	document["output"] = t.TempDir()
-	document["log"] = filepath.Join(t.TempDir(), "observer.log")
-	rewritten, err := json.Marshal(document)
-	if err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	if err := os.WriteFile(written, rewritten, 0o600); err != nil {
-		t.Fatalf("write %s: %v", written, err)
-	}
-	tried := filepath.Join(filepath.Dir(written), "packs", "credentials.json")
+	written := contractConfiguration(t, func(document map[string]any) {
+		document["output"] = t.TempDir()
+		document["log"] = filepath.Join(t.TempDir(), "observer.log")
+		document["extensions"] = []any{map[string]any{"name": "inventory", "command": []string{"./inventory"},
+			"fields": []string{config.FieldRequestLine}, "timeout_ms": 250}}
+	})
+	tried := filepath.Join(filepath.Dir(written), "inventory")
 	if _, err := os.Stat(tried); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("wiring, not the property: %s is there, so no command below meets a missing pack: %v", tried, err)
+		t.Fatalf("wiring, not the property: %s is there, so no command below meets a missing command: %v", tried, err)
 	}
 
 	var invocations [][]string
@@ -210,17 +169,18 @@ func TestEveryCommandRefusesWhatTheProgramDoesNotDo(t *testing.T) {
 			var rejected *policy.Refused
 			if readOnlyWhereTheSessionIs[arguments[0]] {
 				if errors.As(err, &rejected) || !errors.Is(err, errNotRunning) {
-					t.Fatalf("%v answered %v, want that no session is running, with no pack read", arguments, err)
+					t.Fatalf("%v answered %v, want that no session is running, with no command looked for", arguments, err)
 				}
 				return
 			}
 			if !errors.As(err, &rejected) || rejected.Outcome != policy.ProcessingRefused {
-				t.Fatalf("%v answered %v, want the pack refused by name", arguments, err)
+				t.Fatalf("%v answered %v, want the command refused by name", arguments, err)
 			}
 			if !slices.ContainsFunc(rejected.Findings, func(f config.Finding) bool {
-				return f.Subject == "packs[0]" && f.Reason == config.UnknownPack && strings.Contains(f.Detail, tried)
+				return f.Subject == "extensions[0].command[0]" && f.Reason == config.CommandNotExecutable &&
+					strings.Contains(f.Detail, tried)
 			}) {
-				t.Errorf("%v refused naming %+v, without the missing pack and the file it looked for", arguments, rejected.Findings)
+				t.Errorf("%v refused naming %+v, without the entry and the path it looked for", arguments, rejected.Findings)
 			}
 		})
 	}

@@ -9,7 +9,7 @@ observer inspect <copied-session-directory> --text
 The copied directory contains the sealed `account.json` and `approved.jsonl`
 only. The command reads the sealed account, then visits and renders the approved
 artifacts. It does not require the capturing process, original directory,
-configuration, pack manifests or raw spool. The default JSON account inspection
+configuration, extensions or raw spool. The default JSON account inspection
 retains its existing account-only meaning; `--text` exposes approved values.
 
 The reader uses the existing `processing.Artifact` representation without
@@ -89,6 +89,74 @@ state. The JSON retains every published metadata and reconstruction field,
 including provenance and limits. It escapes header and trailer values; decoded
 bodies use Go string quoting.
 
+## Exchange ids
+
+Every `observer.approved/2` line carries `exchange_ids`, the range of ids the
+session issued to its connection's exchanges, on both routes:
+
+    "exchange_ids": {"first": "17", "last": "19", "count": "3"}
+
+Ids are positive decimal strings from one sequence for the session, never
+reused, allocated contiguously to a connection's exchanges in index order when
+its batch is dispatched: the exchange at `index` i has id `first` + i. `count`
+is `last` - `first` + 1. A line whose connection was issued no id - with
+`write_content` false, for a batch refused whole, or a connection with no
+exchange - carries `{"count": "0"}` and no `first` or `last`.
+
+**Every id maps to one connection and one index whether or not that exchange
+was written.** Each line of a connection, on whichever routes write it, carries
+that connection's identical range, so a connection written on both routes has
+two lines with one range. The range covers every exchange the reconstructor
+produced from the batch, including the ones not written: where an id's index is
+an exchange in the exchanges-route line's `reconstruction.exchanges[]` it is
+that exchange; otherwise that line's `reconstruction_truncation` covers it. The
+ranges of different connections are disjoint and together cover `"1"` to the
+account's `processing.exchange_ids`. Extensions cite exchanges by these ids
+([extensions.md](extensions.md)).
+
+## Extension outcomes
+
+Every written exchange records what each configured extension did to it, in
+`extension_outcomes`, one entry per exchange and extension, in the order the
+extensions ran:
+
+    "extension_outcomes": [
+      {"exchange": 0, "extension": "classify", "outcome": "changed",
+       "changed": ["response.headers"], "overwritten": []},
+      {"exchange": 0, "extension": "inventory", "outcome": "unchanged"},
+      {"exchange": 1, "extension": "classify", "outcome": "failed", "reason": "timeout"}
+    ]
+
+| member | value |
+|---|---|
+| `exchange` | the exchange's `index` in this line |
+| `extension` | the configured name |
+| `outcome` | `unchanged`, `changed` or `failed` |
+| `changed` | with `changed`: the fields its accepted answer replaced |
+| `overwritten` | with `changed`: those of them a later extension replaced again, so they are not what is written |
+| `reason` | with `failed`: one of the protocol's reasons ([PROTOCOL.md](../contract/extension/PROTOCOL.md)) - `timeout`, `crash`, `protocol`, `oversized_frame`, `unknown_id`, `flood`, `malformed`, `not_given`, `read_only`, `removed_content`, `excluded`, `declined`, `unavailable`, `busy`, `too_large` |
+
+A field in `changed` and not in `overwritten` is the extension's change as
+written, after the configuration's rules ran over it again. With no extension
+configured the list is empty. A connections-route line, which carries no
+exchange, has an empty list.
+
+**Removals from replacement content are recorded apart.** Each accepted change
+goes through `remove`, `mask`, `truncate` and `body_values` again. What `remove`
+takes out of a replacement is listed in `replacement_exclusions`, never in
+`policy_exclusions`, with the extension that supplied it:
+
+    "replacement_exclusions": [
+      {"exchange": 0, "message": "request", "field": "message.headers.authorization",
+       "section": "headers", "disposition": "removed", "extension": "classify"}
+    ]
+
+Its entries have the members, forms and dispositions of `policy_exclusions`,
+and `extension`. `policy_exclusions` records only what was removed from captured
+content, so a reader tells a header the application sent and the configuration
+removed from one an extension added back and the configuration removed again.
+The list is empty where nothing was removed from a replacement.
+
 ## Reader validation
 
 `ReadArtifacts` visits LF-terminated JSON records in file order and owns only
@@ -135,6 +203,24 @@ Both reading and rendering validate these structural requirements:
   `derived` or `removed`. Parameter names and pointers follow the
   configuration's name and pointer rules
   ([CONFIG.md](../contract/config/CONFIG.md)).
+- In `observer.approved/2`, `exchange_ids` is present: `count` a decimal
+  string, and `first` and `last` positive decimal strings with `count` equal to
+  `last` - `first` + 1 where `count` is not `"0"`, and absent where it is. Every
+  exchange index of the line is below `count`.
+- `extension_outcomes` and `replacement_exclusions` are present lists. An
+  outcome refers to a retained exchange, names a configured extension once per
+  exchange, and carries `changed` and `overwritten` only for `changed`, with
+  `overwritten` a subset of `changed`, and `reason` only for `failed`, from the
+  protocol's reasons. A replacement exclusion follows the `policy_exclusions`
+  rules and names an extension whose outcome for that exchange is `changed`.
+- An entry's form, identity and disposition are always checked. **An entry's
+  agreement with the written message** - the header absent, the body's kept
+  bytes empty and its structure `removed`, the target without `?` - **is
+  checked only where the entry's author owns the written component**:
+  `policy_exclusions` where no extension's change of that component is
+  written, a replacement exclusion where its extension's change is the one
+  written. A component an extension replaced is not the captured one, and a
+  component a later extension replaced again is not the earlier one's.
 
 
 Unknown JSON members are ignored by the typed decoder. These are structural
