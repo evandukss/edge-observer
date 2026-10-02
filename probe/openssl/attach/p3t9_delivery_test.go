@@ -44,17 +44,23 @@ func p3t9Delivery(t *testing.T, n uint64) (*ebpfAttachment, *capture.Session, *p
 }
 
 func p3t9Event(stamp uint64, payload string) ebpf.Event {
-	return ebpf.Event{
+	e := ebpf.Event{
 		Kind: ebpf.Transfer, Stamp: stamp, PID: 69171, NamespacePID: 69171,
 		Namespace: admission.Namespace{Device: 69, Inode: 171}, Generation: 1,
-		SSL: 9, Direction: fragment.Sent, Measured: true,
+		Sequence: probe.Sequence{Occupancy: 1, Number: stamp, Born: true},
+		SSL:      9, Direction: fragment.Sent, Measured: true,
 		Length: uint32(len(payload)), Payload: []byte(payload), At: time.Unix(100, int64(stamp)),
 	}
+	if payload == "" {
+		e.Sequence.Number = 0
+	}
+	return e
 }
 
 func p3t9Close(stamp uint64) ebpf.Event {
 	e := p3t9Event(stamp, "")
 	e.Kind, e.Measured = ebpf.Closed, false
+	e.Final = probe.Final{Known: true, Sent: probe.Terminal{Last: stamp - 1}}
 	return e
 }
 
@@ -93,10 +99,16 @@ func TestP3T9DeliveryWitnessAndMeasuredNeighbor(t *testing.T) {
 			middle.Measured = measured
 			if !measured {
 				middle.Length, middle.Payload = 0, nil
+				middle.Sequence.Number = 0
 			}
 			a.deliverEvent(middle)
-			a.deliverEvent(p3t9Event(3, parts[2]))
-			a.deliverEvent(p3t9Close(4))
+			tail, ending := p3t9Event(3, parts[2]), p3t9Close(4)
+			if !measured {
+				tail.Sequence.Number = 2
+				ending.Final.Sent.Last = 2
+			}
+			a.deliverEvent(tail)
+			a.deliverEvent(ending)
 			if measured {
 				p3t9Reason(t, g, 4, "")
 				if c.Stats().Closed != 1 || len(collected.connections) != 1 || collected.connections[0].How != connection.HandleReleasedEnding {
@@ -122,7 +134,7 @@ func TestP3T9DeliveryWitnessAndMeasuredNeighbor(t *testing.T) {
 				}
 				// Finish can still manufacture a capture-end record. It must not
 				// revive authorization; a real worker test must assert no output.
-				c.Finish(time.Unix(101, 0), connection.Counted(4))
+				c.Finish(time.Unix(101, 0))
 				if len(collected.connections) != 1 {
 					t.Fatal("pending retirement was not exercised")
 				}
@@ -151,8 +163,11 @@ func TestP3T9DrainedAdmissionBoundaryAndPendingRetirement(t *testing.T) {
 			events := []ebpf.Event{p3t9Event(1, "GET / HTTP/1.1\r\n\r\n"), p3t9Event(2, ""), p3t9Close(3), p3t9Event(4, "GET /pending HTTP/1.1\r\n\r\n"), p3t9Event(5, "tail")}
 			// Event 3 is an unmatched ordinary close; it must still be charged.
 			events[2].SSL = 123
+			events[2].Sequence, events[2].Final = probe.Sequence{}, probe.Final{}
+			events[3].Sequence.Number = 2
 			// A novel identity/handle makes downstream growth observable at N+1.
 			events[4].PID, events[4].NamespacePID, events[4].SSL = 69172, 69172, 456
+			events[4].Sequence = probe.Sequence{Occupancy: 2, Number: 1, Born: true}
 			var atN capture.Stats
 			for i := 0; i < count; i++ {
 				input <- events[i]
@@ -169,7 +184,7 @@ func TestP3T9DrainedAdmissionBoundaryAndPendingRetirement(t *testing.T) {
 			if c.Stats().Empty != 1 || c.Stats().EndingsUnmatched != 1 || len(a.known) != 1 {
 				t.Fatalf("charged controls missing or tail grew cache: stats %+v identities %d", c.Stats(), len(a.known))
 			}
-			if count == 5 && c.Stats() != atN {
+			if after := c.Stats(); count == 5 && (after.Transfers != atN.Transfers || after.Records != atN.Records || after.Connections != atN.Connections) {
 				t.Fatalf("N+1 changed capture state: before %+v after %+v", atN, c.Stats())
 			}
 			wantRecords := 1
@@ -179,7 +194,7 @@ func TestP3T9DrainedAdmissionBoundaryAndPendingRetirement(t *testing.T) {
 			if len(collected.fragments) != wantRecords || len(collected.connections) != 0 {
 				t.Fatal("pending input population differs from the declared fixture")
 			}
-			c.Finish(time.Unix(101, 0), connection.Counted(int64(count)))
+			c.Finish(time.Unix(101, 0))
 			if len(collected.connections) != 1 {
 				t.Fatal("pending batch was not retired at Finish")
 			}

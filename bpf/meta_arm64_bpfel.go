@@ -80,8 +80,9 @@ type metaCall struct {
 	Early       uint8
 	Deferred    uint8
 	Live        uint8
-	LivePadding [3]uint8
-	_           [4]byte
+	Nested      uint8
+	LivePadding [6]uint8
+	Occupancy   uint64
 }
 
 type metaHandleKey struct {
@@ -105,6 +106,21 @@ type metaObsNs struct {
 	_   structs.HostLayout
 	Dev uint64
 	Ino uint64
+}
+
+type metaOccupancy struct {
+	_                  structs.HostLayout
+	Id                 uint64
+	Generation         uint64
+	Unlocated          uint64
+	Sent               uint64
+	Received           uint64
+	BusySent           uint64
+	BusyReceived       uint64
+	OverlappedSent     uint8
+	OverlappedReceived uint8
+	Born               uint8
+	Padding            [5]uint8
 }
 
 type metaOperation struct {
@@ -181,10 +197,13 @@ const (
 	metaMapHandles              = "handles"
 	metaMapInflight             = "inflight"
 	metaMapNamespaces           = "namespaces"
+	metaMapOccupancies          = "occupancies"
+	metaMapOccupancyIds         = "occupancy_ids"
 	metaMapOperations           = "operations"
 	metaMapSequences            = "sequences"
 	metaMapSockets              = "sockets"
 	metaMapStats                = "stats"
+	metaMapUnlocated            = "unlocated"
 	metaMapUnmatchedAt          = "unmatched_at"
 	metaMapUnmeasurable         = "unmeasurable"
 	metaProgObsAcceptReturn     = "obs_accept_return"
@@ -201,6 +220,7 @@ const (
 	metaProgObsInet6Sendmsg     = "obs_inet6_sendmsg"
 	metaProgObsInetRecvmsg      = "obs_inet_recvmsg"
 	metaProgObsInetSendmsg      = "obs_inet_sendmsg"
+	metaProgObsNewReturn        = "obs_new_return"
 	metaProgObsRead             = "obs_read"
 	metaProgObsReadEarlyEntry   = "obs_read_early_entry"
 	metaProgObsReadEarlyReturn  = "obs_read_early_return"
@@ -285,6 +305,7 @@ type metaProgramSpecs struct {
 	ObsInet6Sendmsg     *ebpf.ProgramSpec `ebpf:"obs_inet6_sendmsg"`
 	ObsInetRecvmsg      *ebpf.ProgramSpec `ebpf:"obs_inet_recvmsg"`
 	ObsInetSendmsg      *ebpf.ProgramSpec `ebpf:"obs_inet_sendmsg"`
+	ObsNewReturn        *ebpf.ProgramSpec `ebpf:"obs_new_return"`
 	ObsRead             *ebpf.ProgramSpec `ebpf:"obs_read"`
 	ObsReadEarlyEntry   *ebpf.ProgramSpec `ebpf:"obs_read_early_entry"`
 	ObsReadEarlyReturn  *ebpf.ProgramSpec `ebpf:"obs_read_early_return"`
@@ -328,10 +349,13 @@ type metaMapSpecs struct {
 	Handles          *ebpf.MapSpec `ebpf:"handles"`
 	Inflight         *ebpf.MapSpec `ebpf:"inflight"`
 	Namespaces       *ebpf.MapSpec `ebpf:"namespaces"`
+	Occupancies      *ebpf.MapSpec `ebpf:"occupancies"`
+	OccupancyIds     *ebpf.MapSpec `ebpf:"occupancy_ids"`
 	Operations       *ebpf.MapSpec `ebpf:"operations"`
 	Sequences        *ebpf.MapSpec `ebpf:"sequences"`
 	Sockets          *ebpf.MapSpec `ebpf:"sockets"`
 	Stats            *ebpf.MapSpec `ebpf:"stats"`
+	Unlocated        *ebpf.MapSpec `ebpf:"unlocated"`
 	UnmatchedAt      *ebpf.MapSpec `ebpf:"unmatched_at"`
 	Unmeasurable     *ebpf.MapSpec `ebpf:"unmeasurable"`
 }
@@ -373,10 +397,13 @@ type metaMaps struct {
 	Handles          *ebpf.Map `ebpf:"handles"`
 	Inflight         *ebpf.Map `ebpf:"inflight"`
 	Namespaces       *ebpf.Map `ebpf:"namespaces"`
+	Occupancies      *ebpf.Map `ebpf:"occupancies"`
+	OccupancyIds     *ebpf.Map `ebpf:"occupancy_ids"`
 	Operations       *ebpf.Map `ebpf:"operations"`
 	Sequences        *ebpf.Map `ebpf:"sequences"`
 	Sockets          *ebpf.Map `ebpf:"sockets"`
 	Stats            *ebpf.Map `ebpf:"stats"`
+	Unlocated        *ebpf.Map `ebpf:"unlocated"`
 	UnmatchedAt      *ebpf.Map `ebpf:"unmatched_at"`
 	Unmeasurable     *ebpf.Map `ebpf:"unmeasurable"`
 }
@@ -394,10 +421,13 @@ func (m *metaMaps) Close() error {
 		m.Handles,
 		m.Inflight,
 		m.Namespaces,
+		m.Occupancies,
+		m.OccupancyIds,
 		m.Operations,
 		m.Sequences,
 		m.Sockets,
 		m.Stats,
+		m.Unlocated,
 		m.UnmatchedAt,
 		m.Unmeasurable,
 	)
@@ -427,6 +457,7 @@ type metaPrograms struct {
 	ObsInet6Sendmsg     *ebpf.Program `ebpf:"obs_inet6_sendmsg"`
 	ObsInetRecvmsg      *ebpf.Program `ebpf:"obs_inet_recvmsg"`
 	ObsInetSendmsg      *ebpf.Program `ebpf:"obs_inet_sendmsg"`
+	ObsNewReturn        *ebpf.Program `ebpf:"obs_new_return"`
 	ObsRead             *ebpf.Program `ebpf:"obs_read"`
 	ObsReadEarlyEntry   *ebpf.Program `ebpf:"obs_read_early_entry"`
 	ObsReadEarlyReturn  *ebpf.Program `ebpf:"obs_read_early_return"`
@@ -471,6 +502,7 @@ func (p *metaPrograms) Close() error {
 		p.ObsInet6Sendmsg,
 		p.ObsInetRecvmsg,
 		p.ObsInetSendmsg,
+		p.ObsNewReturn,
 		p.ObsRead,
 		p.ObsReadEarlyEntry,
 		p.ObsReadEarlyReturn,

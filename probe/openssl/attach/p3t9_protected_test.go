@@ -134,7 +134,19 @@ type p3t9ProtectedCapture struct {
 	callbackErrors <-chan error
 	stamp          uint64
 	sealed         bool
+	production     protectedSequenceSource
 }
+
+type protectedSequenceSource struct {
+	next     uint64
+	byHandle map[uint64]probe.Settlement
+}
+
+func (s *protectedSequenceSource) Settled(h probe.Handle) (probe.Settlement, error) {
+	return s.byHandle[h.Endpoint], nil
+}
+
+func (*protectedSequenceSource) Unlocated() (uint64, error) { return 0, nil }
 
 func p3t9Protected(t *testing.T, maxEvents uint64, hook func()) *p3t9ProtectedCapture {
 	t.Helper()
@@ -197,7 +209,10 @@ func p3t9ProtectedWithIntakeLimit(t *testing.T, maxEvents uint64, intakeBytes in
 	callbacks := &p3t9IntakeCallbacks{store: s, errors: make(chan error, 8)}
 	c := capture.Recording(callbacks, callbacks)
 	a := &ebpfAttachment{gate: g, sink: c, procfs: t.TempDir(), known: make(map[int32]identity)}
-	return &p3t9ProtectedCapture{t: t, dir: dir, store: s, gate: g, capture: c, attachment: a, worker: worker, boundary: b, callbackErrors: callbacks.errors}
+	f := &p3t9ProtectedCapture{t: t, dir: dir, store: s, gate: g, capture: c, attachment: a, worker: worker, boundary: b, callbackErrors: callbacks.errors}
+	f.production.byHandle = make(map[uint64]probe.Settlement)
+	c.Settling(&f.production)
+	return f
 }
 
 // The only source here is controlled decoded delivery. Sealing prevents any
@@ -211,8 +226,25 @@ func (f *p3t9ProtectedCapture) send(handle uint64, direction fragment.Direction,
 	f.stamp++
 	e := p3t9Event(f.stamp, payload)
 	e.SSL, e.Direction, e.Measured = handle, direction, measured
+	state := f.production.byHandle[handle]
+	if state.Occupancy == 0 && measured && len(payload) > 0 && !closed {
+		f.production.next++
+		state = probe.Settlement{Occupancy: f.production.next, Final: probe.Final{Known: true}}
+	}
+	e.Sequence = probe.Sequence{Occupancy: state.Occupancy, Born: state.Occupancy != 0}
+	if measured && len(payload) > 0 && !closed {
+		terminal := &state.Final.Sent
+		if direction == fragment.Received {
+			terminal = &state.Final.Received
+		}
+		terminal.Last++
+		e.Sequence.Number = terminal.Last
+		f.production.byHandle[handle] = state
+	}
 	if closed {
 		e.Kind, e.Measured, e.Length, e.Payload = ebpf.Closed, false, 0, nil
+		e.Final = state.Final
+		delete(f.production.byHandle, handle)
 	}
 	if !measured && !closed {
 		e.Length, e.Payload = 0, nil
@@ -240,7 +272,7 @@ func (f *p3t9ProtectedCapture) drain() processing.Outcome {
 func (f *p3t9ProtectedCapture) finish() processing.Outcome {
 	f.t.Helper()
 	f.sealed = true
-	f.capture.Finish(time.Unix(101, 0), connection.Counted(int64(f.stamp)))
+	f.capture.Finish(time.Unix(101, 0))
 	o, err := f.worker.Finish(context.Background(), processing.Finalization{Withdrawn: true, Drained: true})
 	if err != nil {
 		f.t.Fatalf("real worker Finish failed: %v, outcome %+v", err, o)

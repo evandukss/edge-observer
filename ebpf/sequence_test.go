@@ -516,7 +516,7 @@ func firstGaps(records []fragment.Record) (map[directionKey]uint64, map[directio
 func TestRingLossIsLocatedToTheConnectionsThatLostAndCountedThere(t *testing.T) {
 	for name, one := range map[string]struct {
 		handles, rounds int
-		ring           uint32
+		ring            uint32
 	}{
 		// Fifteen events fit the ring and one waits in staging.
 		"a small ring": {handles: 2, rounds: 10, ring: 64 << 10},

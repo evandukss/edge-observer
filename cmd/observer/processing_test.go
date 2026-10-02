@@ -57,12 +57,12 @@ type fragmentKey struct {
 }
 
 type processingControllerFixture struct {
-	d         *daemon
-	producer  *processingProducer
-	stamp     uint64
+	d        *daemon
+	producer *processingProducer
+	stamp    uint64
 	// numbers is the last number each handle's occupancy took per direction, as
 	// the kernel producer numbers them; a handle's occupancy is its endpoint.
-	numbers map[fragmentKey]uint64
+	numbers   map[fragmentKey]uint64
 	stop      chan os.Signal
 	done      chan struct{}
 	ended     bool

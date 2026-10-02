@@ -26,6 +26,7 @@ func TestSocketOutcomesReachAssociationReasons(t *testing.T) {
 	} {
 		s := capture.Recording(&collected{}, nil)
 		one := transfer(worker, 0x126, fragment.Sent, 1)
+		one.Sequence = probe.Sequence{Occupancy: 1, Number: 1, Born: true}
 		one.Bound = probe.NotBound
 		one.Outcome = tc.outcome
 		s.Transfer(one)

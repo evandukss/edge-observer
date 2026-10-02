@@ -12,15 +12,11 @@ import (
 type t23Placing struct {
 	transfers []uint64
 	refused   []uint64
-	reasons   []probe.GateReason
 }
 
 func (p *t23Placing) Transfer(one probe.Transfer) { p.transfers = append(p.transfers, one.Stamp) }
 func (p *t23Placing) Closed(probe.Connection)     {}
-func (p *t23Placing) Refused(one probe.Transfer, reason probe.GateReason) {
-	p.refused = append(p.refused, one.Stamp)
-	p.reasons = append(p.reasons, reason)
-}
+func (p *t23Placing) Refused(one probe.Transfer)  { p.refused = append(p.refused, one.Stamp) }
 
 // t23Plain is a sink that cannot take one.
 type t23Plain struct{ transfers int }
@@ -29,8 +25,8 @@ func (p *t23Plain) Transfer(probe.Transfer) { p.transfers++ }
 func (p *t23Plain) Closed(probe.Connection) {}
 
 // An event the gate refused is counted under the gate's reason, and a refused
-// transfer goes to a sink that can take it with the reason, so capture takes its
-// number as seen rather than as lost.
+// transfer's place goes to a sink that can take it, so capture takes its number
+// as seen rather than as lost.
 func TestARefusedEventIsCountedUnderItsReasonAndGoesToCaptureAsRefused(t *testing.T) {
 	events := []ebpf.Event{
 		{Kind: ebpf.Transfer, Measured: true, Stamp: 1, PID: 1},
@@ -67,9 +63,9 @@ func TestARefusedEventIsCountedUnderItsReasonAndGoesToCaptureAsRefused(t *testin
 			switch held := sink.(type) {
 			case *t23Placing:
 				if len(held.transfers) != 1 || held.transfers[0] != 1 || len(held.refused) != 2 ||
-					held.refused[0] != 2 || held.refused[1] != 3 || held.reasons[0] != probe.GateInputLimit {
-					t.Errorf("the sink was handed transfers %v and refusals %v under %v, want [1] and [2 3] "+
-						"under the input limit", held.transfers, held.refused, held.reasons)
+					held.refused[0] != 2 || held.refused[1] != 3 {
+					t.Errorf("the sink was handed transfers %v and refusals %v, want [1] and [2 3]",
+						held.transfers, held.refused)
 				}
 			case *t23Plain:
 				if held.transfers != 1 {

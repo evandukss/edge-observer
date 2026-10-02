@@ -370,23 +370,32 @@ func (s *Session) Transfer(t probe.Transfer) {
 	s.mutex.Unlock()
 }
 
-// Refused accounts for a transfer the delivery gate refused. Its bytes never
-// reach this session, so its direction stops where it stood; its number is
-// taken as seen, so a refusal is never counted as a transfer lost. A refused
-// call that moved nothing changes nothing.
-func (s *Session) Refused(t probe.Transfer, reason probe.GateReason) {
-	if t.Sequence.Occupancy != 0 && t.Sequence.Number == 0 {
+// Refused takes the number of a transfer the delivery gate refused as seen, so
+// a refusal is never counted as a transfer lost, and grows nothing else: a
+// refused event reaches no stream, and one of a handle this session follows
+// nothing on begins none. A loss before it in its occupancy is still a loss.
+// The gate's refusal invalidates every pending release capture-wide, which is
+// what keeps a release from crossing the refused bytes.
+func (s *Session) Refused(t probe.Transfer) {
+	if t.Sequence.Number == 0 {
 		return
 	}
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	found := s.follow(t)
-	s.number(found, t)
-	because := connection.ObservationLost
-	if reason == probe.GateUnknownLength {
-		because = connection.LengthUnmeasured
+	found, open := s.streams[key{instance: t.Instance.Key(), endpoint: t.Endpoint}]
+	if !open || found.occupancy != t.Sequence.Occupancy {
+		return
 	}
-	s.cutLocked(found, t.Direction, found.offsets[t.Direction], because, 1, "")
+	last := found.numbered[t.Direction]
+	if t.Sequence.Number <= last {
+		return
+	}
+	if t.Sequence.Number > last+1 {
+		missing := int64(t.Sequence.Number - last - 1)
+		s.stats.Lost += missing
+		s.cutLocked(found, t.Direction, found.offsets[t.Direction], connection.ObservationLost, missing, "")
+	}
+	found.numbered[t.Direction] = t.Sequence.Number
 }
 
 // number reads one transfer's place in its occupancy before its bytes are

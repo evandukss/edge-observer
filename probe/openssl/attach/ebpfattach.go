@@ -574,11 +574,11 @@ func (a *ebpfAttachment) deliverEvent(event ebpf.Event) {
 }
 
 // refused accounts for an event the gate refused, counted under its reason,
-// and hands a refused transfer to a sink that can take it, so its number is not
-// read as a transfer lost. A refused event reads no procfs and grows no cache:
-// the transfer is named from the event and from an identity already known. The
-// hand-off fails open, and the refusal then reads as a loss at its connection,
-// which is the over-count, never a hidden loss.
+// and hands a refused transfer's place to a sink that can take it, so its
+// number is not read as a transfer lost. A refused event reads no procfs and
+// grows no cache: the transfer is named from the event alone. The hand-off
+// fails open, and the refusal then reads as a loss at its connection, which is
+// the over-count, never a hidden loss.
 func (a *ebpfAttachment) refused(event ebpf.Event, reason probe.GateReason) {
 	a.mutex.Lock()
 	if a.gateRefused == nil {
@@ -589,24 +589,14 @@ func (a *ebpfAttachment) refused(event ebpf.Event, reason probe.GateReason) {
 	if event.Kind != ebpf.Transfer {
 		return
 	}
-	placing, can := a.sink.(interface {
-		Refused(probe.Transfer, probe.GateReason)
-	})
+	placing, can := a.sink.(interface{ Refused(probe.Transfer) })
 	if !can {
 		return
 	}
-	a.mutex.Lock()
-	known, found := a.known[event.PID]
-	a.mutex.Unlock()
-	if !found {
-		known = identity{process: fragment.Process{PID: event.PID}}
-	}
-	known.instance.Namespace = event.Namespace
-	known.instance.PID = event.NamespacePID
-	known.instance.Generation = event.Generation
 	placing.Refused(probe.Transfer{
-		Process:   known.process,
-		Instance:  known.instance,
+		Process: fragment.Process{PID: event.PID},
+		Instance: admission.Instance{Namespace: event.Namespace, PID: event.NamespacePID,
+			Generation: event.Generation},
 		Stamp:     event.Stamp,
 		Sequence:  event.Sequence,
 		Endpoint:  event.SSL,
@@ -614,7 +604,7 @@ func (a *ebpfAttachment) refused(event ebpf.Event, reason probe.GateReason) {
 		Length:    event.Length,
 		Measured:  event.Measured,
 		At:        event.At,
-	}, reason)
+	})
 }
 
 // identity is who an event came from: the process a fragment is attributed to,

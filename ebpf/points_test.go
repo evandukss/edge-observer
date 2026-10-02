@@ -43,8 +43,13 @@ func TestEveryEntryPointTheCatalogueAttachesToIsMappedToAProgram(t *testing.T) {
 			t.Errorf("%s is attached to in the catalogue and is mapped to no program", function.Symbol)
 			continue
 		}
-		if point.Entry == "" {
+		// A birth is read off the return alone, the new handle; everything else
+		// needs its entry.
+		if point.Entry == "" && !function.Begins {
 			t.Errorf("%s is mapped to no entry program", function.Symbol)
+		}
+		if function.Begins && point.Return == "" {
+			t.Errorf("%s begins a handle and is mapped to no return program", function.Symbol)
 		}
 	}
 	if len(catalogued) == 0 {
@@ -52,8 +57,11 @@ func TestEveryEntryPointTheCatalogueAttachesToIsMappedToAProgram(t *testing.T) {
 	}
 }
 
-// A function moving no bytes has no return program: there is no count to read.
+// A function moving no bytes has no return program, there being no count to
+// read, unless it begins a handle: then the handle is the return value, and the
+// return program is the only one.
 func TestAFunctionThatMovesNoBytesIsMappedToAnEntryProgramOnly(t *testing.T) {
+	births := 0
 	for _, function := range probe.OpenSSL.Lifecycle {
 		if !function.Probed {
 			continue
@@ -62,8 +70,19 @@ func TestAFunctionThatMovesNoBytesIsMappedToAnEntryProgramOnly(t *testing.T) {
 		if len(points) != 1 {
 			t.Fatalf("%s mapped to %d points, want 1", function.Symbol, len(points))
 		}
+		if function.Begins {
+			births++
+			if points[0].Entry != "" || points[0].Return == "" {
+				t.Errorf("%s begins a handle and is mapped to entry %q and return %q, want the return alone",
+					function.Symbol, points[0].Entry, points[0].Return)
+			}
+			continue
+		}
 		if points[0].Return != "" {
 			t.Errorf("%s carries a return program, and it moves no bytes", function.Symbol)
 		}
+	}
+	if births != 1 {
+		t.Errorf("the lifecycle names %d functions beginning a handle, want SSL_new alone", births)
 	}
 }

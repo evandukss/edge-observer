@@ -421,26 +421,28 @@ func TestAnUnmeasuredTransferCutsItsDirectionAndOneThatMovedNothingDoesNot(t *te
 	}
 }
 
-// A transfer the delivery gate refused never reaches the stream, and its number
-// is not read as lost: the refusal is accounted as refused. Its direction
-// still stops where it stood, since its bytes are not there. The control: the
-// same run with the refused number never handed over, which counts it lost.
-func TestARefusedTransferStopsItsDirectionWithoutCountingALoss(t *testing.T) {
+// A transfer the delivery gate refused takes its number as seen and grows
+// nothing else: it is never counted as a transfer lost, and a refused transfer
+// of a handle nothing follows begins no connection. The control: the same run
+// with the refused number never handed over, which counts it lost.
+func TestARefusedTransferIsNeverCountedAsALoss(t *testing.T) {
 	for name, handed := range map[string]bool{"the refusal handed over": true, "the control": false} {
 		t.Run(name, func(t *testing.T) {
 			s := produced(&collected{}, nil)
 			s.Transfer(numberedAs(worker, 0x18, fragment.Sent, 10, 7, 1))
 			refused := numberedAs(worker, 0x18, fragment.Sent, 6, 7, 2)
+			unfollowed := numberedAs(worker, 0x20, fragment.Sent, 6, 8, 1)
+			before := s.Stats()
 			if handed {
-				s.Refused(refused, probe.GateInputLimit)
+				s.Refused(refused)
+				s.Refused(unfollowed)
+				if after := s.Stats(); after != before {
+					t.Errorf("a refusal changed capture's counts: %+v, then %+v", before, after)
+				}
 			}
 			s.numbers[numbered{handle: handleOf(refused), direction: fragment.Sent}] = 2
 			s.Finish(at)
 
-			held := placementOf(t, s.Records(), 1, fragment.Sent)
-			if held.Positions != connection.PositionsUnknownFrom || held.From != 10 {
-				t.Fatalf("a direction missing a refused transfer is %s", held)
-			}
 			lost := s.Stats().Lost
 			if handed && lost != 0 {
 				t.Errorf("a refusal was counted as %d transfers lost", lost)
@@ -448,6 +450,9 @@ func TestARefusedTransferStopsItsDirectionWithoutCountingALoss(t *testing.T) {
 			if !handed && lost != 1 {
 				t.Errorf("wiring, not the property: the control counts %d lost, so the refused number never "+
 					"reached the settlement", lost)
+			}
+			if got := len(s.Records()); got != 1 {
+				t.Errorf("%d connection records, and the refused handle nothing followed begins none", got)
 			}
 		})
 	}

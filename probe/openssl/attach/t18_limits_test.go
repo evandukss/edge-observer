@@ -113,13 +113,12 @@ func TestT18TheAdmissionLimitEndsTheSessionUnderItsReasonAndKeepsOnlyWhatWasDeci
 			if sealed.Loss == nil || !sealed.Loss.Known || sealed.Loss.Dropped != 0 {
 				t.Errorf("the kernel refused events, so the limit cannot be told from saturation: loss %+v", sealed.Loss)
 			}
-			// The one event the gate refused never reaches capture, which sees a
-			// gap in the production order and counts it as an observation a
-			// located loss accounts for. The control, with no refusal, counts none.
+			// A refused transfer supplies its number without retaining payload.
+			// It must not count as a missing per-direction observation. The
+			// control, with no refusal, also counts none.
 			if sealed.Seen.Lost != 0 {
-				t.Errorf("FINDING: the account counts %d observations as accounted for by located losses and %d streams "+
-					"retired by them, where the ring dropped %d: a refusal at the admission gate reads as capture loss",
-					sealed.Seen.Lost, sealed.Seen.Interrupted, sealed.Loss.Dropped)
+				t.Errorf("the account counts %d missing per-direction observations where the ring dropped %d: a refusal at the admission gate reads as capture loss",
+					sealed.Seen.Lost, sealed.Loss.Dropped)
 			}
 			if holding := t18Holding(t, c.directory, secret); len(holding) != 0 {
 				t.Errorf("the credential reached %v", holding)

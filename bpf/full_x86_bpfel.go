@@ -80,8 +80,9 @@ type fullCall struct {
 	Early       uint8
 	Deferred    uint8
 	Live        uint8
-	LivePadding [3]uint8
-	_           [4]byte
+	Nested      uint8
+	LivePadding [6]uint8
+	Occupancy   uint64
 }
 
 type fullHandleKey struct {
@@ -105,6 +106,21 @@ type fullObsNs struct {
 	_   structs.HostLayout
 	Dev uint64
 	Ino uint64
+}
+
+type fullOccupancy struct {
+	_                  structs.HostLayout
+	Id                 uint64
+	Generation         uint64
+	Unlocated          uint64
+	Sent               uint64
+	Received           uint64
+	BusySent           uint64
+	BusyReceived       uint64
+	OverlappedSent     uint8
+	OverlappedReceived uint8
+	Born               uint8
+	Padding            [5]uint8
 }
 
 type fullOperation struct {
@@ -181,11 +197,14 @@ const (
 	fullMapHandles              = "handles"
 	fullMapInflight             = "inflight"
 	fullMapNamespaces           = "namespaces"
+	fullMapOccupancies          = "occupancies"
+	fullMapOccupancyIds         = "occupancy_ids"
 	fullMapOperations           = "operations"
 	fullMapReads                = "reads"
 	fullMapSequences            = "sequences"
 	fullMapSockets              = "sockets"
 	fullMapStats                = "stats"
+	fullMapUnlocated            = "unlocated"
 	fullMapUnmatchedAt          = "unmatched_at"
 	fullMapUnmeasurable         = "unmeasurable"
 	fullProgObsAcceptReturn     = "obs_accept_return"
@@ -202,6 +221,7 @@ const (
 	fullProgObsInet6Sendmsg     = "obs_inet6_sendmsg"
 	fullProgObsInetRecvmsg      = "obs_inet_recvmsg"
 	fullProgObsInetSendmsg      = "obs_inet_sendmsg"
+	fullProgObsNewReturn        = "obs_new_return"
 	fullProgObsRead             = "obs_read"
 	fullProgObsReadEarlyEntry   = "obs_read_early_entry"
 	fullProgObsReadEarlyReturn  = "obs_read_early_return"
@@ -286,6 +306,7 @@ type fullProgramSpecs struct {
 	ObsInet6Sendmsg     *ebpf.ProgramSpec `ebpf:"obs_inet6_sendmsg"`
 	ObsInetRecvmsg      *ebpf.ProgramSpec `ebpf:"obs_inet_recvmsg"`
 	ObsInetSendmsg      *ebpf.ProgramSpec `ebpf:"obs_inet_sendmsg"`
+	ObsNewReturn        *ebpf.ProgramSpec `ebpf:"obs_new_return"`
 	ObsRead             *ebpf.ProgramSpec `ebpf:"obs_read"`
 	ObsReadEarlyEntry   *ebpf.ProgramSpec `ebpf:"obs_read_early_entry"`
 	ObsReadEarlyReturn  *ebpf.ProgramSpec `ebpf:"obs_read_early_return"`
@@ -329,11 +350,14 @@ type fullMapSpecs struct {
 	Handles          *ebpf.MapSpec `ebpf:"handles"`
 	Inflight         *ebpf.MapSpec `ebpf:"inflight"`
 	Namespaces       *ebpf.MapSpec `ebpf:"namespaces"`
+	Occupancies      *ebpf.MapSpec `ebpf:"occupancies"`
+	OccupancyIds     *ebpf.MapSpec `ebpf:"occupancy_ids"`
 	Operations       *ebpf.MapSpec `ebpf:"operations"`
 	Reads            *ebpf.MapSpec `ebpf:"reads"`
 	Sequences        *ebpf.MapSpec `ebpf:"sequences"`
 	Sockets          *ebpf.MapSpec `ebpf:"sockets"`
 	Stats            *ebpf.MapSpec `ebpf:"stats"`
+	Unlocated        *ebpf.MapSpec `ebpf:"unlocated"`
 	UnmatchedAt      *ebpf.MapSpec `ebpf:"unmatched_at"`
 	Unmeasurable     *ebpf.MapSpec `ebpf:"unmeasurable"`
 }
@@ -375,11 +399,14 @@ type fullMaps struct {
 	Handles          *ebpf.Map `ebpf:"handles"`
 	Inflight         *ebpf.Map `ebpf:"inflight"`
 	Namespaces       *ebpf.Map `ebpf:"namespaces"`
+	Occupancies      *ebpf.Map `ebpf:"occupancies"`
+	OccupancyIds     *ebpf.Map `ebpf:"occupancy_ids"`
 	Operations       *ebpf.Map `ebpf:"operations"`
 	Reads            *ebpf.Map `ebpf:"reads"`
 	Sequences        *ebpf.Map `ebpf:"sequences"`
 	Sockets          *ebpf.Map `ebpf:"sockets"`
 	Stats            *ebpf.Map `ebpf:"stats"`
+	Unlocated        *ebpf.Map `ebpf:"unlocated"`
 	UnmatchedAt      *ebpf.Map `ebpf:"unmatched_at"`
 	Unmeasurable     *ebpf.Map `ebpf:"unmeasurable"`
 }
@@ -397,11 +424,14 @@ func (m *fullMaps) Close() error {
 		m.Handles,
 		m.Inflight,
 		m.Namespaces,
+		m.Occupancies,
+		m.OccupancyIds,
 		m.Operations,
 		m.Reads,
 		m.Sequences,
 		m.Sockets,
 		m.Stats,
+		m.Unlocated,
 		m.UnmatchedAt,
 		m.Unmeasurable,
 	)
@@ -431,6 +461,7 @@ type fullPrograms struct {
 	ObsInet6Sendmsg     *ebpf.Program `ebpf:"obs_inet6_sendmsg"`
 	ObsInetRecvmsg      *ebpf.Program `ebpf:"obs_inet_recvmsg"`
 	ObsInetSendmsg      *ebpf.Program `ebpf:"obs_inet_sendmsg"`
+	ObsNewReturn        *ebpf.Program `ebpf:"obs_new_return"`
 	ObsRead             *ebpf.Program `ebpf:"obs_read"`
 	ObsReadEarlyEntry   *ebpf.Program `ebpf:"obs_read_early_entry"`
 	ObsReadEarlyReturn  *ebpf.Program `ebpf:"obs_read_early_return"`
@@ -475,6 +506,7 @@ func (p *fullPrograms) Close() error {
 		p.ObsInet6Sendmsg,
 		p.ObsInetRecvmsg,
 		p.ObsInetSendmsg,
+		p.ObsNewReturn,
 		p.ObsRead,
 		p.ObsReadEarlyEntry,
 		p.ObsReadEarlyReturn,
