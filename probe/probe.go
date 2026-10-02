@@ -449,6 +449,7 @@ func Weakest(capabilities ...Capability) Capability {
 
 	folded := capabilities[0]
 	folded.Unobserved = slices.Clone(capabilities[0].Unobserved)
+	folded.Unprobed = slices.Clone(capabilities[0].Unprobed)
 	folded.Withheld = slices.Clone(capabilities[0].Withheld)
 	for _, next := range capabilities[1:] {
 		folded.Payload = folded.Payload && next.Payload
@@ -476,6 +477,14 @@ func Weakest(capabilities ...Capability) Capability {
 		for _, symbol := range next.Unobserved {
 			if !slices.Contains(folded.Unobserved, symbol) {
 				folded.Unobserved = append(folded.Unobserved, symbol)
+			}
+		}
+		// The not-live state is the whole set's if any member has it: a reader of the
+		// combined capability must see every member's unprobed entry points, whatever
+		// the order the members fold in.
+		for _, symbol := range next.Unprobed {
+			if !slices.Contains(folded.Unprobed, symbol) {
+				folded.Unprobed = append(folded.Unprobed, symbol)
 			}
 		}
 	}
