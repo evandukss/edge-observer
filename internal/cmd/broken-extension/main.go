@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -183,9 +184,7 @@ func main() {
 					send(map[string]any{"type": "derived", "sources": []string{id}, "basis": "observed", "record": map[string]any{"n": strconv.Itoa(i), "padding": strings.Repeat("d", 8192)}})
 				}
 			case "stderr-flood":
-				for i := 0; *count == 0 || i < *count; i++ {
-					fmt.Fprintln(os.Stderr, "stderr\x1b\t"+strings.Repeat("s", 4096))
-				}
+				floodStderr(os.Stderr, *count)
 			}
 			d := *delay
 			if *mode == "race" && d == 0 {
@@ -210,5 +209,12 @@ func main() {
 			}
 			return
 		}
+	}
+}
+
+// floodStderr emits overlong lines to exercise the stderr receiver.
+func floodStderr(w io.Writer, count int) {
+	for i := 0; count == 0 || i < count; i++ {
+		fmt.Fprintln(w, "stderr\x1b\t"+strings.Repeat("s", 4096))
 	}
 }
