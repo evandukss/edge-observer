@@ -901,7 +901,7 @@ func underWayWhy(u probe.UnderWay) string {
 // Lost is every loss the account carries that is not nothing - a count above
 // zero or a reading not known - as one clause, or empty where there is none: the
 // kernel's losses, the calls under way when the probes were placed, and the
-// records the volatile intake refused. A seal that completed says its steps
+// input records refused. A seal that completed says its steps
 // succeeded and nothing about what capture lost, so wherever a session is said
 // to have sealed this is printed on the same line (Render, and the stop
 // command). An event the delivery gate refused is not a loss and is not here.
@@ -933,10 +933,10 @@ func (a Account) Lost() string {
 	}
 	if a.Seen != nil {
 		if a.Seen.Rejected != 0 {
-			lost = append(lost, fmt.Sprintf("%d records the volatile intake refused", a.Seen.Rejected))
+			lost = append(lost, fmt.Sprintf("%d input records refused", a.Seen.Rejected))
 		}
 		if a.Seen.ConnectionsUnrecorded != 0 {
-			lost = append(lost, fmt.Sprintf("%d connection records the volatile intake refused",
+			lost = append(lost, fmt.Sprintf("%d connection input records refused",
 				a.Seen.ConnectionsUnrecorded))
 		}
 	}

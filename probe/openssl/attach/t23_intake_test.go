@@ -201,7 +201,7 @@ func TestAFullVolatileIntakeCountsRefusalsAndKeepsTheSessionRunning(t *testing.T
 		seal, _, _ := t23Line(text, "sealed ")
 		if !strings.Contains(seal, "INCOMPLETE") &&
 			!strings.Contains(seal, "LOST "+strconv.FormatInt(sealed.Seen.Rejected, 10)+
-				" records the volatile intake refused") {
+				" input records refused") {
 			t.Errorf("the seal line says the session sealed and does not print the %d records the intake refused: %q",
 				sealed.Seen.Rejected, seal)
 		}
