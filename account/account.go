@@ -349,6 +349,11 @@ type ExtensionCounts struct {
 // policy suppression or capture loss.
 // Internal artifact-serialization defects use the terminal error/seal reason,
 // not either counter.
+// ConnectionsCut counts connections cut because they held as much input as one
+// connection may while waiting to be processed, and InputCut the input
+// entries (one per captured transfer) discarded for them, what each held when
+// it was cut and what arrived for it afterwards. A cut is neither a processing
+// failure nor a capture loss.
 // GateReason is the current capture-wide invalidation reason, independently of
 // whether a candidate reached authorization. Counts are the last returned
 // worker outcome; the gate is read later.
@@ -358,6 +363,8 @@ type Processing struct {
 	GateReason         probe.GateReason `json:"gate_reason"`
 	ProcessingFailures uint64           `json:"processing_failures"`
 	OutputFailures     uint64           `json:"output_failures"`
+	ConnectionsCut     uint64           `json:"connections_cut"`
+	InputCut           uint64           `json:"input_cut"`
 	Authorized         uint64           `json:"authorized"`
 	Written            uint64           `json:"written"`
 	// ExchangeIDs is the number of exchange ids the session issued, and

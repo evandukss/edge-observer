@@ -561,15 +561,20 @@ type ExtensionAccount struct {
 // unique-route, batch or exchange count. A useful prefix can be written on a
 // route whose suffix incurs a processing failure. Authorized and Written count
 // permitted and completed route records separately; OutputFailures counts
-// failed approved writes. Internal serialization defects use the terminal
-// error/seal reason, not these counters. A gate reason is not an output
-// failure, policy suppression or a capture-loss count. No whole-session
-// terminal-state claim is made here.
+// failed approved writes. ConnectionsCut counts connections cut because they
+// held as much input as one connection may while waiting to be processed, and
+// InputCut the input entries, one per captured transfer, discarded for them; a
+// cut is neither a processing failure nor a capture loss. Internal
+// serialization defects use the terminal error/seal reason, not these
+// counters. A gate reason is not an output failure, policy suppression or a
+// capture-loss count. No whole-session terminal-state claim is made here.
 type ProcessingAggregate struct {
 	Delivery           *SinkDelivery `json:"delivery,omitempty" account:"optional"`
 	GateReason         string        `json:"gate_reason"`
 	ProcessingFailures string        `json:"processing_failures" account:"count"`
 	OutputFailures     string        `json:"output_failures" account:"count"`
+	ConnectionsCut     string        `json:"connections_cut" account:"count"`
+	InputCut           string        `json:"input_cut" account:"count"`
 	Authorized         string        `json:"authorized" account:"count"`
 	Written            string        `json:"written" account:"count"`
 }

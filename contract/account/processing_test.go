@@ -40,6 +40,7 @@ func TestProcessingAggregatePreservesDistinctFactsAndCaptureLoss(t *testing.T) {
 				counts.Considered, counts.Changed = 13, 13
 				facts := map[string]any{
 					"gate_reason": reason, "processing_failures": 3, "output_failures": 2,
+					"connections_cut": 17, "input_cut": 19,
 					"authorized": 11, "written": 5, "delivery": map[string]any{"authorized": 11, "written": 5, "failed": 2, "dropped": 1, "pending": 3}, "exchange_ids": 13, "extensions": []observed.ExtensionCounts{counts},
 				}
 				encoded, err := json.Marshal(facts)
@@ -69,6 +70,7 @@ func TestProcessingAggregatePreservesDistinctFactsAndCaptureLoss(t *testing.T) {
 				}
 				want := map[string]any{
 					"gate_reason": reason, "processing_failures": "3", "output_failures": "2",
+					"connections_cut": "17", "input_cut": "19",
 					"authorized": "11", "written": "5", "delivery": map[string]any{"authorized": "11", "written": "5", "failed": "2", "dropped": "1", "pending": "3", "discarded": "0", "bytes": "0", "pending_bytes": "0", "high_water_bytes": "0", "limit_bytes": "0"},
 				}
 				if got["state"] != string(Carried) || !reflect.DeepEqual(got["aggregate"], want) {
@@ -82,7 +84,7 @@ func TestProcessingAggregatePreservesDistinctFactsAndCaptureLoss(t *testing.T) {
 				if pipelines, ok := got["pipelines"].([]any); !ok || len(pipelines) != 0 {
 					t.Fatal("session aggregate fabricated per-pipeline attribution")
 				}
-				// The operational account must carry only the same six facts;
+				// The operational account must carry only the same eight facts;
 				// no implementation snapshots survive under another name.
 				encoded, err = json.Marshal(source.Processing)
 				if err != nil {

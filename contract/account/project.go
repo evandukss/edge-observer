@@ -237,7 +237,8 @@ func Project(source observed.Account, supply Supply) (Account, error) {
 		a.Processing = Processing{Block: Block{State: Carried}, Pipelines: []Processed{},
 			Aggregate: &ProcessingAggregate{
 				GateReason: string(p.GateReason), ProcessingFailures: decimalOf(p.ProcessingFailures),
-				OutputFailures: decimalOf(p.OutputFailures), Authorized: decimalOf(p.Authorized),
+				OutputFailures: decimalOf(p.OutputFailures), ConnectionsCut: decimalOf(p.ConnectionsCut),
+				InputCut: decimalOf(p.InputCut), Authorized: decimalOf(p.Authorized),
 				Written: decimalOf(p.Written), Delivery: deliveryOf(p.Delivery),
 			},
 			ExchangeIDs: decimalOf(p.ExchangeIDs), Extensions: extensions,

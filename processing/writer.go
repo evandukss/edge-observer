@@ -204,7 +204,14 @@ type ReconstructionTruncation struct {
 // when a hole lies inside a message which must be withheld in its entirety.
 // Reason is one of capture_hole, positions_unknown, incomplete_message,
 // malformed_message, ambiguous_framing, processing_limit, unsupported_message,
-// unpaired_exchange, or unparsed_suffix. These codes never describe source text.
+// unpaired_exchange, unparsed_suffix, or connection_cut
+// (TruncationConnectionCut). These codes never describe source text.
+// TruncationConnectionCut is the stop of a connection cut because it held as
+// much input as one connection may while waiting to be processed: its input
+// was discarded from its first byte, so the stop's offset is zero and its
+// evidence offset is how far that direction's discarded input ran.
+const TruncationConnectionCut = "connection_cut"
+
 type TruncationStop struct {
 	Direction      string `json:"direction"`
 	Offset         string `json:"offset"`

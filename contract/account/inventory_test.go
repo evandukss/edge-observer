@@ -110,6 +110,8 @@ var represented = map[string]string{
 	".processing.gate_reason":         "processing.aggregate.gate_reason",
 	".processing.processing_failures": "processing.aggregate.processing_failures",
 	".processing.output_failures":     "processing.aggregate.output_failures",
+	".processing.connections_cut":     "processing.aggregate.connections_cut",
+	".processing.input_cut":           "processing.aggregate.input_cut",
 	".processing.authorized":          "processing.aggregate.authorized",
 	".processing.written":             "processing.aggregate.written",
 	".processing.exchange_ids":        "processing.exchange_ids",

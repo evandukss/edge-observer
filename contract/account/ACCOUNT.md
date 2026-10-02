@@ -252,15 +252,20 @@ accounted, not silent**: a record a predicate removed is counted under the compo
 it.
 
 An optional `aggregate` carries session totals when per-pipeline attribution was not measured:
-`{gate_reason, processing_failures, output_failures, authorized, written}`.
-The four counts are decimal strings. `authorized` and `written` count route records separately;
+`{gate_reason, processing_failures, output_failures, connections_cut, input_cut, authorized, written}`.
+The six counts are decimal strings. `authorized` and `written` count route records separately;
 permission does not assert write completion or durable flush. For each batch's processing refusals,
 `processing_failures` counts each affected durable route once: every route for a batch refusal, or
 the affected pipeline's routes for a pipeline refusal. This is not a count of unique routes, batches or exchanges; a route can write a useful
-prefix and also count a refused suffix. `output_failures` counts failed approved writes. An internal
+prefix and also count a refused suffix. `output_failures` counts failed approved writes.
+`connections_cut` counts connections, and `input_cut` input entries, one per captured transfer: a
+connection holding as much input as one connection may while it waits to be processed is cut there.
+What it held is discarded, what arrives for it afterwards is discarded on arrival, both are counted in
+`input_cut`, and its connection line's truncation stops at its first byte with reason `connection_cut`.
+A cut is neither a processing failure nor a capture loss, and the session goes on. An internal
 artifact-serialization defect instead terminates processing and names the binary defect in the seal
-reason; it does not increment either counter. Neither counter is policy suppression or capture loss,
-which retain their own dispositions and readings. `gate_reason` is empty when the gate has no
+reason; it does not increment `processing_failures` or `output_failures`. Neither of those is policy
+suppression or capture loss, which retain their own dispositions and readings. `gate_reason` is empty when the gate has no
 invalidation reason; otherwise it is one of the reasons `probe.GateReasons` classifies as invalidating
 the capture - `input_limit`, `intake_exhausted`, `unknown_length` and
 `unknown_kind` - and each remains distinguishable. `intake_exhausted` is the volatile intake refusing a

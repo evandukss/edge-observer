@@ -398,7 +398,7 @@ func validateTruncation(a Artifact) error {
 			return errors.New("invalid reconstruction truncation offsets")
 		}
 		switch stop.Reason {
-		case "capture_hole", "positions_unknown", "incomplete_message", "malformed_message", "ambiguous_framing", "processing_limit", "unsupported_message", "unpaired_exchange", "unparsed_suffix":
+		case "capture_hole", "positions_unknown", "incomplete_message", "malformed_message", "ambiguous_framing", "processing_limit", "unsupported_message", "unpaired_exchange", "unparsed_suffix", TruncationConnectionCut:
 		default:
 			return errors.New("invalid reconstruction truncation reason")
 		}

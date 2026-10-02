@@ -53,9 +53,12 @@ and one or two `stops`, ordered sent then received without repetition. Each stop
 names `direction`, the decimal `offset` of the first excluded byte, a `reason`,
 and the decimal `evidence_offset` at or after that offset. Reasons are
 `capture_hole`, `positions_unknown`, `incomplete_message`, `malformed_message`,
-`ambiguous_framing`, `processing_limit`, `unsupported_message`, `unpaired_exchange`
-or `unparsed_suffix`. This evidence describes an incomplete suffix, independently
-of the connection's actual ending. Only complete pairs appear in exchange lines.
+`ambiguous_framing`, `processing_limit`, `unsupported_message`, `unpaired_exchange`,
+`unparsed_suffix` or `connection_cut`. This evidence describes an incomplete suffix,
+independently of the connection's actual ending. `connection_cut` is a connection that
+held as much input as one connection may while it waited to be processed: its input
+was discarded from its first byte, so the stop's `offset` is `0` and its
+`evidence_offset` is how far that direction's discarded input ran. Only complete pairs appear in exchange lines.
 
 Ids are issued monotonically before delivery and never reused. The same exchange
 has the same id and connection index on every route and in every extension.
