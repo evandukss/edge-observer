@@ -3,11 +3,11 @@ package processing_test
 import (
 	"context"
 	"fmt"
-	"github.com/evandukss/edge-observer/extension"
 	"testing"
 	"time"
 
 	"github.com/evandukss/edge-observer/capture"
+	"github.com/evandukss/edge-observer/extension"
 	"github.com/evandukss/edge-observer/fragment"
 	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/probe"
@@ -29,11 +29,20 @@ func independentOccupancy(t *testing.T, r held.Reader) map[string]held.Occupancy
 	return out
 }
 
+func independentStore(t *testing.T, stores map[string]held.Occupancy, name string) held.Occupancy {
+	t.Helper()
+	value, exists := stores[name]
+	if !exists {
+		t.Fatalf("wiring, not the property: required store reading %s absent", name)
+	}
+	return value
+}
+
 func TestIndependentCaptureChurnKeepsOnlyLiveIdentity(t *testing.T) {
 	f := independentSequenceNew(&independentSequenceSettler{})
 	f.transfer(1, 1, fragment.Sent, "pinned")
 	first := independentOccupancy(t, f.session)
-	if first["capture.streams"].Held != 1 || len(f.captured.fragments) != 1 {
+	if independentStore(t, first, "capture.streams").Held != 1 || len(f.captured.fragments) != 1 {
 		t.Fatal("wiring, not the property: pinned live connection absent")
 	}
 	for i := uint64(2); i <= 161; i++ {
@@ -49,7 +58,7 @@ func TestIndependentCaptureChurnKeepsOnlyLiveIdentity(t *testing.T) {
 		if name == "capture.streams" || name == "capture.occupancies" || name == "capture.settlers" {
 			limit = 1
 		}
-		if v := after[name]; v.Held > limit {
+		if v := independentStore(t, after, name); v.Held > limit {
 			t.Errorf("%s retains%d after160 retirements, live bound%d", name, v.Held, limit)
 		}
 	}
@@ -65,7 +74,7 @@ func TestIndependentCaptureEarlyHistoryEndsWithItsConnection(t *testing.T) {
 		f.stamp++
 		f.session.Transfer(probe.Transfer{Process: f.process, Instance: f.instance, Endpoint: i, Stamp: f.stamp, Sequence: probe.Sequence{Occupancy: i, Number: 1, Born: true}, Direction: fragment.Sent, Measured: true, Length: 1, Payload: []byte("x"), Early: true, At: f.at})
 		live := independentOccupancy(t, f.session)
-		if live["capture.early"].Held == 0 {
+		if independentStore(t, live, "capture.early").Held == 0 {
 			t.Fatal("wiring, not the property: early-data range never reached live capture")
 		}
 		f.close(i, 1, 0)
@@ -96,7 +105,7 @@ func TestIndependentIntakeAndWorkerChurnReclaimsEachBatch(t *testing.T) {
 		f.close(i, 1, 1)
 		independentSequenceEnqueue(t, store, f.captured.fragments, f.captured.endings)
 		before := independentOccupancy(t, store)
-		if before["intake.entries"].Held != 3 {
+		if independentStore(t, before, "intake.entries").Held != 3 {
 			t.Fatal("wiring, not the property: three entries were not held before drain")
 		}
 		independentSequenceDrain(t, w, taken, int(i)*3)
@@ -151,7 +160,7 @@ func TestIndependentCaptureCarriesReservationIntoRetainedInput(t *testing.T) {
 
 func TestIndependentRunQueuesReturnToWarmLivePopulation(t *testing.T) {
 	f := deliveryOpen(t, t.TempDir(), "retained-run", nil)
-	all := deliveryConnections(t, 160, 913)
+	all := deliveryConnections(t, 10240, 913)
 	var warm map[string]held.Occupancy
 	for i, entries := range all {
 		f.feed(t, entries)
@@ -173,24 +182,24 @@ func TestIndependentRunQueuesReturnToWarmLivePopulation(t *testing.T) {
 			warm = now
 		}
 		for _, name := range []string{"processing.batches", "processing.entries", "processing.fragments", "processing.order", "processing.waiting", "processing.queue"} {
-			if now[name].Held != 0 {
-				t.Errorf("%s retains%d after batch%d drained", name, now[name].Held, i)
+			if independentStore(t, now, name).Held != 0 {
+				t.Errorf("%s retains%d after batch%d drained", name, independentStore(t, now, name).Held, i)
 			}
 		}
 		for _, name := range []string{"processing.router", "processing.pending_capacity", "processing.queue_capacity"} {
-			if now[name].Held > warm[name].Held {
-				t.Errorf("%s grows%d->%d at constant live population", name, warm[name].Held, now[name].Held)
+			if independentStore(t, now, name).Held > independentStore(t, warm, name).Held {
+				t.Errorf("%s grows%d->%d at constant live population", name, independentStore(t, warm, name).Held, independentStore(t, now, name).Held)
 			}
 		}
 	}
 	stats := f.writer.DeliveryStats()
-	if stats.Written != 160*deliveryLines || stats.Pending != 0 {
+	if stats.Written != 10240*deliveryLines || stats.Pending != 0 {
 		t.Fatalf("wiring, not the property: completed workload output %+v", stats)
 	}
 	if stats.Failed != 0 || stats.Dropped != 0 || f.store.Stats().FragmentsRefused != 0 || f.store.Stats().ConnectionsRefused != 0 {
 		t.Errorf("constant-population run refused work: %+v intake%+v", stats, f.store.Stats())
 	}
-	t.Logf("PRECONDITIONS connections=160 live_batches=0 written=%d retained=%+v", stats.Written, independentOccupancy(t, f.run))
+	t.Logf("PRECONDITIONS connections=10240 live_batches=0 written=%d retained=%+v", stats.Written, independentOccupancy(t, f.run))
 }
 
 func TestIndependentExtensionChurnReturnsTransientStores(t *testing.T) {
@@ -213,7 +222,7 @@ func TestIndependentExtensionChurnReturnsTransientStores(t *testing.T) {
 		}
 	}
 	completed := 0
-	for i := uint64(1); i <= 160; i++ {
+	for i := uint64(1); i <= 40960; i++ {
 		result := make(chan extension.Result, 1)
 		why := supervisor.Submit(extension.Call{ID: i, Bytes: 8, Message: []byte(fmt.Sprintf("{\"type\":\"exchange\",\"id\":\"%d\"}\n", i)), Done: func(r extension.Result) { result <- r }})
 		if why != "" {
@@ -292,7 +301,7 @@ func TestIndependentDerivedChurnReclaimsQueuedLines(t *testing.T) {
 			t.Fatal("wiring, not the property: derived writer never entered")
 		}
 		deadline := time.Now().Add(time.Second)
-		for independentOccupancy(t, supervisor)["extension.derived"].Held == 0 {
+		for independentStore(t, independentOccupancy(t, supervisor), "extension.derived").Held == 0 {
 			if time.Now().After(deadline) {
 				t.Fatal("wiring, not the property: second derived line never queued behind held write")
 			}
@@ -319,7 +328,7 @@ func TestIndependentDerivedChurnReclaimsQueuedLines(t *testing.T) {
 			}
 			time.Sleep(time.Millisecond)
 		}
-		if n := independentOccupancy(t, supervisor)["extension.derived"].Held; n != 0 {
+		if n := independentStore(t, independentOccupancy(t, supervisor), "extension.derived").Held; n != 0 {
 			t.Errorf("derived queue retains %d at zero live lines", n)
 		}
 		clock.advance(time.Second)

@@ -3,12 +3,79 @@
 package ebpf_test
 
 import (
+	"os"
+	"os/exec"
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
+	"github.com/evandukss/edge-observer/bpf"
 	"github.com/evandukss/edge-observer/ebpf"
 	retention "github.com/evandukss/edge-observer/held"
 )
+
+func TestIndependentNamespaceChurnReclaimsRefusalHistory(t *testing.T) {
+	serverPID, _ := serving(t)
+	server := loaded(t, serverPID)
+	self := settled(t, int32(os.Getpid()))
+	session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: points(t, server), Admit: authorise(self)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = session.Close() }()
+	baseline := retainedKernel(t, session)
+	for i := 0; i < 40; i++ {
+		cmd := exec.Command("cat")
+		cmd.SysProcAttr = &unix.SysProcAttr{Cloneflags: unix.CLONE_NEWPID}
+		input, err := cmd.StdinPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("wiring, not the property: namespace child unavailable: %v", err)
+		}
+		stop := func() { _ = input.Close(); _ = cmd.Process.Kill(); _ = cmd.Wait() }
+		t.Cleanup(stop)
+		child := settled(t, int32(cmd.Process.Pid))
+		if child.Namespace == self.Namespace || !child.Namespace.Known() {
+			t.Fatal("wiring, not the property: child did not enter a distinct pid namespace")
+		}
+		named, err := session.Reconcile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, one := range named {
+			if one.Selection.ObserverPID == child.PID && one.Reason == ebpf.NamespaceUnenumerated {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("wiring, not the property: unenumerated child not witnessed in reconciliation: %+v", named)
+		}
+		stop()
+		if _, err := session.Reconcile(); err != nil {
+			t.Fatal(err)
+		}
+		after := retainedKernel(t, session)
+		for _, name := range []string{"ebpf.beyond", "ebpf.declined"} {
+			if after[name].Held > baseline[name].Held {
+				t.Errorf("%s retains%d after%d namespace children reaped, live descendants0", name, after[name].Held, i+1)
+			}
+		}
+	}
+	refused, err := session.Refusals()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for reason, n := range refused.Counted {
+		if n != 0 {
+			t.Errorf("namespace churn moved kernel refusal %s to%d", reason, n)
+		}
+	}
+	t.Logf("PRECONDITIONS distinct_namespace_children=40 reconciled_refusals=40 reaped=40 live_descendants=0 stores=%+v", retainedKernel(t, session))
+}
 
 func retainedKernel(t *testing.T, s *ebpf.Session) map[string]retention.Occupancy {
 	t.Helper()
@@ -18,7 +85,15 @@ func retainedKernel(t *testing.T, s *ebpf.Session) map[string]retention.Occupanc
 	}
 	out := map[string]retention.Occupancy{}
 	for _, v := range items {
+		if _, exists := out[v.Store]; exists {
+			t.Fatalf("wiring, not the property: duplicated kernel/session store %s", v.Store)
+		}
 		out[v.Store] = v
+	}
+	for _, name := range []string{"bpf.inflight", "bpf.allowed_processes", "bpf.reads", "bpf.sockets", "bpf.handles", "bpf.occupancies", "bpf.operations", "bpf.discovered", "ebpf.accepted", "ebpf.inventory", "ebpf.index", "ebpf.named_by", "ebpf.seen", "ebpf.beyond", "ebpf.declined"} {
+		if _, exists := out[name]; !exists {
+			t.Fatalf("wiring, not the property: full producer/session store %s absent", name)
+		}
 	}
 	return out
 }
