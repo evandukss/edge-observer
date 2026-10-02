@@ -233,6 +233,9 @@ type Session struct {
 
 	mutex   sync.Mutex
 	streams map[key]*stream
+	// churn sheds what the closing of connections leaves in streams, whose keys
+	// are handles of executions that never return.
+	churn held.Churn
 	// next numbers connections. A connection's id is also its handle's
 	// generation: unique among every occupancy of every handle this session
 	// follows, so an address reused is a new connection without any record of
@@ -592,7 +595,7 @@ func (s *Session) retireLocked(place key, found *stream, at time.Time) {
 	s.unsettledLocked(found, "the connection's ending was never delivered, so whether its last transfers "+
 		"arrived is unknown")
 	record := found.record(connection.EndingUnobserved, at)
-	delete(s.streams, place)
+	s.streams = held.Deleted(s.streams, place, &s.churn)
 	s.stats.Retired++
 	if s.records == nil {
 		return
@@ -711,7 +714,7 @@ func (s *Session) Closed(c probe.Connection) {
 	}
 	s.unlocatedLocked(found, c.Sequence.Unlocated)
 	s.settleLocked(found, c.Final, true)
-	delete(s.streams, place)
+	s.streams = held.Deleted(s.streams, place, &s.churn)
 	s.stats.Closed++
 	how := connection.HandleReleasedEnding
 	if c.Final.Exited {
@@ -1089,7 +1092,7 @@ func (s *Session) Retained() ([]held.Occupancy, error) {
 		early += len(found.early)
 	}
 	return []held.Occupancy{
-		{Store: "capture.streams", Held: len(s.streams)},
+		{Store: "capture.streams", Held: len(s.streams), Rebuilds: s.churn.Rebuilds()},
 		{Store: "capture.early", Held: early},
 		{Store: "capture.settlers", Held: len(s.settlers)},
 	}, nil

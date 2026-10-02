@@ -514,6 +514,10 @@ type ebpfAttachment struct {
 
 	mutex sync.Mutex
 	known map[int32]identity
+	// knownChurn and networksChurn shed what the ends of executions leave in
+	// known and networks, whose pids are new until the numbers wrap. Under mutex.
+	knownChurn    held.Churn
+	networksChurn held.Churn
 
 	// gateRefused is events the gate refused, by its reason; under mutex.
 	gateRefused map[probe.GateReason]int64
@@ -647,8 +651,8 @@ type identity struct {
 func (a *ebpfAttachment) ended(event ebpf.Event) {
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
-	delete(a.known, event.PID)
-	delete(a.networks, event.PID)
+	a.known = held.Deleted(a.known, event.PID, &a.knownChurn)
+	a.networks = held.Deleted(a.networks, event.PID, &a.networksChurn)
 }
 
 // EndedCounts is how many admissions this placement's session has let go of
@@ -783,8 +787,8 @@ func (a *ebpfAttachment) Grants() ([]probe.Grant, error) { return a.session.Gran
 func (a *ebpfAttachment) Retained() ([]held.Occupancy, error) {
 	a.mutex.Lock()
 	out := []held.Occupancy{
-		{Store: "attach.identities", Held: len(a.known)},
-		{Store: "attach.networks", Held: len(a.networks)},
+		{Store: "attach.identities", Held: len(a.known), Rebuilds: a.knownChurn.Rebuilds()},
+		{Store: "attach.networks", Held: len(a.networks), Rebuilds: a.networksChurn.Rebuilds()},
 		{Store: "attach.libcs", Held: len(a.libcs)},
 		{Store: "attach.gate_refused", Held: len(a.gateRefused)},
 	}
@@ -831,7 +835,7 @@ func (a *ebpfAttachment) retract(granted []admission.Selection) {
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 	for _, one := range granted {
-		delete(a.networks, one.ObserverPID)
+		a.networks = held.Deleted(a.networks, one.ObserverPID, &a.networksChurn)
 	}
 }
 

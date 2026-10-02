@@ -16,6 +16,7 @@ import (
 	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/contract/record"
 	"github.com/evandukss/edge-observer/extension"
+	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/http1"
 	"github.com/evandukss/edge-observer/jsonshape"
 	"github.com/evandukss/edge-observer/reconstruct"
@@ -334,7 +335,7 @@ func (w *Worker) settle(ctx context.Context) error {
 		if waits {
 			continue
 		}
-		delete(w.waiting, d)
+		w.waiting = held.Deleted(w.waiting, d, &w.waitingChurn)
 		err = w.write(ctx, d)
 		d.b.release(processedUnless(err))
 		if err != nil {

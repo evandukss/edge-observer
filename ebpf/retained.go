@@ -38,6 +38,9 @@ func (s *Session) Retained() ([]held.Occupancy, error) {
 	s.held.Lock()
 	inventory, index, seen := len(s.inventory), len(s.index), len(s.seen)
 	targets, identities := len(s.targets), len(s.identities)
+	namedBy := len(s.namedBy)
+	indexRebuilt, seenRebuilt, namedByRebuilt := s.indexChurn.Rebuilds(), s.seenChurn.Rebuilds(),
+		s.namedByChurn.Rebuilds()
 	s.held.Unlock()
 
 	return append(out,
@@ -46,13 +49,13 @@ func (s *Session) Retained() ([]held.Occupancy, error) {
 		held.Occupancy{Store: "ebpf.denied", Held: len(s.denied)},
 		held.Occupancy{Store: "ebpf.excluded", Held: len(s.excluded)},
 		held.Occupancy{Store: "ebpf.enumerated", Held: len(s.enumerated)},
-		held.Occupancy{Store: "ebpf.named_by", Held: len(s.namedBy)},
+		held.Occupancy{Store: "ebpf.named_by", Held: namedBy, Rebuilds: namedByRebuilt},
 		held.Occupancy{Store: "ebpf.inventory", Held: inventory},
-		held.Occupancy{Store: "ebpf.index", Held: index},
+		held.Occupancy{Store: "ebpf.index", Held: index, Rebuilds: indexRebuilt},
 		held.Occupancy{Store: "ebpf.targets", Held: targets},
 		held.Occupancy{Store: "ebpf.identities", Held: identities},
 		held.Occupancy{Store: "ebpf.beyond", Held: len(s.beyond)},
-		held.Occupancy{Store: "ebpf.seen", Held: seen},
+		held.Occupancy{Store: "ebpf.seen", Held: seen, Rebuilds: seenRebuilt},
 		held.Occupancy{Store: "ebpf.placed", Held: len(s.placed)},
 		held.Occupancy{Store: "ebpf.links", Held: len(s.links)},
 		held.Occupancy{Store: "ebpf.events", Held: len(s.events), Bound: cap(s.events)},

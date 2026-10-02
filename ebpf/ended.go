@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/evandukss/edge-observer/admission"
+	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/probe"
 )
 
@@ -48,9 +49,9 @@ func (s *Session) forgetEnded(key instanceKey, evidence string, at time.Time) {
 	}
 	s.inventory[last] = admission.Selection{}
 	s.inventory = s.inventory[:last]
-	delete(s.index, key)
-	delete(s.seen, key)
-	delete(s.namedBy, key)
+	s.index = held.Deleted(s.index, key, &s.indexChurn)
+	s.seen = held.Deleted(s.seen, key, &s.seenChurn)
+	s.namedBy = held.Deleted(s.namedBy, key, &s.namedByChurn)
 	s.accepted = slices.DeleteFunc(s.accepted, func(granted admission.Selection) bool {
 		return keyOf(granted.Instance) == key
 	})

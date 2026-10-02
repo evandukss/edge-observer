@@ -392,3 +392,36 @@ func TestAnExtensionTakes4096ExchangesAtOnceAndTheNextSkipsAsBusy(t *testing.T) 
 	}
 	conserved(t, o)
 }
+
+// An extension answering exchange after exchange, each with an id never used
+// before, leaves its generation's map of outstanding exchanges empty and
+// rebuilt, rather than holding what the answers left behind.
+func TestAnsweredExchangesAreShedFromTheOutstandingMap(t *testing.T) {
+	const connections = 200
+	plan := planOf(t, "", entry{name: "answering", fields: []string{config.FieldRequestLine},
+		does: extensiontest.Config{}})
+	s := startedWith(t, plan, 1<<26, nil, 1).ready(t, plan)
+	s.feed(t, generate(t, workload.Shape{Connections: connections, Exchanges: 1, Seed: 16}))
+	s.waitFor(t, "every exchange answered", func(o processing.Outcome) bool {
+		return len(o.Extensions) == 1 && o.Extensions[0].Considered == connections && o.Extensions[0].Pending == 0
+	})
+	stores, err := s.run.Retained()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, one := range stores {
+		if one.Store != "extension.outstanding" {
+			continue
+		}
+		found = true
+		if one.Held != 0 || one.Rebuilds == 0 {
+			t.Errorf("after %d exchanges were answered extension.outstanding holds %d and was rebuilt %d times",
+				connections, one.Held, one.Rebuilds)
+		}
+	}
+	if !found {
+		t.Fatalf("wiring, not the property: the run lists no extension.outstanding: %v", stores)
+	}
+	conserved(t, s.finish(t))
+}

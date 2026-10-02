@@ -7,6 +7,7 @@ import (
 	"github.com/cilium/ebpf"
 
 	"github.com/evandukss/edge-observer/admission"
+	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/probe"
 )
 
@@ -147,7 +148,7 @@ func (s *Session) Retract(granted []admission.Selection) {
 				ended = append(ended, value.Generation)
 			}
 		}
-		delete(s.namedBy, key)
+		s.namedBy = held.Deleted(s.namedBy, key, &s.namedByChurn)
 	}
 	s.reclaimReads(ended)
 	kept := s.accepted[:0]

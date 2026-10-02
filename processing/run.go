@@ -159,6 +159,7 @@ func (r *Run) Retained() ([]held.Occupancy, error) {
 		}
 		out[i].Held += one.Held
 		out[i].Bound += one.Bound
+		out[i].Rebuilds += one.Rebuilds
 	}
 	for _, stores := range r.retained {
 		for _, one := range stores {

@@ -93,7 +93,7 @@ func (s *set) ending(told func(probe.Ended)) func(probe.Ended) {
 		for _, member := range members {
 			if live, placed := member.live.(*ebpfAttachment); placed {
 				live.mutex.Lock()
-				delete(live.networks, pid)
+				live.networks = held.Deleted(live.networks, pid, &live.networksChurn)
 				live.mutex.Unlock()
 			}
 		}

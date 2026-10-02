@@ -42,6 +42,9 @@ func TestChurnedExecutionsLeaveThePlacementHoldingOnlyTheLiveOnes(t *testing.T) 
 			if one.Held != 0 {
 				t.Errorf("%s holds %d after %d executions came and went, want none", one.Store, one.Held, executions)
 			}
+			if one.Rebuilds == 0 {
+				t.Errorf("%s was never rebuilt after %d executions came and went", one.Store, executions)
+			}
 		}
 	}
 	if state := g.Snapshot(); state.Charged != executions {
