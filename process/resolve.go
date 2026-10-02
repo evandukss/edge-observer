@@ -324,10 +324,11 @@ type Excluded struct {
 // and exclusion what it came to, and the grants and denials for the kernel
 // side.
 type Resolution struct {
-	Targets    []Resolved
-	Exclusions []Excluded
-	Selections []admission.Selection
-	Denials    []admission.Denial
+	Targets               []Resolved
+	Exclusions            []Excluded
+	Selections            []admission.Selection
+	Denials               []admission.Denial
+	ArgumentsUndetermined []ArgumentsRefusal `json:",omitempty"`
 }
 
 // Resolve resolves the approval against the host in one traversal, so every

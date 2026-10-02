@@ -15,9 +15,10 @@ import (
 // is 15 bytes the process chooses and the command line is memory it may
 // rewrite.
 type Exec struct {
-	StartTime uint64 `json:"start_time"`
-	Comm      string `json:"comm"`
-	Cmdline   string `json:"cmdline"`
+	StartTime        uint64           `json:"start_time"`
+	Comm             string           `json:"comm"`
+	Cmdline          string           `json:"cmdline"`
+	ArgumentEvidence ArgumentEvidence `json:"argument_evidence,omitempty"`
 }
 
 // ReadExec reads what anyone may read of which program pid runs, from

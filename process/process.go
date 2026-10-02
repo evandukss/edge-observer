@@ -32,7 +32,8 @@ type Process struct {
 
 	// Arguments is the process's argv, argv[0] first, as the kernel holds it now,
 	// including a rewrite and its trailing padding; matching strips the padding.
-	Arguments []string
+	Arguments        []string
+	ArgumentEvidence ArgumentEvidence
 
 	// Cgroup is the process's path on the unified (v2) hierarchy from
 	// /proc/<pid>/cgroup, empty where none. A process cannot rewrite it, and it is
@@ -689,7 +690,8 @@ type Match struct {
 	Rule   Rule
 	Number int
 
-	Matched []Process
+	Matched      []Process
+	Undetermined []Process
 }
 
 // Matches is what each rule named in this table, in order, including rules
