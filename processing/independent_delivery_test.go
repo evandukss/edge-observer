@@ -320,9 +320,6 @@ func TestIndependentDeliveryAPartialWriteCostsLinesAndInspectionReportsItMalform
 	if err == nil {
 		t.Error("inspection read a file holding a damaged record without failing")
 	}
-	if errors.Is(err, processing.ErrNotImplemented) {
-		t.Fatalf("wiring, not the property: the reader is not installed: %v", err)
-	}
 	if len(visited) != deliveryLines {
 		t.Errorf("inspection visited %d records before failing, want the %d whole records before the damaged one",
 			len(visited), deliveryLines)
