@@ -22,6 +22,7 @@ import (
 	"github.com/evandukss/edge-observer/probe/openssl/attach"
 	"github.com/evandukss/edge-observer/process"
 	"github.com/evandukss/edge-observer/processing"
+	outputsink "github.com/evandukss/edge-observer/sink"
 )
 
 // t18Barrier holds whoever reaches it until it is opened, and says when the
@@ -42,17 +43,22 @@ func (b *t18Barrier) hold() {
 
 func (b *t18Barrier) open() { b.opened.Do(func() { close(b.release) }) }
 
-// t18HeldOutput is the approved-output writer behind a barrier: a write
-// reaches the barrier, and only then the writer.
-type t18HeldOutput struct {
+// t18HeldDestination is the approved file's sink behind a barrier: a write
+// reaches the barrier, and only then the file. The writer is held here, at its
+// write, because handing it a line is the enqueue that the gate orders against
+// invalidation in one short step; holding that step would hold the gate.
+type t18HeldDestination struct {
 	barrier *t18Barrier
-	inner   processing.Output
+	inner   outputsink.Sink
 }
 
-func (o t18HeldOutput) WriteApproved(ctx context.Context, a processing.Approved) error {
-	o.barrier.hold()
-	return o.inner.WriteApproved(ctx, a)
+func (d t18HeldDestination) Write(ctx context.Context, line []byte) (int, error) {
+	d.barrier.hold()
+	return d.inner.Write(ctx, line)
 }
+
+func (d t18HeldDestination) Reopen(ctx context.Context) error { return d.inner.Reopen(ctx) }
+func (d t18HeldDestination) Close(ctx context.Context) error  { return d.inner.Close(ctx) }
 
 // t18HeldSink is capture's fragment sink, the volatile intake, behind a
 // barrier once armed: the delivery loop calling it is held inside the write.
@@ -175,20 +181,24 @@ func t18Held(t *testing.T, held string) {
 	sink := &t18HeldSink{barrier: barrier, inner: store}
 	recording := capture.Recording(sink, store)
 	directory := t.TempDir()
-	writer, err := processing.Open(directory, 1<<20)
+	open := outputsink.NewFile
+	if held == "the writer" {
+		open = func(path string) outputsink.Sink {
+			return t18HeldDestination{barrier: barrier, inner: outputsink.NewFile(path)}
+		}
+	}
+	writer, err := processing.OpenWriter(processing.WriterOptions{Directory: directory, QueueBytes: 1 << 20, OpenSink: open})
 	if err != nil {
 		t.Fatal(err)
 	}
-	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 1024, StorageExhausted: writer.Exhausted()})
+	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 1024, IntakeExhausted: store.Exhausted()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	options := processing.Options{Plan: compiled.Processing, PolicyRevision: compiled.Revision, Intake: store, Gate: gate, Output: writer}
+	options := processing.Options{Plan: compiled.Processing, PolicyRevision: compiled.Revision, Session: "t18-latency", Intake: store, Gate: gate, Output: writer}
 	switch held {
 	case "the worker":
 		options.BeforeParse = func(context.Context) error { barrier.hold(); return nil }
-	case "the writer":
-		options.Output = t18HeldOutput{barrier: barrier, inner: writer}
 	}
 	worker, err := processing.New(options)
 	if err != nil {
@@ -263,7 +273,7 @@ func t18Held(t *testing.T, held string) {
 		for writer.Stats().Written == 0 && time.Now().Before(deadline) {
 			time.Sleep(10 * time.Millisecond)
 		}
-		written := t18Approved(t, directory)
+		written := t18ApprovedIn(t, directory)
 		if !slices.Contains(t18Targets(written), "/?asked=t18-closing") || t18Excluded(written, "authorization") == 0 {
 			t.Errorf("once opened, %s did not write the closed connection's exchange with its credential removed: %v",
 				held, t18Targets(written))

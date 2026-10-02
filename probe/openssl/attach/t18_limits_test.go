@@ -5,8 +5,6 @@ package attach_test
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -14,7 +12,6 @@ import (
 
 	"github.com/evandukss/edge-observer/account"
 	"github.com/evandukss/edge-observer/probe"
-	"github.com/evandukss/edge-observer/processing"
 )
 
 // t18Settled waits until the running session has written at least want
@@ -157,128 +154,10 @@ func TestT18TheAdmissionLimitEndsTheSessionUnderItsReasonAndKeepsOnlyWhatWasDeci
 			}
 			files := t18Files(t, s.directory(c))
 			slices.Sort(files)
-			if want := []string{"account.json", processing.ArtifactName, "contract-account.json"}; !slices.Equal(files, want) {
-				t.Errorf("the session directory holds %v, want only %v", files, want)
+			if want := []string{"account.json", "contract-account.json"}; !slices.Equal(files, want) {
+				t.Errorf("the session directory holds %v, want only %v: approved output is at its stable path", files, want)
 			}
 			if text := t18Rendered(t, binary, s.directory(c)); !strings.Contains(text, "release    refused: "+string(probe.GateInputLimit)) {
-				t.Errorf("the public command does not state the reason:\n%s", text)
-			}
-		})
-	}
-}
-
-// Rows 7, 10 and 17, the approved-output bound, on a loaded run of the running
-// program. Each connection is forty 3000-byte answers, closed, then written as
-// one record per route; limits.output_mib is 1 as configuring writes
-// it. Two connections fit. Eight do not: the first record that does not fit is
-// refused whole, nothing of that connection is written, the records before it
-// stay whole, and the session ends by itself with an output failure and the
-// storage reason - not a processing failure, not capture loss, and not the
-// policy's own removal, which the written records carry beside it.
-func TestT18TheApprovedOutputBoundRefusesALoadedRunBesideABelowLimitSuccess(t *testing.T) {
-	binary := built(t)
-	const perConnection = 40
-	const secret = "Bearer t18-bound-secret"
-	for _, connections := range []int{2, 8} {
-		over := connections == 8
-		name := map[bool]string{false: "below the bound", true: "over the bound"}[over]
-		t.Run(name, func(t *testing.T) {
-			port := t18Serving(t)
-			clients := make([]conversation, connections)
-			for i := range clients {
-				clients[i] = speaking(t, port)
-			}
-			c := configuring(t, target("clients", clients[0].process))
-			t18Edit(t, c, t18Removing)
-			s := t18Started(t, binary, c)
-
-			for i, client := range clients {
-				if s.ended() {
-					break
-				}
-				for j := range perConnection {
-					t18Ask(t, client, fmt.Sprintf("/blob?asked=t18-c%d-%d", i, j), "Authorization: "+secret)
-				}
-				t18Hangup(client)
-				t18Settled(t, binary, c, s, uint64(2*(i+1)), 20*time.Second)
-			}
-			var sealed account.Account
-			if over {
-				s.awaited(t, 30*time.Second)
-				if s.err != nil {
-					t.Fatalf("the session that reached the bound exited %v:\n%s", s.err, s.transcript())
-				}
-				sealed = t18Sealed(t, s.directory(c), s.session)
-			} else {
-				sealed = s.stop(t, c)
-			}
-			t.Logf("%d events admitted; processing %+v; seal %+v; stopped record %v",
-				t18Admitted(sealed), sealed.Processing, sealed.Seal, s.records("stopped"))
-
-			info, err := os.Stat(filepath.Join(s.directory(c), processing.ArtifactName))
-			if err != nil || info.Size() > 1<<20 {
-				t.Errorf("the approved output is %v bytes (%v), over the 1 MiB bound", info.Size(), err)
-			}
-			written := t18Approved(t, s.directory(c))
-			if sealed.Processing == nil || uint64(len(written)) != sealed.Processing.Written {
-				t.Errorf("the approved output holds %d whole records and the account says %+v", len(written), sealed.Processing)
-			}
-			targets := t18Targets(written)
-			refused := -1
-			for i := range connections {
-				whole := slices.Contains(targets, fmt.Sprintf("/blob?asked=t18-c%d-0", i))
-				last := slices.Contains(targets, fmt.Sprintf("/blob?asked=t18-c%d-%d", i, perConnection-1))
-				switch {
-				case whole && last && refused < 0:
-				case !whole && !last:
-					if refused < 0 {
-						refused = i
-					}
-				default:
-					t.Errorf("connection %d is written in part, or after a refusal (first-exchange %v, last %v, refused from %d)",
-						i, whole, last, refused)
-				}
-			}
-			if t18Excluded(written, "authorization") == 0 {
-				t.Errorf("the written records carry no policy removal, so the output failure is not shown beside it")
-			}
-			if holding := t18Holding(t, c.directory, secret); len(holding) != 0 {
-				t.Errorf("the credential reached %v", holding)
-			}
-			if sealed.Loss == nil || !sealed.Loss.Known || sealed.Loss.Dropped != 0 || sealed.Seen.Lost != 0 {
-				t.Errorf("capture lost events, so the output failure is not shown apart from capture loss: %+v, lost %d",
-					sealed.Loss, sealed.Seen.Lost)
-			}
-			if sealed.Processing != nil && sealed.Processing.ProcessingFailures != 0 {
-				t.Errorf("%d processing failures, where every exchange was decidable", sealed.Processing.ProcessingFailures)
-			}
-
-			if !over {
-				if refused >= 0 || sealed.Processing.OutputFailures != 0 || sealed.Processing.GateReason != "" ||
-					sealed.Seal == nil || !sealed.Seal.Complete {
-					t.Fatalf("below the bound: connection %d refused, processing %+v, seal %+v", refused, sealed.Processing, sealed.Seal)
-				}
-				return
-			}
-			if refused < 1 {
-				t.Fatalf("wiring, not the property: the refusal fell at connection %d, so no record written before it "+
-					"shows the bound keeps what fitted: %s", refused, targets)
-			}
-			if s.signaled {
-				t.Fatal("wiring: the session over the bound was signalled")
-			}
-			if sealed.Processing.OutputFailures == 0 || sealed.Processing.GateReason != probe.GateStorageExhausted {
-				t.Errorf("over the bound the account says %+v, want an output failure and %s",
-					sealed.Processing, probe.GateStorageExhausted)
-			}
-			because := ""
-			if sealed.Seal != nil {
-				because = strings.Join(sealed.Seal.Because, "; ")
-			}
-			if sealed.Seal == nil || sealed.Seal.Complete || !strings.Contains(because, "processing did not finish") {
-				t.Errorf("the seal over the bound reads complete=%v because %q", sealed.Seal != nil && sealed.Seal.Complete, because)
-			}
-			if text := t18Rendered(t, binary, s.directory(c)); !strings.Contains(text, "release    refused: "+string(probe.GateStorageExhausted)) {
 				t.Errorf("the public command does not state the reason:\n%s", text)
 			}
 		})
@@ -336,8 +215,8 @@ func TestT18AFullVolatileIntakeEndsTheSessionUnderAStatedReason(t *testing.T) {
 	}
 	files := t18Files(t, s.directory(c))
 	slices.Sort(files)
-	if want := []string{"account.json", processing.ArtifactName, "contract-account.json"}; !slices.Equal(files, want) {
-		t.Errorf("the session directory holds %v, want only %v", files, want)
+	if want := []string{"account.json", "contract-account.json"}; !slices.Equal(files, want) {
+		t.Errorf("the session directory holds %v, want only %v: approved output is at its stable path", files, want)
 	}
 	if holding := t18Holding(t, c.directory, "t18-intake-secret"); len(holding) != 0 {
 		t.Errorf("the credential reached %v", holding)

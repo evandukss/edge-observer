@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/evandukss/edge-observer/activation"
+	"github.com/evandukss/edge-observer/processing"
 )
 
 // t18Launched is one `observer start` created into a chosen cgroup, its
@@ -235,6 +236,14 @@ func TestT18AStartWithoutItsPostureRefusesByNameAndWritesNothing(t *testing.T) {
 				t.Errorf("the refused start left %d session directories", len(entries))
 			}
 			for _, path := range t18Files(t, c.directory) {
+				if path == processing.ArtifactName {
+					// The stable approved file may be opened at start; a refused
+					// start leaves it holding nothing.
+					if info, err := os.Stat(filepath.Join(c.directory, path)); err != nil || info.Size() != 0 {
+						t.Errorf("the refused start left %s holding %v bytes (%v)", path, info, err)
+					}
+					continue
+				}
 				if path != "observer.log" && path != "observer.pid" {
 					t.Errorf("the refused start left %s", path)
 				}

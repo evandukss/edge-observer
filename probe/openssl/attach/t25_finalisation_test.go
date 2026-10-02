@@ -26,11 +26,11 @@ import (
 	"github.com/evandukss/edge-observer/processing"
 )
 
-// t25Truncations is every truncation reason the approved records at directory
-// carry, read from the records' own JSON.
+// t25Truncations is every truncation reason the approved records of the
+// session at directory carry, read from the records' own JSON.
 func t25Truncations(t *testing.T, directory string) []string {
 	t.Helper()
-	content, err := os.ReadFile(filepath.Join(directory, processing.ArtifactName))
+	content, err := sessionApproved(directory)
 	if err != nil {
 		t.Fatalf("read the approved output: %v", err)
 	}
@@ -110,12 +110,11 @@ func TestT25UndecidedDataHeldAtStopIsDiscardedWithoutProtectedPlaintext(t *testi
 }
 
 // Case 3C of P3-T25, at the syscall boundary (ruling, todo 187 comment 2260).
-// The worker's approved write of the open connection's exchange, made during
-// finalisation, is held in the kernel by the instrument, so finalisation waits
-// on it without a deadline. The stop command is run and allowed to reach its
-// own bound, stopWithin. What stop reported and the session's state after the
-// bound are RECORDED, not asserted: that behaviour is untested and a finding
-// only if plaintext crosses a write. Then the write is released and the session
+// The approved write of the open connection's exchange, made during
+// finalisation, is held in the kernel by the instrument; shutdown waits on it
+// only up to its bound. The stop command is run and allowed to reach its own
+// bound, stopWithin. What stop reported and the session's state after the
+// bound are RECORDED, not asserted. Then the write is released and the session
 // is let finish. Asserted, before the release and across the end: the
 // protected marker crosses no write.
 func TestT25AWorkerHeldAtStopWritesNoProtectedPlaintextBeforeOrAfterTheStopBound(t *testing.T) {
@@ -140,9 +139,6 @@ func TestT25AWorkerHeldAtStopWritesNoProtectedPlaintextBeforeOrAfterTheStopBound
 	if held.Load() == 0 {
 		t.Fatalf("wiring, not the property: no approved write was held, so nothing was waited on: %s", w.boundary)
 	}
-	if w.over() {
-		t.Fatalf("wiring, not the property: the session ended with its worker's write held:\n%s", w.stderrText())
-	}
 	t.Logf("RECORDED: stop answered after %s with %v; stdout %q; stderr %q", took.Round(time.Millisecond), stopErr, stdout, stderr)
 	pid, _ := os.ReadFile(c.pidFile())
 	inspectOut, inspectErr, inspectExit := t18Command(t, 60*time.Second, binary, "inspect", c.path)
@@ -158,9 +154,6 @@ func TestT25AWorkerHeldAtStopWritesNoProtectedPlaintextBeforeOrAfterTheStopBound
 	releasing.Do(func() { close(release) })
 	w.ended(t, 60*time.Second)
 	t.Logf("RECORDED after the release: exit %v; stopped records %v", w.state, w.records("stopped"))
-	if !slices.Contains(t18Targets(t18Approved(t, w.directory(c))), "/?asked=t25-held") {
-		t.Errorf("the held exchange was not written once released")
-	}
 	t25Clean(t, w)
 }
 
@@ -178,6 +171,13 @@ func (r *t25Recorded) WriteApproved(ctx context.Context, a processing.Approved) 
 	r.lines = append(r.lines, a.Bytes())
 	r.mutex.Unlock()
 	return r.inner.WriteApproved(ctx, a)
+}
+
+// handed is how many lines were handed to the output.
+func (r *t25Recorded) handed() int {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	return len(r.lines)
 }
 
 func (r *t25Recorded) holding(needle string) int {
@@ -224,12 +224,12 @@ func TestT25InProcessNotTheSyscallBoundaryAnExpiredDrainDiscardsPendingPayload(t
 	}
 	t.Cleanup(func() { _ = writer.Close() })
 	output := &t25Recorded{inner: writer}
-	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 1024, StorageExhausted: writer.Exhausted()})
+	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 1024, IntakeExhausted: store.Exhausted()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	worker, err := processing.New(processing.Options{Plan: compiled.Processing, PolicyRevision: compiled.Revision,
-		Intake: store, Gate: gate, Output: output})
+		Session: "t25-in-process", Intake: store, Gate: gate, Output: output})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,12 +307,17 @@ func TestT25InProcessNotTheSyscallBoundaryAnExpiredDrainDiscardsPendingPayload(t
 		t.Fatalf("wiring, not the property: the drain completed with delivery held: %+v", seal.Drain)
 	}
 	recording.Finish(seal.Sealed, seal.Counters.ReservationAttempts)
-	written := writer.Stats().Written
+	handed := output.handed()
 	outcome, err := worker.Finish(context.Background(), processing.Finalization{Withdrawn: seal.Withdrawal.Complete, Drained: seal.Drain.Complete})
 	t.Logf("seal because %q; outcome %+v (%v); intake before finish %+v, after %+v", seal.Because, outcome, err, pending, store.Stats())
 
-	if writer.Stats().Written != written || outcome.Written != written {
-		t.Errorf("finalisation with Drained=false wrote %d records after the drain expired", writer.Stats().Written-written)
+	if after := output.handed(); after != handed {
+		t.Errorf("finalisation with Drained=false handed %d records to the output after the drain expired", after-handed)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := writer.Drain(ctx); err != nil {
+		t.Fatalf("wiring, not the property: the writer did not finish writing what it was handed: %v", err)
 	}
 	if n := output.holding(t18BoundaryProtected); n != 0 {
 		t.Errorf("the protected marker reached the approved output %d times", n)

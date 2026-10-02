@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/evandukss/edge-observer/account"
+	"github.com/evandukss/edge-observer/processing"
 )
 
 // Case 2 of P3-T25, criterion rows 1 and 13: a fatal diagnostic carries no
@@ -22,11 +23,11 @@ import (
 //
 //	the sealed account cannot be written
 //	    the sessions directory is a tmpfs the test fills once a first connection
-//	    is written; the next connection's approved write fails for want of space,
-//	    the session ends, the account cannot be placed, and main prints the error
-//	    and exits 1 - the one enumerated fatal site reachable once plaintext has
-//	    been captured (TestT25EveryFatalSiteIsListedWithItsReason). The approved
-//	    write that fails is also case 1's failure in the write itself
+//	    is written; a second connection carrying both markers is captured and
+//	    written to the approved file, which is elsewhere; the session is stopped,
+//	    the account cannot be placed, and main prints the error and exits 1 - the
+//	    one enumerated fatal site reachable once plaintext has been captured
+//	    (TestT25EveryFatalSiteIsListedWithItsReason)
 //	a runtime dump on SIGQUIT
 //	    an exchange is held undecided on an open connection when the observer is
 //	    sent SIGQUIT, and the Go runtime prints every goroutine to stderr and exits
@@ -54,23 +55,18 @@ func TestT25AFatalDiagnosticCarriesNoProtectedPlaintext(t *testing.T) {
 				t18Ask(t, faulting, "/?asked=t25-after-the-fill",
 					"X-Public: "+t18BoundaryPermitted, "Authorization: Bearer "+t18BoundaryProtected)
 				t18Hangup(faulting)
-				w.ended(t, 30*time.Second)
-				stopped := w.records("stopped")
-				if len(stopped) != 1 {
-					t.Fatalf("wiring, not the property: the session printed %d stopped records:\n%s", len(stopped), w.stderrText())
+				// The control channel writes into the full sessions directory, so the
+				// exchange is waited for in the approved file, which is elsewhere.
+				t25Holds(t, filepath.Join(c.directory, processing.ArtifactName), "t25-after-the-fill", 20*time.Second)
+				w.signal(t, syscall.SIGTERM)
+				// The guard: the fatal site really ran, for want of space, with exit
+				// status 1.
+				stderr := w.stderrText()
+				if w.state == nil || w.state.ExitCode() != 1 || !strings.Contains(stderr, "observer: write the sealed account") ||
+					!strings.Contains(stderr, "no space left on device") {
+					t.Fatalf("wiring, not the property: main's fatal exit did not run for want of space: %v\n%s", w.state, stderr)
 				}
-				processingBlock, _ := stopped[0]["processing"].(map[string]any)
-				failures, _ := processingBlock["output_failures"].(float64)
-				recorded, _ := stopped[0]["error"].(string)
-				// The guards: the approved write really failed, and the fatal site
-				// really ran, with exit status 1.
-				if failures < 1 || !strings.Contains(recorded, "no space left on device") {
-					t.Fatalf("wiring, not the property: the write did not fail for want of space: %v", stopped[0])
-				}
-				if w.state == nil || w.state.ExitCode() != 1 || !strings.Contains(w.stderrText(), "observer: write the sealed account") {
-					t.Fatalf("wiring, not the property: main's fatal exit did not run: %v\n%s", w.state, w.stderrText())
-				}
-				t.Logf("stopped record %v; stderr %q", stopped[0], w.stderrText())
+				t.Logf("stopped records %v; stderr %q", w.records("stopped"), stderr)
 			case "a runtime dump on SIGQUIT":
 				before := inspected(t, binary, c).Seen.Records
 				t18Ask(t, faulting, "/?asked=t25-held-at-the-dump",
@@ -100,6 +96,17 @@ func TestT25AFatalDiagnosticCarriesNoProtectedPlaintext(t *testing.T) {
 			t25Clean(t, w)
 		})
 	}
+}
+
+// t25Holds waits until the file at path holds needle.
+func t25Holds(t *testing.T, path, needle string, within time.Duration) {
+	t.Helper()
+	for deadline := time.Now().Add(within); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		if content, err := os.ReadFile(path); err == nil && strings.Contains(string(content), needle) {
+			return
+		}
+	}
+	t.Fatalf("wiring, not the property: %s did not hold %q within %s", path, needle, within)
 }
 
 // t25FatalSites is every site in the observer module's non-test source that

@@ -21,7 +21,6 @@ import (
 	"github.com/evandukss/edge-observer/account"
 	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/process"
-	"github.com/evandukss/edge-observer/processing"
 )
 
 // The markers are the boundary counting's own: the protected one rides every
@@ -195,7 +194,7 @@ func t30Watch(name string, p process.Process) map[string]any {
 func t30Document(c configured, watch []map[string]any, keys map[string]any) map[string]any {
 	document := map[string]any{
 		"version": config.FileVersion, "output": c.directory, "log": c.log, "watch": watch,
-		"limits": map[string]any{"output_mib": 1, "events": 16384, "state_every_seconds": 1},
+		"limits": map[string]any{"events": 16384, "state_every_seconds": 1},
 	}
 	for key, value := range keys {
 		document[key] = value
@@ -320,6 +319,7 @@ type t30Artifact struct {
 	} `json:"route"`
 	Reconstruction *struct {
 		Exchanges []struct {
+			Index    int     `json:"index"`
 			Request  t30Side `json:"request"`
 			Response t30Side `json:"response"`
 		} `json:"exchanges"`
@@ -361,7 +361,7 @@ type t30Shape struct {
 // t30Records is every line of a session's approved output.
 func t30Records(t *testing.T, directory string) []t30Artifact {
 	t.Helper()
-	content, err := os.ReadFile(filepath.Join(directory, processing.ArtifactName))
+	content, err := sessionApproved(directory)
 	if err != nil {
 		t.Fatalf("read the approved output: %v", err)
 	}
@@ -393,13 +393,13 @@ func t30Find(t *testing.T, records []t30Artifact, prefix string) t30Exchange {
 		if record.Reconstruction == nil {
 			continue
 		}
-		for index, exchange := range record.Reconstruction.Exchanges {
+		for _, exchange := range record.Reconstruction.Exchanges {
 			if exchange.Request.Message == nil || !strings.HasPrefix(exchange.Request.Message.Target, prefix) {
 				continue
 			}
 			one := t30Exchange{Request: exchange.Request.Message, Response: exchange.Response.Message}
 			for _, excluded := range record.PolicyExclusions {
-				if excluded.Exchange == index {
+				if excluded.Exchange == exchange.Index {
 					one.Exclusions = append(one.Exclusions, excluded.Message+" "+excluded.Field+" "+excluded.Disposition)
 				}
 			}

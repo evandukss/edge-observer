@@ -13,14 +13,12 @@ package probe
 type GateReason string
 
 const (
-	GateInputLimit GateReason = "input_limit"
-	// GateStorageExhausted is historical; current sink failures never invalidate.
-	GateStorageExhausted GateReason = "storage_exhausted"
-	GateIntakeExhausted  GateReason = "intake_exhausted"
-	GateUnknownLength    GateReason = "unknown_length"
-	GateUnknownKind      GateReason = "unknown_kind"
-	GateUnsettled        GateReason = "unsettled"
-	GateUninitialized    GateReason = "uninitialized"
+	GateInputLimit      GateReason = "input_limit"
+	GateIntakeExhausted GateReason = "intake_exhausted"
+	GateUnknownLength   GateReason = "unknown_length"
+	GateUnknownKind     GateReason = "unknown_kind"
+	GateUnsettled       GateReason = "unsettled"
+	GateUninitialized   GateReason = "uninitialized"
 )
 
 // Keep reason declarations and their classification together. The declaration
@@ -31,7 +29,6 @@ var gateReasonClasses = [...]struct {
 	invalidatesCapture bool
 }{
 	{GateInputLimit, true},
-	{GateStorageExhausted, false},
 	{GateIntakeExhausted, true},
 	{GateUnknownLength, true},
 	{GateUnknownKind, true},

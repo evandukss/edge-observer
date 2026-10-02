@@ -268,8 +268,6 @@ func (w *Writer) WriteApproved(ctx context.Context, result Approved) error {
 	return w.queue.Enqueue(ArtifactName, result.line)
 }
 
-// Exhausted is never signalled: sink failure cannot invalidate capture.
-func (w *Writer) Exhausted() <-chan struct{} { return nil }
 func (w *Writer) Stats() WriterStats {
 	if w == nil {
 		return WriterStats{Closed: true}
