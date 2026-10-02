@@ -182,6 +182,15 @@ func independentRunQueueChurn(t *testing.T, sparse bool) {
 				}
 				if e.Connection != nil {
 					e.Connection.ID = fragment.ConnectionID(3*i + 7)
+					for j := range e.Connection.Associations {
+						e.Connection.Associations[j].Connection = e.Connection.ID
+					}
+					for j := range e.Connection.Placements {
+						e.Connection.Placements[j].Connection = e.Connection.ID
+					}
+					if err := e.Connection.Validate(); err != nil {
+						t.Fatalf("sparse fixture invalid: %v", err)
+					}
 				}
 			}
 		}

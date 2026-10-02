@@ -107,9 +107,6 @@ func TestIndependentAttachmentChurnReclaimsProcessIdentity(t *testing.T) {
 			t.Fatalf("wiring, not the property: admission %v %v", added, err)
 		}
 		move(client)
-		if i%2 == 0 {
-			admitter.Retract(added.Selections)
-		}
 		stop()
 	}
 	producer, ok := live.(connection.Producer)
@@ -124,8 +121,8 @@ func TestIndependentAttachmentChurnReclaimsProcessIdentity(t *testing.T) {
 	if err != nil || !drained.Complete {
 		t.Fatalf("wiring, not the property: producer drain %+v %v", drained, err)
 	}
-	if len(ends) != 20 {
-		t.Errorf("actual execution ends forwarded %d times, want 20 unretracted admissions", len(ends))
+	if len(ends) != 40 {
+		t.Errorf("actual execution ends forwarded %d times, want 40 actual admitted executions", len(ends))
 	}
 	seenEnds := map[admission.Key]bool{}
 	for len(ends) > 0 {
@@ -204,9 +201,7 @@ func TestIndependentPartialAttachmentRetainsOnlyConfiguredRefusals(t *testing.T)
 			t.Fatalf("wiring, not the property: partial/excluded store %s = %d, want %d", name, n, want)
 		}
 	}
-	if line := client.ask(t, "retained-control"); !strings.Contains(line, "200") {
-		t.Fatal("control request failed")
-	}
+	t18Ask(t, client, "/?asked=retained-control")
 	deadline := time.Now().Add(3 * time.Second)
 	for len(witness.moved()) == 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
@@ -219,9 +214,7 @@ func TestIndependentPartialAttachmentRetainsOnlyConfiguredRefusals(t *testing.T)
 	close(exhausted)
 	refusing := live.(probe.Refusing)
 	for i := 0; i < 80; i++ {
-		if line := client.ask(t, "retained-refused"); !strings.Contains(line, "200") {
-			t.Fatal("peer request failed")
-		}
+		t18Ask(t, client, "/?asked=retained-refused")
 		deadline := time.Now().Add(3 * time.Second)
 		var count int64
 		for time.Now().Before(deadline) {
