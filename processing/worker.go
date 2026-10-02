@@ -475,11 +475,7 @@ func (w *Worker) drain(ctx context.Context, final bool) error {
 			continue
 		}
 		if b.loss.Reason() != "" {
-			w.cut(b)
-			w.withhold(connection.Uncounted(b.loss.Reason()))
-			b.release(held.Cut)
-			w.batches = held.Deleted(w.batches, id, &w.batchesChurn)
-			continue
+			b.lose()
 		}
 		if !b.ready(final) {
 			remaining = append(remaining, id)

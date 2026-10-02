@@ -33,6 +33,10 @@ func (w *Worker) process(ctx context.Context, b *batch) (bool, error) {
 	if b.cut {
 		return false, w.processCut(ctx, b)
 	}
+	if b.lost {
+		w.withhold(connection.Uncounted(b.loss.Reason()))
+		return false, w.processDiscarded(ctx, b, "positions_unknown")
+	}
 	fragments, prefix, valid := b.placed()
 	if !valid {
 		w.withhold(connection.Uncounted("invalid_input"))
@@ -185,35 +189,53 @@ func (w *Worker) process(ctx context.Context, b *batch) (bool, error) {
 // cut, and no exchange or extension message is produced. A cut is counted as
 // itself (Outcome.ConnectionsCut), never as a processing failure.
 func (w *Worker) processCut(ctx context.Context, b *batch) error {
+	w.withhold(connection.Uncounted("connection_cut"))
+	return w.processDiscarded(ctx, b, TruncationConnectionCut)
+}
+
+// processDiscarded emits only a retirement's metadata, with no content or
+// extension work. Its truncation starts at zero because none of the discarded
+// input was reconstructed. The loss token refuses content, not this evidence of
+// its loss; the ordinary gate still authorizes the line and can refuse it for
+// a terminal capture fault.
+func (w *Worker) processDiscarded(ctx context.Context, b *batch, reason string) error {
 	metadata, err := record.FromConnection(*b.retirement)
 	if err != nil {
 		w.withhold(connection.Uncounted("invalid_input"))
 		w.countProcessingFailure("")
 		return nil
 	}
-	w.withhold(connection.Uncounted("connection_cut"))
-	d := &dispatch{b: b, metadata: metadata, reconstruction: -1, ids: IDRange{Count: "0"}}
 	var stops []TruncationStop
 	for _, direction := range []fragment.Direction{fragment.Sent, fragment.Received} {
 		if _, carried := b.retirement.Placement(direction); !carried && b.reached[direction] == 0 {
 			continue
 		}
 		stops = append(stops, TruncationStop{Direction: direction.String(), Offset: "0",
-			Reason: TruncationConnectionCut, EvidenceOffset: strconv.FormatUint(b.reached[direction], 10)})
+			Reason: reason, EvidenceOffset: strconv.FormatUint(b.reached[direction], 10)})
 	}
+	var truncation *ReconstructionTruncation
 	if len(stops) != 0 {
-		d.truncation = &ReconstructionTruncation{State: "truncated", Suffix: "indeterminate", Stops: stops}
+		truncation = &ReconstructionTruncation{State: "truncated", Suffix: "indeterminate", Stops: stops}
 	}
 	for _, p := range w.pipelines {
 		if p.Input != config.ConnectionInput {
 			continue
 		}
-		d.lines = append(d.lines, pipelineLine{name: p.Name, input: p.Input, artifact: &Artifact{Version: ArtifactVersion,
-			Session: w.options.Session, PolicyRevision: w.options.PolicyRevision, Connection: metadata,
-			PolicyExclusions: []PolicyExclusion{}, ExtensionOutcomes: []ExtensionOutcome{},
-			ReplacementExclusions: []ReplacementExclusion{}}})
+		for _, route := range w.routes {
+			if route.Pipeline != p.Name {
+				continue
+			}
+			artifact := Artifact{Version: ArtifactVersion, Record: ArtifactConnection,
+				Session: w.options.Session, PolicyRevision: w.options.PolicyRevision, Route: route,
+				Connection: metadata, ReconstructionTruncation: truncation,
+				PolicyExclusions: []PolicyExclusion{}, ExtensionOutcomes: []ExtensionOutcome{},
+				ReplacementExclusions: []ReplacementExclusion{}}
+			if err := w.emit(ctx, artifact, nil); err != nil {
+				return err
+			}
+		}
 	}
-	return w.write(ctx, d)
+	return nil
 }
 
 // write writes d's lines, in pipeline order, each to its routes, and counts a

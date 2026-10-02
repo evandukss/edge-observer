@@ -631,6 +631,10 @@ struct event {
 	__u8  padding_place[4];
 	__u64 dropped;
 	__u64 begin_unlocated;
+	// The birth of the process whose grant authorised emission. It survives
+	// removal of that grant, so a delayed reader can distinguish an exited
+	// process from a still-running process whose generation was withdrawn.
+	__u64 admission_birth;
 	__u8  data[OBS_CHUNK];
 };
 
@@ -1845,6 +1849,7 @@ static __always_inline void obs_associate(const struct instance_key *who, const 
 // descent the instance it was admitted below. Copied out of the grant where the
 // grant is checked, beside the generation the event carries.
 struct origin {
+	__u64 birth;
 	__u64 parent_generation;
 	__u64 parent_ns_dev;
 	__u64 parent_ns_ino;
@@ -1856,6 +1861,7 @@ struct origin {
 
 static __always_inline void obs_origin(const struct admission *grant, struct origin *into)
 {
+	into->birth = grant->birth;
 	into->parent_generation = grant->parent_generation;
 	into->parent_ns_dev = grant->parent_ns_dev;
 	into->parent_ns_ino = grant->parent_ns_ino;
@@ -1922,6 +1928,7 @@ static __always_inline int obs_emit(const struct instance_key *who, __u64 genera
 	e->opened = ends->opened;
 	e->ssl = ssl;
 	e->generation = generation;
+	e->admission_birth = origin->birth;
 	e->parent_generation = origin->parent_generation;
 	e->parent_ns_dev = origin->parent_ns_dev;
 	e->parent_ns_ino = origin->parent_ns_ino;

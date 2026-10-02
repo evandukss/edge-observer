@@ -26,7 +26,10 @@ type batch struct {
 	// later fragment of it is discarded on arrival. arrived counts its fragments
 	// before and after, so the batch is complete when its retirement's count has
 	// arrived, and reached is how far each direction's discarded input ran.
-	cut     bool
+	cut bool
+	// lost discards payload after capture loss, but keeps the batch until its
+	// retirement can describe that loss. It is not a connection-input cut.
+	lost    bool
 	arrived uint64
 	reached [3]uint64
 }
@@ -57,11 +60,15 @@ func (w *Worker) accept(in routed) {
 		w.batches[key] = b
 		w.order = append(w.order, key)
 	}
-	if f := e.Fragment; f != nil && b.cut {
+	if f := e.Fragment; f != nil && (b.cut || b.lost) {
 		b.arrived++
 		b.reach(f)
-		w.outcome.InputCut++
-		e.ReleaseAs(held.Cut)
+		path := held.Discarded
+		if b.cut {
+			w.outcome.InputCut++
+			path = held.Cut
+		}
+		e.ReleaseAs(path)
 		return
 	}
 	if e.Fragment != nil && e.Fragment.Loss != nil {
@@ -106,12 +113,12 @@ func (b *batch) ready(final bool) bool {
 		return false
 	}
 	r := b.retirement
-	if b.cut && !b.invalid {
+	if (b.cut || b.lost) && !b.invalid {
 		if r.Fragments.Value < 0 || b.arrived > uint64(r.Fragments.Value) {
 			b.invalid = true
 			return true
 		}
-		if b.arrived != uint64(r.Fragments.Value) {
+		if b.arrived != uint64(r.Fragments.Value) && b.loss.Reason() == "" {
 			return final
 		}
 		return final || r.How == connection.HandleReleasedEnding || r.How == connection.SocketClosed
@@ -136,14 +143,32 @@ func (b *batch) ready(final bool) bool {
 // discarded on arrival (accept), and what it produces is its connection line,
 // truncated from its first byte (processCut).
 func (w *Worker) cut(b *batch) {
+	if b.cut {
+		return
+	}
 	b.cut = true
 	w.outcome.ConnectionsCut++
+	w.outcome.InputCut += b.discardInput(held.Cut)
+}
+
+// lose releases payload without charging a bound cut. The bounded batch keeps
+// only its identity, control token and direction reaches until retirement.
+func (b *batch) lose() {
+	if b.cut || b.lost {
+		return
+	}
+	b.lost = true
+	b.discardInput(held.Discarded)
+}
+
+func (b *batch) discardInput(path held.Path) uint64 {
+	var discarded uint64
 	kept := b.entries[:0]
 	for _, e := range b.entries {
 		if f := e.Fragment; f != nil {
 			b.reach(f)
-			w.outcome.InputCut++
-			e.ReleaseAs(held.Cut)
+			discarded++
+			e.ReleaseAs(path)
 			continue
 		}
 		kept = append(kept, e)
@@ -151,6 +176,7 @@ func (w *Worker) cut(b *batch) {
 	clear(b.entries[len(kept):])
 	b.entries = kept
 	b.fragments = nil
+	return discarded
 }
 
 // reach records how far a discarded fragment's direction ran.

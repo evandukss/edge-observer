@@ -266,10 +266,11 @@ const (
 	DescriptorSeenInsideACall RefusalReason = "a descriptor was recorded against the call in flight on its thread, which is a binding source doing its work rather than a refusal"
 )
 
-// RetractedEvent counts decoded events whose admission generation is no longer
-// granted when inventory recording runs. They cannot recreate an old admission.
 const ReadRetracted RefusalReason = "a user-memory read outlived its granted generation while its count was filed"
 
+// RetractedEvent counts inventory recording refused for an emitted generation
+// whose grant is gone while its process is still running. The event carries
+// its generation and birth from emission; ordinary exit is not a refusal.
 const RetractedEvent RefusalReason = "a decoded event could not record its withdrawn admission generation"
 
 // Declined is one admission the kernel was never given, and why. It is carried
@@ -330,6 +331,10 @@ type Event struct {
 	Namespace    admission.Namespace
 	NamespacePID int32
 	Generation   admission.Generation
+
+	// Start is the process birth held by the grant at emission, not a later
+	// lookup of a possibly reused process number.
+	Start admission.Start
 
 	// Origin is that admission as the program held it when the firing was
 	// checked against it.
@@ -579,10 +584,11 @@ const MaxEventPayloadBytes = 4096
 // then the socket's start (144), then the admission's origin (three eight-byte
 // fields, three four-byte, a kind and three padding bytes: 184), then the
 // event's place in its occupancy (five eight-byte fields, three flags and five
-// padding bytes, then the dropped and occupancy begin counts): 248. The
+// padding bytes, then the dropped and occupancy begin counts): 248, followed
+// by the emission grant's process birth (eight bytes): 256. The
 // padding is explicit so no offset depends on the compiler, and package bpf's
 // layout guard pins every offset against the source (bpf/ssl.bpf.h).
-const rawHeader = 248
+const rawHeader = 256
 
 // Attach loads the program, places the points, fills the allowlist and begins
 // reading. Nothing is captured before this and nothing after Close.
@@ -1846,9 +1852,23 @@ func (s *Session) recordedLocked(one admission.Selection) {
 	if s.collection != nil {
 		var grant admissionValue
 		allowed := s.collection.Maps["allowed_processes"]
-		if allowed == nil || allowed.Lookup(keyOf(one.Instance), &grant) != nil ||
+		if allowed == nil {
+			return
+		}
+		err := allowed.Lookup(keyOf(one.Instance), &grant)
+		if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return
+		}
+		if err != nil ||
 			grant.Generation != uint64(one.Instance.Generation) || grant.Kind == denied {
-			s.retractedEvents.Add(1)
+			// A grant can disappear before its queued events are read simply because
+			// the process exited. The generation and birth travelled with the event;
+			// inspect that identity, never infer withdrawal from an empty map slot.
+			// An indeterminate reading establishes no live withdrawal either. In all
+			// three cases the event is delivered, and no absent inventory is recreated.
+			if s.inspect(one).Liveness == process.LivenessRunning {
+				s.retractedEvents.Add(1)
+			}
 			return
 		}
 	}
@@ -2369,6 +2389,7 @@ func (s *Session) selectionOf(event Event) admission.Selection {
 			Namespace:  event.Namespace,
 			PID:        event.NamespacePID,
 			Generation: event.Generation,
+			Start:      event.Start,
 		},
 		Kind:        event.Origin.Kind,
 		ObserverPID: event.PID,
@@ -2507,6 +2528,7 @@ func (s *Session) decode(sample []byte) (Event, bool) {
 			Inode:  order.Uint64(sample[40:48]),
 		},
 		Generation:   admission.Generation(order.Uint64(sample[24:32])),
+		Start:        birth(order.Uint64(sample[248:256])),
 		PID:          int32(order.Uint32(sample[56:60])),
 		TID:          int32(order.Uint32(sample[60:64])),
 		NamespacePID: int32(order.Uint32(sample[64:68])),
