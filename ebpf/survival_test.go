@@ -76,7 +76,7 @@ func TestRootExitPreservesSurvivorsButDoesNotSelectAReplacement(t *testing.T) {
 			if attribution(drain(session, 100*time.Millisecond), "/independent-parent") == nil {
 				t.Fatal("approved root control was not captured")
 			}
-			held, err := session.Admissions()
+			held, err := session.Held()
 			if err != nil {
 				t.Fatal(err)
 			}

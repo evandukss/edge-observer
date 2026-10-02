@@ -58,10 +58,12 @@ func run() error {
 func programOf(path string) (bpf.Program, error) {
 	name := filepath.Base(path)
 	switch {
+	case strings.HasPrefix(name, "barrier_"):
+		return bpf.ReadBarrierVerification(), nil
 	case strings.HasPrefix(name, "full_"):
 		return bpf.Full(), nil
 	case strings.HasPrefix(name, "meta_"):
 		return bpf.Meta(), nil
 	}
-	return bpf.Program{}, fmt.Errorf("%s is neither a full nor a metadata object", name)
+	return bpf.Program{}, fmt.Errorf("%s is not a declared program object", name)
 }

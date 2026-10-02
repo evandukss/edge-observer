@@ -69,8 +69,8 @@ func TestARefusedEventIsCountedUnderItsReasonAndGoesToCaptureAsRefused(t *testin
 					got, probe.GateInputLimit)
 			}
 			for _, reason := range probe.GateReasons() {
-				if _, counted := refused[probe.GateRefusal(reason)]; counted != reason.InvalidatesCapture() {
-					t.Errorf("%s is counted %v, want a counter exactly for each invalidating reason", reason, counted)
+				if _, counted := refused[probe.GateRefusal(reason)]; counted != (reason.InvalidatesCapture() || reason == probe.GateInputLimit) {
+					t.Errorf("%s is counted %v, want a counter for each admission refusal reason", reason, counted)
 				}
 			}
 			switch held := sink.(type) {

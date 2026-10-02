@@ -96,6 +96,7 @@ No release has been published. A release is an archive, `observer-linux-amd64.ta
 tagged commit. It unpacks into one directory, `observer-linux-amd64`, holding exactly these files:
 
     observer                     the program: one static file, linux/amd64
+    examples/systemd/observer.service  supervised deployment with its own memory envelope
     README.md                    this document
     docs/compatibility.md        what a host must provide, and what the observer has been seen to run on
     docs/extensions.md           how to configure an extension
@@ -209,6 +210,23 @@ session's account as it stands.
 completely, on the same line anything the account says was lost and why release was refused, and the
 path of the account it sealed.
 
+For supervised operation, adapt [examples/systemd/observer.service](examples/systemd/observer.service).
+It runs the observer in its own finite memory domain with swap disabled and `Restart=on-failure`.
+Keep watched processes outside that unit. The 512M limit is an example; use the same envelope for preflight.
+The unit expects the binary in `/opt/observer` and the configuration in `/etc/observer`.
+
+`input_limit` and volatile intake exhaustion refuse and count affected connection input; capture
+continues and fresh occupancies can produce output. A cut never resumes parsing on the affected
+connection. An unlocated loss preserves established prefixes and occupancies begun before it. A
+later first-call occupancy has no established origin; an observed `SSL_new` proves a fresh origin.
+
+The remaining terminal capture reasons are `unknown_length` and `unknown_kind`. They prevent
+pending release, seal the available account and exit with status 1. Startup errors, internal
+processing errors and failures to write the sealed account also exit nonzero. A normal operator
+stop exits zero after successful finalization. A supervisor restart starts a new session; its
+activation records the gap since the prior seal only when that session's matching sealed account
+is still readable. A missing or unreadable account does not imply a zero gap.
+
 ### 4. Inspect
 
 Each session keeps its sealed account in `<output>/sessions/<session>`, the
@@ -250,8 +268,8 @@ output fails text inspection, even if the account was printed. A legacy raw spoo
 fallback. See [approved inspection](docs/approved-inspection.md) for the reader contract.
 
 **New capture sessions do not create raw spool files.** Both capture callbacks copy records into a
-bounded volatile intake. Reaching its limit refuses the next record whole and signals exhaustion;
-releasing held records does not reopen an exhausted intake. Intake records are not approved output.
+bounded volatile intake. Reaching its limit refuses the next record whole and cuts its connection;
+releasing held records makes capacity available again. Intake records are not approved output.
 The processing worker writes authorized, processed route records to `approved.jsonl`; it does not
 write raw fragments or connection records to the legacy spool. The sealed account remains in the session directory.
 

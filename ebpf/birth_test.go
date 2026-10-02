@@ -232,7 +232,7 @@ func (p *birthProcess) release() error {
 }
 
 // entryFor is the allowlist row for one number in the root's namespace, as the
-// kernel holds it. Held, not Admissions, which reconciles and removes entries
+// kernel holds it. Held reads the kernel table without removing entries
 // first.
 func entryFor(t *testing.T, session *ebpf.Session, root process.Process, pid int32) (ebpf.Entry, bool) {
 	t.Helper()

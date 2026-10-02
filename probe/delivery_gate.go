@@ -37,12 +37,12 @@ type DeliveryGateOptions struct {
 	// MaxEvents must be positive. It bounds the decoded events held at once,
 	// not bytes or heap usage: each admitted event holds a slot until whatever
 	// retained its input returns it (held.Slot). An event arriving while N slots
-	// are held is refused and makes every pending release ineligible.
+	// are held is refused; capture cuts the affected connection.
 	MaxEvents uint64
 
-	// IntakeExhausted is observed under the ordering lock at Admit, Authorize
-	// and Snapshot. A refused input leaves capture incomplete and invalidates
-	// pending release. Nil means no intake signal is connected.
+	// IntakeExhausted is retained for source compatibility. Intake loss is now
+	// carried by each record's loss token, so this diagnostic signal does not
+	// invalidate unrelated work.
 	IntakeExhausted <-chan struct{}
 
 	// BeforeAuthorize is an optional test seam called just before authorization
@@ -137,14 +137,15 @@ type ReleaseDecision struct {
 // uses constant work: it revokes all pending candidates without walking them.
 // A refund is ordered with invalidation by the same lock and never clears it.
 type DeliveryGate struct {
-	mutex      sync.Mutex
-	options    DeliveryGateOptions
-	charged    uint64
-	held       uint64
-	refunded   Refunds
-	doubles    uint64
-	reason     GateReason
-	withdrawal chan struct{}
+	mutex        sync.Mutex
+	options      DeliveryGateOptions
+	charged      uint64
+	held         uint64
+	refunded     Refunds
+	doubles      uint64
+	inputRefused uint64
+	reason       GateReason
+	withdrawal   chan struct{}
 }
 
 // NewDeliveryGate validates options. Zero MaxEvents is the only invalid option;
@@ -156,28 +157,40 @@ func NewDeliveryGate(options DeliveryGateOptions) (*DeliveryGate, error) {
 	return &DeliveryGate{options: options, withdrawal: make(chan struct{})}, nil
 }
 
-// Admit reserves a slot before classifying the event. A transfer with
-// measured=false invalidates capture-wide, including early or zero-length
-// transfers. A close ignores measured: false is the ordinary close shape.
-// Unknown kinds are charged then invalidate. Observable intake
-// exhaustion is consumed before reserving a slot. Otherwise, with N slots held
-// the input limit takes precedence over the event's kind and measurement, and
-// nothing is dispatched. Once invalidated, no event is charged or admitted, and
-// the first reason survives later faults. A charged decision carries its slot,
-// which the caller hands on with the event or returns (held.Slot).
+// Admit reserves a slot before identity lookup. Unknown kinds and unmeasured
+// transfers invalidate the capture, even at capacity. At capacity, measured
+// transfers are refused under input_limit; closes pass without a slot so their
+// control state can retire input. Intake separately bounds their bytes. A
+// charged decision carries its slot for the caller to hand on or return.
+// Once invalidated, no event is charged or admitted, and the first reason stays.
 func (g *DeliveryGate) Admit(kind DeliveryKind, measured bool) AdmissionDecision {
 	if g == nil || g.withdrawal == nil {
 		return AdmissionDecision{State: GateSnapshot{Reason: GateUninitialized}}
 	}
 	g.mutex.Lock()
 	defer g.mutex.Unlock()
-	g.consumeIntakeExhaustionLocked()
 	if g.reason != "" {
 		return AdmissionDecision{State: g.snapshotLocked()}
 	}
 	if g.held == g.options.MaxEvents {
-		g.invalidateLocked(GateInputLimit)
-		return AdmissionDecision{State: g.snapshotLocked()}
+		// Unknown input remains terminal even while every payload slot is held.
+		if kind != DeliveryTransfer && kind != DeliveryClose {
+			g.invalidateLocked(GateUnknownKind)
+			return AdmissionDecision{State: g.snapshotLocked()}
+		}
+		if kind == DeliveryTransfer && !measured {
+			g.invalidateLocked(GateUnknownLength)
+			return AdmissionDecision{State: g.snapshotLocked()}
+		}
+		if kind == DeliveryClose {
+			// A close carries control state, not payload. Intake still bounds its
+			// metadata bytes, and a refused retirement cuts its shared loss state.
+			return AdmissionDecision{Admitted: true, State: g.snapshotLocked()}
+		}
+		g.inputRefused++
+		state := g.snapshotLocked()
+		state.Reason = GateInputLimit
+		return AdmissionDecision{State: state}
 	}
 	g.charged++
 	g.held++
@@ -217,7 +230,6 @@ func (g *DeliveryGate) AuthorizeEnqueue(evidence ReleaseEvidence, enqueue func()
 	}
 	g.mutex.Lock()
 	defer g.mutex.Unlock()
-	g.consumeIntakeExhaustionLocked()
 	if g.reason != "" {
 		return ReleaseDecision{Reason: g.reason}
 	}
@@ -238,7 +250,6 @@ func (g *DeliveryGate) Snapshot() GateSnapshot {
 	}
 	g.mutex.Lock()
 	defer g.mutex.Unlock()
-	g.consumeIntakeExhaustionLocked()
 	return g.snapshotLocked()
 }
 
@@ -263,7 +274,7 @@ var uninitializedWithdrawal = func() <-chan struct{} {
 
 func (g *DeliveryGate) snapshotLocked() GateSnapshot {
 	return GateSnapshot{MaxEvents: g.options.MaxEvents, Charged: g.charged, Held: g.held, Refunded: g.refunded,
-		DoubleRefunds: g.doubles, Reason: g.reason}
+		DoubleRefunds: g.doubles, InputRefused: g.inputRefused, Reason: g.reason}
 }
 
 // refund returns one slot along path, once. Charged is always Held plus every
@@ -301,17 +312,6 @@ type slot struct {
 func (s *slot) Keep()                      { s.kept.Store(true) }
 func (s *slot) Kept() bool                 { return s.kept.Load() }
 func (s *slot) Refund(path held.Path) bool { return s.gate.refund(s, path) }
-
-func (g *DeliveryGate) consumeIntakeExhaustionLocked() {
-	if g.reason != "" {
-		return
-	}
-	select {
-	case <-g.options.IntakeExhausted:
-		g.invalidateLocked(GateIntakeExhausted)
-	default:
-	}
-}
 
 func (g *DeliveryGate) invalidateLocked(reason GateReason) {
 	g.reason = reason

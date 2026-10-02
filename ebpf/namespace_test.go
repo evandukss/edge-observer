@@ -180,11 +180,11 @@ func TestAnInstanceInItsOwnPIDNamespaceIsAdmittedAndAttributedByThatNamespacesNu
 	}
 
 	// The parent's own entry, read back from the allowlist.
-	held, err := session.Admissions()
+	held, err := session.Held()
 	if err != nil {
 		t.Fatalf("read back what the session admitted: %v", err)
 	}
-	var admitted *admission.Selection
+	var admitted *ebpf.Entry
 	for i := range held {
 		if held[i].Instance.Namespace == parent.Namespace && held[i].Instance.PID == parent.NamespacePID {
 			admitted = &held[i]
@@ -268,129 +268,13 @@ func TestAnInstanceInAPIDNamespaceNobodyEnumeratedIsRefusedAndTheReasonIsNamed(t
 		}
 	}
 
-	held, err := session.Admissions()
+	held, err := session.Held()
 	if err != nil {
 		t.Fatalf("read back what the session admitted: %v", err)
 	}
 	for _, one := range held {
 		if one.Instance.Namespace == namespaced.Namespace {
-			t.Errorf("the allowlist holds %s, in a namespace nothing here can resolve", one)
+			t.Errorf("the allowlist holds %+v, in a namespace nothing here can resolve", one)
 		}
 	}
-}
-
-// A descendant entering its own pid namespace is beyond what the program can
-// resolve, so it is not admitted, and the kernel cannot say which process it
-// was (every unapproved process resolves in no enumerated namespace too). The
-// reconciliation names it from the process table.
-func TestADescendantInAPIDNamespaceNobodyEnumeratedIsNamedRatherThanAbsent(t *testing.T) {
-	serverPID, _ := serving(t)
-	server := loaded(t, serverPID)
-
-	// The admitted instance is this test process; the children, made by one parent
-	// in one run, differ only in the thing under test.
-	self := settled(t, int32(os.Getpid()))
-	session, err := ebpf.Attach(ebpf.Options{
-		Program: bpf.Full(),
-		Points:  points(t, server),
-		Admit:   authorise(self),
-	})
-	if err != nil {
-		t.Fatalf("attach with this process admitted: %v", err)
-	}
-	defer func() { _ = session.Close() }()
-
-	beyond := settled(t, aChild(t, true))
-	within := settled(t, aChild(t, false))
-
-	if beyond.Namespace == self.Namespace {
-		t.Fatalf("the child that was to enter a namespace of its own is in %s, the observer's "+
-			"own, so this run stages nothing about an unenumerated one", beyond.Namespace)
-	}
-	if within.Namespace != self.Namespace {
-		t.Fatalf("the control child is in %s and its parent is in %s, so the two children "+
-			"differ in more than the namespace", within.Namespace, self.Namespace)
-	}
-
-	named, err := session.Reconcile()
-	if err != nil {
-		t.Fatalf("reconcile what the allowlist holds against the process table: %v", err)
-	}
-
-	var found *ebpf.Declined
-	for i := range named {
-		if named[i].Selection.ObserverPID == beyond.PID {
-			found = &named[i]
-		}
-		if named[i].Selection.ObserverPID == within.PID {
-			t.Errorf("pid %d, a child in the enumerated namespace %s, is named as %s",
-				within.PID, within.Namespace, named[i].Reason)
-		}
-	}
-	if found == nil {
-		t.Fatalf("pid %d is a child of an admitted instance in %s, which this session did not "+
-			"enumerate, and the reconciliation named %d instances, none of them it",
-			beyond.PID, beyond.Namespace, len(named))
-	}
-	if found.Reason != ebpf.NamespaceUnenumerated {
-		t.Errorf("pid %d in %s is named as %s", beyond.PID, beyond.Namespace, found.Reason)
-	}
-	if found.Selection.Kind != admission.ByDescent {
-		t.Errorf("pid %d was named below pid %d and is recorded as %s",
-			beyond.PID, self.PID, found.Selection.Kind)
-	}
-	parent := found.Selection.Provenance.Parent
-	if parent.Namespace != self.Namespace || parent.PID != self.NamespacePID {
-		t.Errorf("pid %d is recorded below %v and the instance it was found under is pid %d in %s",
-			beyond.PID, parent, self.NamespacePID, self.Namespace)
-	}
-	// The parent is the admission it was found under, not the number, which may
-	// name another process by the time somebody reads it.
-	if parent.Generation == 0 {
-		t.Errorf("pid %d is recorded below %v, which carries no admission generation", beyond.PID, parent)
-	}
-
-	// The account carries it too, for a caller reconciling on a timer.
-	held := false
-	for _, one := range session.Declined() {
-		held = held || one.Selection.ObserverPID == beyond.PID
-	}
-	if !held {
-		t.Errorf("pid %d was named by the reconciliation and is not in what the session declined",
-			beyond.PID)
-	}
-}
-
-// aChild starts a process below this one that outlives the reading, in its own
-// pid namespace or this one's.
-func aChild(t *testing.T, ownNamespace bool) int32 {
-	t.Helper()
-	command := exec.Command("sleep", "300")
-	if ownNamespace {
-		// clone(CLONE_NEWPID) puts the child in the new namespace; unshare would move
-		// only this process's later children.
-		command.SysProcAttr = &unix.SysProcAttr{Cloneflags: unix.CLONE_NEWPID}
-	}
-	if err := command.Start(); err != nil {
-		t.Fatalf("start a child (own pid namespace: %v): %v", ownNamespace, err)
-	}
-	t.Cleanup(func() { _ = command.Process.Kill(); _ = command.Wait() })
-	return int32(command.Process.Pid)
-}
-
-// settled is the process at pid once its pid namespace can be read.
-func settled(t *testing.T, pid int32) process.Process {
-	t.Helper()
-	for range 400 {
-		table, err := process.Read(procfs)
-		if err != nil {
-			t.Fatalf("read processes: %v", err)
-		}
-		if p, ok := table.Lookup(pid); ok && p.Namespace.Known() {
-			return p
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("pid %d never appeared with a pid namespace this run could read", pid)
-	return process.Process{}
 }

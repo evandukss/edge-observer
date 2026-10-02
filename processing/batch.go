@@ -19,6 +19,7 @@ type batch struct {
 	fragments  map[uint64]fragment.Record
 	retirement *connection.Record
 	invalid    bool
+	loss       *held.Loss
 
 	// cut is set once the connection held as many fragments as one connection
 	// may (Options.ConnectionInput). What it held was discarded then, and every
@@ -62,6 +63,12 @@ func (w *Worker) accept(in routed) {
 		w.outcome.InputCut++
 		e.ReleaseAs(held.Cut)
 		return
+	}
+	if e.Fragment != nil && e.Fragment.Loss != nil {
+		b.loss = e.Fragment.Loss
+	}
+	if e.Connection != nil && e.Connection.Loss != nil {
+		b.loss = e.Connection.Loss
 	}
 	b.entries = append(b.entries, e)
 	if process != b.process || id == 0 {

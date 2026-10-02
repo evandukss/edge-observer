@@ -225,7 +225,7 @@ Every member is its own block, so one that could not be read is not read as the 
 | `loss` | `dropped`, `unmatched`, `occasion` `{first, last, handle, pid, tid}`: the first and last unmatched return on the monotonic clock, and the first one's handle, process and thread, each undetermined where no occasion was stated; and `under_way`. Losses only |
 | `loss.under_way` | calls that began before the probes were placed, which nothing in the kernel sees: no entry is recorded and their return fires nothing. The approved processes' threads are read before placement and after. `threads` is those blocked inside the same socket system call on the same descriptor in both readings and switched out no further, so the call each is inside began before the probes; it counts socket I/O, not TLS calls. `undetermined` is those that ran meanwhile, whose loss is not known and is never read as none. `first` `{pid, tid, fd, call}` names the first of `threads`, each undetermined where there is none. `unavailable` where a thread could not be read |
 | `admitted` | `descendants`. Not a loss |
-| `ordering` | what each connection's own transfer sequence said: `lost`, transfers missing from their connections' sequences; `cut`, directions whose positions stopped being established; `retired`, connections ended because their producer began another occupancy of the handle, their own ending never delivered; `unsequenced`, transfers the producer kept no sequence for; `unlocated`, losses the producer could place in no connection. `gate_refused`, transfers refused at the held-event bound; `intake_refused`, fragments refused at the volatile byte bound. Both count records, not bytes, separately from missing producer transfers. Never folded into `loss` |
+| `ordering` | what each connection's own transfer sequence said: `lost`, transfers missing from their connections' sequences; `cut`, directions whose positions stopped being established; `retired`, connections ended because their producer began another occupancy of the handle, their own ending never delivered; `unsequenced`, transfers the producer kept no sequence for; `unlocated`, losses the producer could place in no connection. `gate_refused`, transfers refused by the admission gate; `intake_refused`, fragments refused at the volatile byte bound. Both count records, not bytes, separately from missing producer transfers. Never folded into `loss` |
 | `refused` | `reasons` `{reason: count}` |
 | `spool` | `written`, `dropped`, `refused`, `connections`, `connections_dropped`, `connections_refused`, `bytes`, `limit` |
 
@@ -267,9 +267,9 @@ artifact-serialization defect instead terminates processing and names the binary
 reason; it does not increment `processing_failures` or `output_failures`. Neither of those is policy
 suppression or capture loss, which retain their own dispositions and readings. `gate_reason` is empty when the gate has no
 invalidation reason; otherwise it is one of the reasons `probe.GateReasons` classifies as invalidating
-the capture - `input_limit`, `intake_exhausted`, `unknown_length` and
-`unknown_kind` - and each remains distinguishable. `intake_exhausted` is the volatile intake refusing a
-record: capture's input is then incomplete, and nothing still pending is released.
+the capture - `unknown_length` and `unknown_kind` - and each remains distinguishable.
+`input_limit` and `intake_exhausted` cut affected connection input and leave the session running.
+The ordering and capture refusal counts report them separately; they do not set `gate_reason`.
 When only this aggregate is supplied, `pipelines` is empty because attribution was not supplied;
 that is not a per-pipeline zero. Aggregate counts must never be copied onto a synthetic pipeline
 or onto every pipeline.

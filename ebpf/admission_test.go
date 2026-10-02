@@ -243,13 +243,13 @@ func TestChildTransfersBeforeItsParentsForkReturn(t *testing.T) {
 	if count != 1 {
 		t.Errorf("peer-confirmed child transfer before the parent's fork return appeared %d times, want 1", count)
 	}
-	held, err := session.Admissions()
+	held, err := session.Held()
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, one := range held {
 		if one.Instance.Namespace == parent.Namespace && one.Instance.PID == child {
-			t.Errorf("child reaped before admission left a live grant: %s", one)
+			t.Errorf("child reaped before admission left a live grant: %+v", one)
 		}
 	}
 }

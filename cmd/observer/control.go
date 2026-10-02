@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -18,6 +19,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/evandukss/edge-observer/account"
 	protected "github.com/evandukss/edge-observer/activation"
@@ -127,6 +130,40 @@ func describeHolder(content []byte) string {
 // holder is the process and session holding the pid file, or errNotRunning.
 // It asks the lock, not the file's content.
 func holder(directory string) (int, string, error) {
+	return holderUsing(directory, probeHolder)
+}
+
+func probeHolder(file *os.File) (bool, error) {
+	// Taking even a shared flock can refuse a concurrent start. The kernel's
+	// lock inventory answers without taking one. Match the open inode, so a
+	// replacement at the pathname cannot identify another file's holder.
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+		return false, err
+	}
+	locks, err := os.Open("/proc/locks")
+	if err != nil {
+		return false, fmt.Errorf("read kernel locks: %w", err)
+	}
+	defer func() { _ = locks.Close() }()
+	scan := bufio.NewScanner(locks)
+	for scan.Scan() {
+		fields := strings.Fields(scan.Text())
+		if len(fields) != 8 || fields[1] != "FLOCK" || fields[3] != "WRITE" {
+			continue
+		}
+		var major, minor, inode uint64
+		if _, err := fmt.Sscanf(fields[5], "%x:%x:%d", &major, &minor, &inode); err != nil {
+			return false, fmt.Errorf("decode kernel lock identity: %w", err)
+		}
+		if major == uint64(unix.Major(uint64(stat.Dev))) && minor == uint64(unix.Minor(uint64(stat.Dev))) && inode == stat.Ino {
+			return true, nil
+		}
+	}
+	return false, scan.Err()
+}
+
+func holderUsing(directory string, probe func(*os.File) (bool, error)) (int, string, error) {
 	path := filepath.Join(directory, pidName)
 	file, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -136,7 +173,11 @@ func holder(directory string) (int, string, error) {
 		return 0, "", fmt.Errorf("open %s: %w", path, err)
 	}
 	defer func() { _ = file.Close() }()
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err == nil {
+	held, err := probe(file)
+	if err != nil {
+		return 0, "", err
+	}
+	if !held {
 		return 0, "", fmt.Errorf("%w: nothing holds %s", errNotRunning, path)
 	}
 	content, err := os.ReadFile(path)

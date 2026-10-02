@@ -122,10 +122,10 @@ func (r *Run) Route() {
 		}
 	}
 	for i, items := range r.pending {
-		if len(items) != 0 {
-			r.workers[i].queue.push(items)
-			r.pending[i] = items[:0]
-		}
+		// Wake even without payload: a cut can arrive through shared control state
+		// while intake is full, and must release what the worker already holds.
+		r.workers[i].queue.push(items)
+		r.pending[i] = items[:0]
 	}
 	capacity := 0
 	for _, items := range r.pending {

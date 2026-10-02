@@ -1,0 +1,14 @@
+[Unit]
+Description=Observe approved processes
+After=network.target
+
+[Service]
+Type=notify
+ExecStart=/opt/observer/observer start /etc/observer/observer.config.json
+Restart=on-failure
+RestartSec=5s
+MemoryMax=512M
+MemorySwapMax=0
+
+[Install]
+WantedBy=multi-user.target

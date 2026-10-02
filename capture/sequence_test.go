@@ -226,7 +226,7 @@ func TestAConnectionOpenWhenProductionStopsIsSettledByWhatTheProducerHolds(t *te
 		"a producer holding another occupancy there": {settlers: []probe.Settler{settler{held: probe.Settlement{Occupancy: 9, Final: whole}}},
 			want: connection.PositionsUnknownFrom, because: connection.TerminalUnsettled, lost: -1},
 		"a loss the producer placed nowhere since": {settlers: []probe.Settler{settler{held: probe.Settlement{Occupancy: 7, Final: whole}, unlocated: 1}},
-			want: connection.PositionsUnknownFrom, because: connection.ObservationLost, lost: -1},
+			want: connection.PositionsEstablished},
 	} {
 		t.Run(name, func(t *testing.T) {
 			options := make([]capture.Option, 0, len(one.settlers))
@@ -479,11 +479,9 @@ func TestOverlappingCallsInOneDirectionAreRefused(t *testing.T) {
 	})
 }
 
-// A loss the producer could place in no occupancy may have been any live
-// connection's: every connection live across it stops where it stood at its
-// last observation before, and every one begun after it establishes nothing.
-// The control: a connection that ended before it keeps every offset.
-func TestALossNoOccupancyTookCostsEveryConnectionLiveAcrossItAndEveryOneBegunAfter(t *testing.T) {
+// A loss with no occupancy cannot belong to one already begun. A first-call
+// occupancy begun after it may have missed its opening bytes.
+func TestAnUnlocatedLossPreservesPriorOccupanciesAndCutsUnprovenNewOrigins(t *testing.T) {
 	s := produced(&collected{}, nil)
 
 	s.Transfer(numberedAs(worker, 0x18, fragment.Sent, 10, 7, 1))
@@ -495,6 +493,8 @@ func TestALossNoOccupancyTookCostsEveryConnectionLiveAcrossItAndEveryOneBegunAft
 	s.Transfer(after)
 	begun := numberedAs(worker, 0x20, fragment.Sent, 5, 8, 1)
 	begun.Sequence.Unlocated = 1
+	begun.Sequence.BeginUnlocated = 1
+	begun.Sequence.Born = false
 	s.Transfer(begun)
 
 	if got := s.Stats().Unlocated; got != 1 {
@@ -502,8 +502,7 @@ func TestALossNoOccupancyTookCostsEveryConnectionLiveAcrossItAndEveryOneBegunAft
 	}
 	records := finished(s)
 	live := placementOf(t, records, 1, fragment.Sent)
-	if live.Positions != connection.PositionsUnknownFrom || live.From != 10 ||
-		live.Because != connection.ObservationLost || live.Lost.Known {
+	if !live.Whole() {
 		t.Errorf("a connection live across a loss nothing located is %s", live)
 	}
 	if ended := placementOf(t, records, 2, fragment.Sent); !ended.Whole() {
@@ -557,6 +556,8 @@ func TestARefusedTransferIsNeverCountedAsALoss(t *testing.T) {
 			if handed {
 				s.Refused(refused)
 				s.Refused(unfollowed)
+				before.GateRefused += 2
+				before.Cut++
 				if after := s.Stats(); after != before {
 					t.Errorf("a refusal changed capture's counts: %+v, then %+v", before, after)
 				}
@@ -566,14 +567,14 @@ func TestARefusedTransferIsNeverCountedAsALoss(t *testing.T) {
 
 			// A refusal is never a located loss, handed or not: the count is zero in
 			// both. What the handed refusal changes is that it SUPPLIES the number, so
-			// the direction settles whole; without it the undelivered tail is unsettled.
+			// the direction is cut; without it the undelivered tail is unsettled.
 			// That placement difference is the wiring guard the count no longer gives.
 			if lost := s.Stats().Lost; lost != 0 {
 				t.Errorf("a refusal was counted as %d transfers lost", lost)
 			}
 			held := placementOf(t, s.Records(), 1, fragment.Sent)
-			if handed && !held.Whole() {
-				t.Errorf("the handed refusal supplied its number but the direction is %s, not whole", held)
+			if handed && (held.Whole() || held.Because != connection.ObservationLost || held.From != 10) {
+				t.Errorf("the handed refusal supplied its number but the direction is %s, not cut at its refused transfer", held)
 			}
 			if !handed && (held.Whole() || held.Because != connection.TerminalUnsettled) {
 				t.Errorf("wiring, not the property: without the refusal handed over the tail is %s, so the "+

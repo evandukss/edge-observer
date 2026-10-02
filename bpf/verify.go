@@ -22,6 +22,9 @@ type Program struct {
 	// ReadsPayload is whether this program may read the caller's buffer. Verify
 	// proves it by the helpers the object calls, not by this flag.
 	ReadsPayload bool
+
+	// testBarrier admits bpf_loop only in the separate attach-test object.
+	testBarrier bool
 }
 
 // Meta is the metadata-only program: it reads no process memory.
@@ -108,6 +111,9 @@ func (p Program) allowed() map[string]bool {
 			set[name] = true
 		}
 	}
+	if p.testBarrier {
+		set["FnLoop"] = true
+	}
 	return set
 }
 
@@ -174,4 +180,10 @@ func (p Program) verifyHelpers(called map[string]bool) error {
 		return fmt.Errorf("%s program calls %s", p.Name, strings.Join(offenders, ", "))
 	}
 	return nil
+}
+
+// ReadBarrierVerification names the separate test program for object checking.
+// Neither shipped program admits its loop helper.
+func ReadBarrierVerification() Program {
+	return Program{Name: "read-barrier", ReadsPayload: true, testBarrier: true}
 }

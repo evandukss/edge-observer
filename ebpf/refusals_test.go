@@ -16,6 +16,7 @@ func TestEveryRefusalReasonIsReadFromTheCounterItMeans(t *testing.T) {
 	meant := map[RefusalReason]string{
 		TransferRefusedAtReturn: "OBS_STAT_REFUSED",
 		CallNotRecorded:         "OBS_STAT_CALL_UNRECORDED",
+		ReadRetracted:           "OBS_STAT_READ_RETRACTED",
 		ReadNotFiled:            "OBS_STAT_READ_UNRECORDED",
 		DescendantNotWritten:    "OBS_STAT_DESCENDANT_UNRECORDED",
 		DenialNotWritten:        "OBS_STAT_DENIAL_UNRECORDED",

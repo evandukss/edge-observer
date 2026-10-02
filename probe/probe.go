@@ -166,6 +166,10 @@ type Sequence struct {
 	// two observations says such a loss fell between them.
 	Unlocated uint64
 
+	// BeginUnlocated is the unlocated count when this occupancy began.
+	// A non-born occupancy beginning after a loss may have missed its first bytes.
+	BeginUnlocated uint64
+
 	// Dropped is how many of this transfer's direction had their event refused a
 	// ring reservation, counted when this observation was produced: the drops that
 	// lie below this number. It only grows within an occupancy. Settling an open

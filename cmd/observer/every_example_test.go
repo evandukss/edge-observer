@@ -69,6 +69,7 @@ var executors = []executor{
 // notExecuted is every example file deliberately executed by nothing, each
 // with why.
 var notExecuted = map[string]string{
+	"examples/systemd/observer.service":     "systemd deployment unit with installation paths to adapt; the gate container has no systemd service manager",
 	"examples/endpoint-inventory/README.md": "documentation for the Python program, executed by nothing",
 }
 
