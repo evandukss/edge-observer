@@ -1490,13 +1490,13 @@ static __always_inline void obs_hold_read(__u64 generation)
 static __always_inline void obs_hold_read(__u64 generation) {}
 #endif
 
-static __always_inline void obs_read_taken(const struct instance_key *who, __u64 generation)
+static __always_inline int obs_read_taken(const struct instance_key *who, __u64 generation)
 {
 	obs_hold_read(generation);
 	struct admission *grant = bpf_map_lookup_elem(&allowed_processes, who);
 	if (!grant || grant->generation != generation || grant->kind == OBS_DENIED) {
 		obs_count(OBS_STAT_READ_RETRACTED);
-		return;
+		return 0;
 	}
 	obs_file_read(generation);
 	// A retraction can fold between the first check and the insertion. The
@@ -1506,7 +1506,9 @@ static __always_inline void obs_read_taken(const struct instance_key *who, __u64
 	if (!grant || grant->generation != generation || grant->kind == OBS_DENIED) {
 		bpf_map_delete_elem(&reads, &generation);
 		obs_count(OBS_STAT_READ_RETRACTED);
+		return 0;
 	}
+	return 1;
 }
 #endif
 
@@ -1953,8 +1955,8 @@ static __always_inline int obs_emit(const struct instance_key *who, __u64 genera
 			kept = OBS_CHUNK;
 		barrier_var(kept);
 		if (kept > 0 && kept <= OBS_CHUNK) {
-			obs_read_taken(who, generation);
-			if (bpf_probe_read_user(&e->data, kept, (void *)buf) == 0)
+			if (obs_read_taken(who, generation) &&
+			    bpf_probe_read_user(&e->data, kept, (void *)buf) == 0)
 				e->kept = kept;
 		}
 	}
@@ -2286,8 +2288,8 @@ static __always_inline int obs_return(void *ctx, __u32 func)
 	if (c->pcount) {
 		// Reading the count is a read of process memory like any other, recorded at
 		// the read under the same admission (the reads map).
-		obs_read_taken(&key, generation);
-		if (bpf_probe_read_user(&count, sizeof(count), (void *)c->pcount) == 0 &&
+		if (obs_read_taken(&key, generation) &&
+		    bpf_probe_read_user(&count, sizeof(count), (void *)c->pcount) == 0 &&
 		    count > 0 && count <= c->cap) {
 			obs_dropped(occ, c->dir,
 				obs_emit(&key, generation, &origin, c->ssl, (__u32)count, c->dir, c->early, 1,
