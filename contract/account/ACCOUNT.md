@@ -268,8 +268,11 @@ reason; it does not increment `processing_failures` or `output_failures`. Neithe
 suppression or capture loss, which retain their own dispositions and readings. `gate_reason` is empty when the gate has no
 invalidation reason; otherwise it is one of the reasons `probe.GateReasons` classifies as invalidating
 the capture - `unknown_length` and `unknown_kind` - and each remains distinguishable.
-`input_limit` and `intake_exhausted` cut affected connection input and leave the session running.
-The ordering and capture refusal counts report them separately; they do not set `gate_reason`.
+`input_limit` and `intake_exhausted` cause located capture loss and leave the session running.
+The ordering and capture refusal counts report them separately; they do not set `gate_reason` or
+increment `connections_cut` and `input_cut`. Discarded input is released while its connection waits
+for retirement; the metadata line reports the loss with a `positions_unknown` truncation. A connection
+already cut at its input bound keeps its one `connection_cut` line even if it later loses input.
 When only this aggregate is supplied, `pipelines` is empty because attribution was not supplied;
 that is not a per-pipeline zero. Aggregate counts must never be copied onto a synthetic pipeline
 or onto every pipeline.

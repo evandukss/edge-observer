@@ -90,11 +90,17 @@ func TestGateLossWritesItsRetirementWithoutCountingABoundCut(t *testing.T) {
 	p.closed(1)
 	p.closed(2)
 	o := p.drain()
+	if o.ProcessingFailures != 0 {
+		t.Errorf("loss or bound cut counted as processing failure: %d", o.ProcessingFailures)
+	}
 	if o.ConnectionsCut != 0 || o.InputCut != 0 {
 		t.Errorf("gate loss counted as bound cut: connections=%d input=%d", o.ConnectionsCut, o.InputCut)
 	}
 	if s := p.gate.Snapshot(); s.InputRefused != 1 || p.capture.Stats().GateRefused != 1 {
 		t.Errorf("gate refusal not counted once: %+v %+v", s, p.capture.Stats())
+	}
+	if s := p.gate.Snapshot(); s.Refunded.Cut != 0 || s.Refunded.Discarded != 2 {
+		t.Errorf("capture loss has wrong refund disposition: %+v", s.Refunded)
 	}
 	retirementLine(t, out, 1, "positions_unknown")
 	returnedReservations(t, p)
@@ -116,6 +122,9 @@ func TestABoundCutThenGateLossWritesOneCutRetirement(t *testing.T) {
 	p.closed(2)
 	p.closed(3)
 	o := p.drain()
+	if o.ProcessingFailures != 0 {
+		t.Errorf("loss or bound cut counted as processing failure: %d", o.ProcessingFailures)
+	}
 	if o.ConnectionsCut != 1 || o.InputCut != 3 {
 		t.Errorf("bound cut counted again after loss: connections=%d input=%d", o.ConnectionsCut, o.InputCut)
 	}
@@ -138,6 +147,9 @@ func TestSimultaneousBoundCutsEachWriteTheirRetirement(t *testing.T) {
 		p.closed(h)
 	}
 	o := p.drain()
+	if o.ProcessingFailures != 0 {
+		t.Errorf("loss or bound cut counted as processing failure: %d", o.ProcessingFailures)
+	}
 	if o.ConnectionsCut != 3 || o.InputCut != 9 {
 		t.Errorf("simultaneous cuts miscounted: connections=%d input=%d", o.ConnectionsCut, o.InputCut)
 	}
@@ -171,6 +183,9 @@ func TestABoundCutKeepsItsRetirementThroughTheFinalDrain(t *testing.T) {
 	o, err := p.worker.Finish(context.Background(), processing.Finalization{Withdrawn: true, Drained: true})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if o.ProcessingFailures != 0 {
+		t.Errorf("loss or bound cut counted as processing failure: %d", o.ProcessingFailures)
 	}
 	if o.ConnectionsCut != 1 || o.InputCut != 3 {
 		t.Errorf("final cut counted more than once: connections=%d input=%d", o.ConnectionsCut, o.InputCut)
