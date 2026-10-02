@@ -600,13 +600,14 @@ func TestP3T9ProtectedWorkerHeldAuthorizationKeepsPriorResult(t *testing.T) {
 					delivered := make(chan struct{})
 					go func() {
 						defer close(delivered)
-						if fault == probe.GateIntakeExhausted {
+						switch fault {
+						case probe.GateIntakeExhausted:
 							for i := 0; i < 2; i++ {
 								f.send(99, fragment.Sent, strings.Repeat("S", 4096), true, false)
 							}
-						} else if fault == probe.GateInputLimit {
+						case probe.GateInputLimit:
 							f.send(99, fragment.Sent, "pending", true, false)
-						} else {
+						default:
 							f.send(99, fragment.Sent, "", !inject || fault != probe.GateUnknownLength, false)
 						}
 					}()
