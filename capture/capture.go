@@ -371,6 +371,7 @@ func (s *Session) Transfer(t probe.Transfer) {
 		return
 	}
 	if found.loss.Reason() != "" {
+		s.stats.Rejected++
 		s.mutex.Unlock()
 		return
 	}

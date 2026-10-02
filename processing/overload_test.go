@@ -33,6 +33,10 @@ func TestHeldEventOverloadCutsItsConnectionAndFreshInputContinues(t *testing.T) 
 		Sequence: probe.Sequence{Occupancy: 1, Number: 2, Born: true}})
 	p.numbers[1][fragment.Sent] = 2
 	p.drain()
+	p.transfer(1, fragment.Sent, "GET /still-cut HTTP/1.1\r\n\r\n")
+	if seen := p.capture.Stats(); seen.Rejected != 1 {
+		t.Fatalf("continued cut input was not counted refused: %+v", seen)
+	}
 	p.closed(1)
 	p.closed(2)
 	p.drain()
