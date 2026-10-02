@@ -3,7 +3,6 @@ package capture_test
 import (
 	"testing"
 
-	"github.com/evandukss/edge-observer/capture"
 	"github.com/evandukss/edge-observer/connection"
 	"github.com/evandukss/edge-observer/fragment"
 	"github.com/evandukss/edge-observer/probe"
