@@ -66,7 +66,8 @@ type Stats struct {
 	// Closed is how many of them the runtime has since ended.
 	Closed int64 `json:"closed"`
 
-	// Rejected is the records the sink refused. Capture carries on regardless:
+	// Rejected is input refused by capture (a delayed obsolete occupancy) or
+	// its sink. Capture carries on regardless:
 	// observation must never block the observed process.
 	Rejected int64 `json:"rejected"`
 
@@ -100,9 +101,9 @@ type Stats struct {
 	Unsequenced int64 `json:"unsequenced"`
 
 	// Unlocated is the producer's count of losses it could place in no
-	// occupancy, the highest any observation carried. Above zero, every
-	// connection live across one of them and every connection begun after it
-	// lost its positions from where it stood.
+	// occupancy, the highest any observation carried. A first-call occupancy
+	// begun after a loss has no established origin; an observed birth or an
+	// occupancy begun before the loss retains its placement evidence.
 	Unlocated int64 `json:"unlocated"`
 
 	// ConnectionsUnrecorded is connection records the sink refused,
@@ -158,7 +159,6 @@ type stream struct {
 	// occupancy is the producer's occupancy of the handle this stream follows;
 	// zero for a stream begun by a transfer the producer numbered nothing for.
 	occupancy uint64
-	born      bool
 	loss      *held.Loss
 
 	// numbered is the last producer number seen in each direction.
@@ -591,7 +591,6 @@ func (s *Session) follow(t probe.Transfer) *stream {
 		offsets:      make(map[fragment.Direction]uint64, 2),
 		begun:        begun,
 		occupancy:    t.Sequence.Occupancy,
-		born:         t.Sequence.Born,
 		loss:         &held.Loss{},
 		numbered:     make(map[fragment.Direction]uint64, 2),
 		empties:      make(map[fragment.Direction]uint64, 2),
@@ -725,6 +724,12 @@ func (s *Session) Closed(c probe.Connection) {
 	found, open := s.streams[place]
 	if !open {
 		// Ended without a transfer seen, ended twice, or unattributable: counted.
+		s.stats.EndingsUnmatched++
+		s.mutex.Unlock()
+		return
+	}
+	if c.Sequence.Occupancy != 0 && c.Sequence.Occupancy < found.occupancy {
+		// An old delayed close has no authority over the reused handle.
 		s.stats.EndingsUnmatched++
 		s.mutex.Unlock()
 		return

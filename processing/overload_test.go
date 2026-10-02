@@ -134,7 +134,7 @@ func stringJoin(lines [][]byte) string {
 // Producer numbers and births, rather than HTTP-looking bytes, determine
 // whether a loss boundary can be crossed.
 func TestRecoveryDoesNotManufactureACompletePrefix(t *testing.T) {
-	for _, scenario := range []string{"old hole", "unseen first loss", "lost close reused", "delayed old event", "fresh birth", "prior occupancy"} {
+	for _, scenario := range []string{"old hole", "unseen first loss", "lost close reused", "delayed old event", "delayed old close", "fresh birth", "prior occupancy"} {
 		t.Run(scenario, func(t *testing.T) {
 			out := &outputLog{}
 			p := newPipeline(t, 100, 100, out)
@@ -154,7 +154,7 @@ func TestRecoveryDoesNotManufactureACompletePrefix(t *testing.T) {
 				number, begin, born = 3, 0, true
 			case "unseen first loss":
 				number = 2
-			case "lost close reused", "delayed old event":
+			case "lost close reused", "delayed old event", "delayed old close":
 				send(1, 1, 0, true, fragment.Sent, "GET /old HTTP/1.1\r\nIncomplete: ")
 				occupancy, born, want = 2, true, true
 			case "fresh birth":
@@ -165,6 +165,10 @@ func TestRecoveryDoesNotManufactureACompletePrefix(t *testing.T) {
 			send(occupancy, number, begin, born, fragment.Sent, "GET /candidate HTTP/1.1\r\n\r\n")
 			if scenario == "delayed old event" {
 				send(1, 2, 0, true, fragment.Sent, "GET /stale HTTP/1.1\r\n\r\n")
+			}
+			if scenario == "delayed old close" {
+				p.capture.Closed(probe.Connection{Process: pipelineProcess, Instance: pipelineInstance, Endpoint: 1, At: p.at,
+					Sequence: probe.Sequence{Occupancy: 1}, Final: probe.Final{Known: true, Sent: probe.Terminal{Last: 1}}})
 			}
 			send(occupancy, 1, begin, born, fragment.Received, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
 			p.capture.Closed(probe.Connection{Process: pipelineProcess, Instance: pipelineInstance, Endpoint: 1, At: p.at,
