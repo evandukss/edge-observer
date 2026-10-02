@@ -12,6 +12,7 @@ import (
 	"github.com/evandukss/edge-observer/fragment"
 	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/intake"
+	"github.com/evandukss/edge-observer/internal/mapslots"
 	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/processing"
 )
@@ -292,6 +293,56 @@ func TestAnExchangeAfterACallThatMovedNothingIsWritten(t *testing.T) {
 		t.Errorf("the connection counts %d processing failures and %d cuts, want none: %+v", o.ProcessingFailures,
 			o.ConnectionsCut, o)
 	}
+}
+
+// Connections are held at a live population of 128 while new ones open and the
+// oldest close and are processed, 32768 times, each with an id never used
+// before. The worker's map of held connections stays bounded by the live
+// population: what processing leaves in it is shed.
+func TestNewConnectionsChurnedAtAConstantPopulationLeaveTheBatchesAllocationBounded(t *testing.T) {
+	const live, cycles = 128, 32768
+	out := &outputLog{}
+	p := newPipeline(t, 1<<20, 0, out)
+	for i := 0; i < live; i++ {
+		p.transfer(uint64(i+1), fragment.Sent, fmt.Sprintf("GET /%d HTTP/1.1\r\nHost: x\r\n\r\n", i))
+	}
+	most := 0
+	for i := live; i < live+cycles; i++ {
+		p.transfer(uint64(i+1), fragment.Sent, fmt.Sprintf("GET /%d HTTP/1.1\r\nHost: x\r\n\r\n", i))
+		oldest := uint64(i - live + 1)
+		p.transfer(oldest, fragment.Received, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+		p.closed(oldest)
+		p.drain()
+		out.artifacts, out.lines = out.artifacts[:0], out.lines[:0]
+		if i%1024 != 0 {
+			continue
+		}
+		slots, err := mapslots.Slots(processing.BatchesOf(p.worker))
+		if err != nil {
+			t.Fatal(err)
+		}
+		most = max(most, slots)
+	}
+	stores, err := p.worker.Retained()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var batches held.Occupancy
+	for _, one := range stores {
+		if one.Store == "processing.batches" {
+			batches = one
+		}
+	}
+	if batches.Held != live {
+		t.Fatalf("wiring, not the property: processing.batches holds %d, want the live %d", batches.Held, live)
+	}
+	if batches.Rebuilds == 0 {
+		t.Errorf("%d connections processed at %d live and processing.batches was never rebuilt", cycles, live)
+	}
+	if most > 4*live {
+		t.Errorf("processing.batches reached %d slots at %d live, past %d", most, live, 4*live)
+	}
+	t.Logf("%d cycles at %d live: %d slots at most, %d rebuilds", cycles, live, most, batches.Rebuilds)
 }
 
 // One connection reaching the bound on what a connection may hold is cut

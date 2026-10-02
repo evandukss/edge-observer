@@ -21,6 +21,11 @@ type Occupancy struct {
 	// Bound is the most the store can hold, or zero where only the population it
 	// serves bounds it.
 	Bound int
+
+	// Rebuilds is how many times the store, a map keyed by identities that never
+	// return, was copied into a fresh map to shed what its deletions left (Churn);
+	// zero for a store that is never copied.
+	Rebuilds int
 }
 
 // Reader is a component whose retained stores can be read. Retained lists

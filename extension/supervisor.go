@@ -303,12 +303,13 @@ func (s *Supervisor) Close() {
 func (s *Supervisor) Retained() ([]held.Occupancy, error) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	outstanding, queued, answered := 0, 0, 0
+	outstanding, queued, answered, rebuilds := 0, 0, 0, 0
 	if g := s.current; g != nil {
 		outstanding, queued, answered = len(g.outstanding), len(g.queue), len(g.answered.spans)
+		rebuilds = g.churn.Rebuilds()
 	}
 	return []held.Occupancy{
-		{Store: "extension.outstanding", Held: outstanding},
+		{Store: "extension.outstanding", Held: outstanding, Rebuilds: rebuilds},
 		{Store: "extension.queue", Held: queued},
 		{Store: "extension.answered", Held: answered, Bound: spanBound},
 		{Store: "extension.derived", Held: len(s.derived)},
@@ -613,7 +614,7 @@ func (s *Supervisor) resultLocked(g *generation, m incoming) {
 		s.retireLocked(g, UnknownID)
 		return
 	}
-	delete(g.outstanding, id)
+	g.outstanding = held.Deleted(g.outstanding, id, &g.churn)
 	g.waiting -= p.call.Bytes
 	g.answered.add(id)
 	result := s.answerOf(g, m)

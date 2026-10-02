@@ -161,10 +161,14 @@ type Worker struct {
 	pipelines []config.EffectivePipeline
 	routes    []config.DurableRoute
 	batches   map[batchKey]*batch
-	order     []batchKey
-	outcome   Outcome
-	terminal  error
-	finished  bool
+	// batchesChurn and waitingChurn shed what processing leaves in batches and
+	// waiting, whose keys are connections and dispatches that never return.
+	batchesChurn held.Churn
+	waitingChurn held.Churn
+	order        []batchKey
+	outcome      Outcome
+	terminal     error
+	finished     bool
 	// bound is the most fragments one connection may hold (Options.ConnectionInput).
 	bound int
 }
@@ -366,11 +370,11 @@ func (w *Worker) Retained() ([]held.Occupancy, error) {
 		}
 	}
 	return []held.Occupancy{
-		{Store: "processing.batches", Held: len(w.batches)},
+		{Store: "processing.batches", Held: len(w.batches), Rebuilds: w.batchesChurn.Rebuilds()},
 		{Store: "processing.entries", Held: entries},
 		{Store: "processing.fragments", Held: fragments},
 		{Store: "processing.order", Held: len(w.order)},
-		{Store: "processing.waiting", Held: len(w.waiting)},
+		{Store: "processing.waiting", Held: len(w.waiting), Rebuilds: w.waitingChurn.Rebuilds()},
 		{Store: "processing.waiting_exchanges", Held: exchanges},
 		{Store: "processing.waiting_exchanges_capacity", Held: capacity},
 		{Store: "processing.waiting_bodies", Held: bodies},
@@ -482,7 +486,7 @@ func (w *Worker) drain(ctx context.Context, final bool) error {
 		if !waits {
 			b.release(processedUnless(err))
 		}
-		delete(w.batches, id)
+		w.batches = held.Deleted(w.batches, id, &w.batchesChurn)
 		if err != nil {
 			w.stop(err)
 			return err

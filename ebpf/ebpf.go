@@ -36,6 +36,7 @@ import (
 	"github.com/evandukss/edge-observer/admission"
 	obpf "github.com/evandukss/edge-observer/bpf"
 	"github.com/evandukss/edge-observer/fragment"
+	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/process"
 )
@@ -420,6 +421,12 @@ type Session struct {
 
 	// namedBy is every target that named an instance; the allowlist holds one.
 	namedBy map[instanceKey][]admission.Provenance
+
+	// indexChurn, seenChurn and namedByChurn shed what the ends of executions
+	// leave in index, seen and namedBy, whose keys never return. Under held.
+	indexChurn   held.Churn
+	seenChurn    held.Churn
+	namedByChurn held.Churn
 
 	// inventory is every instance this session recorded a grant for and has not
 	// established as ended, and index its position. Both the delivery goroutine
@@ -2048,7 +2055,7 @@ func (s *Session) see(key instanceKey, start admission.Start) {
 func (s *Session) forget(key instanceKey) {
 	s.held.Lock()
 	defer s.held.Unlock()
-	delete(s.seen, key)
+	s.seen = held.Deleted(s.seen, key, &s.seenChurn)
 }
 
 // WhatBecameOf decides which of the three states one recorded instance is in,
