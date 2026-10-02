@@ -169,7 +169,7 @@ func capacity(b *testing.B, input *workload.Workload, plan *config.ProcessingPla
 		b.Fatal(err)
 	}
 	s := output.Stats()
-	if s.Refused != 0 || s.Exhausted {
+	if s.Refused != 0 {
 		b.Fatalf("writer clipped: %+v", s)
 	}
 	if sink == "file" {

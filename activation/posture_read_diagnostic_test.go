@@ -20,7 +20,6 @@ import (
 	"github.com/evandukss/edge-observer/policy"
 	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/process"
-	"github.com/evandukss/edge-observer/processing"
 	"golang.org/x/sys/unix"
 )
 
@@ -171,11 +170,6 @@ func postureReadDiagnosticChild(t *testing.T, mode string, classify bool) {
 	if err != nil {
 		t.Fatalf("setup: supported policy refused: %v", err)
 	}
-	writer, err := processing.Open(outputDir, 1<<20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer writer.Close()
 	participants := []process.Process{{PID: parent.PID, StartTime: parent.StartTime}}
 	if mode == "missing_participant" {
 		participants[0].PID = 2147483647
@@ -186,7 +180,7 @@ func postureReadDiagnosticChild(t *testing.T, mode string, classify bool) {
 	if mode == "changed_participant" {
 		participants[0].StartTime++
 	}
-	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: uint64(read.Settings.AdmittedEventLimit), StorageExhausted: writer.Exhausted()})
+	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: uint64(read.Settings.AdmittedEventLimit)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +227,7 @@ func postureReadDiagnosticChild(t *testing.T, mode string, classify bool) {
 	if state := gate.Snapshot(); state.Charged != 0 || state.Reason != "" {
 		t.Fatalf("verification changed gate state: %+v", state)
 	}
-	prepared, err := Prepare(read, participants, uint64(read.Settings.AdmittedEventLimit), writer.Exhausted())
+	prepared, err := Prepare(read, participants, uint64(read.Settings.AdmittedEventLimit), nil)
 	if prepared != nil {
 		defer prepared.Intake.Close()
 	}

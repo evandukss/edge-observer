@@ -28,7 +28,7 @@ func TestTheIntakeFillingInvalidatesTheGateUnderItsOwnReason(t *testing.T) {
 			if got := g.Authorize(settledRelease()); !got.Authorized {
 				t.Fatalf("wiring, not the property: an open intake refused a settled release: %+v", got)
 			}
-			storageWithdrawal(t, g, false)
+			assertWithdrawal(t, g, false)
 
 			close(intake)
 			if reason := decide(g); reason != probe.GateIntakeExhausted {
@@ -37,7 +37,7 @@ func TestTheIntakeFillingInvalidatesTheGateUnderItsOwnReason(t *testing.T) {
 			if !probe.GateIntakeExhausted.InvalidatesCapture() {
 				t.Errorf("%s is not classified as invalidating the capture", probe.GateIntakeExhausted)
 			}
-			storageWithdrawal(t, g, true)
+			assertWithdrawal(t, g, true)
 			if got := g.Authorize(settledRelease()); got.Authorized || got.Reason != probe.GateIntakeExhausted {
 				t.Errorf("a settled release after the intake filled reads %+v", got)
 			}

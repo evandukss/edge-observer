@@ -43,7 +43,6 @@ const (
 )
 
 var (
-	ErrOutputLimit  = errors.New("approved output storage limit reached")
 	ErrUnapproved   = errors.New("record has no release authorization")
 	ErrOutputClosed = errors.New("approved output is closed")
 )
@@ -224,14 +223,13 @@ func (a Approved) Bytes() []byte { return append([]byte(nil), a.line...) }
 
 // WriterStats describes best-effort attempts for one session. LimitBytes is
 // the retained queue bound, never a total disk allowance. Bytes includes partial
-// failed writes. Exhausted is retained for Go compatibility and is always false.
+// failed writes.
 type WriterStats struct {
 	LimitBytes     int64
 	Bytes          int64
 	DerivedBytes   int64
 	Written        uint64
 	Refused        uint64
-	Exhausted      bool
 	Closed         bool
 	Authorized     uint64
 	Failed         uint64

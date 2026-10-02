@@ -12,10 +12,6 @@ import (
 	"github.com/evandukss/edge-observer/contract/record"
 )
 
-// ErrReaderUnavailable was returned by the interface-only publication.
-// Deprecated: the implemented reader no longer returns this error.
-var ErrReaderUnavailable = errors.New("approved artifact reader is not implemented")
-
 // ErrNoArtifacts means approved.jsonl exists but contains no records. It does
 // not establish that nothing crossed, or that no values were excluded.
 var ErrNoArtifacts = errors.New("approved artifact contains no records")

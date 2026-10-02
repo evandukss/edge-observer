@@ -21,6 +21,20 @@ func settledRelease() probe.ReleaseEvidence {
 	return probe.ReleaseEvidence{InputsSettled: true, LifecycleSettled: true}
 }
 
+func assertWithdrawal(t *testing.T, g *probe.DeliveryGate, want bool) {
+	t.Helper()
+	select {
+	case <-g.Withdrawal():
+		if !want {
+			t.Error("eligible control requested withdrawal")
+		}
+	default:
+		if want {
+			t.Error("invalidated gate did not request withdrawal")
+		}
+	}
+}
+
 func TestDeliveryGateValidatesItsOnlyOption(t *testing.T) {
 	if _, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{}); err == nil {
 		t.Fatal("zero event allowance accepted")

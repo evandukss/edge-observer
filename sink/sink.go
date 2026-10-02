@@ -6,7 +6,6 @@ import (
 	"errors"
 )
 
-var ErrNotImplemented = errors.New("sink implementation unavailable")
 var ErrQueueFull = errors.New("sink queue is full")
 var ErrClosed = errors.New("sink queue is closed")
 

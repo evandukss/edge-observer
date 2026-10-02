@@ -55,21 +55,21 @@ func TestGateReasonEnumerationCoversDeclarations(t *testing.T) {
 func TestGateReasonClassifiesReachedDecisions(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
-		fault       func(*probe.DeliveryGate, chan struct{}) probe.GateReason
+		fault       func(*probe.DeliveryGate) probe.GateReason
 		want        probe.GateReason
 		invalidates bool
 	}{
-		{"input_limit", func(g *probe.DeliveryGate, _ chan struct{}) probe.GateReason {
+		{"input_limit", func(g *probe.DeliveryGate) probe.GateReason {
 			return g.Admit(probe.DeliveryClose, false).State.Reason
 		}, probe.GateInputLimit, true},
 
-		{"unknown_length", func(g *probe.DeliveryGate, _ chan struct{}) probe.GateReason {
+		{"unknown_length", func(g *probe.DeliveryGate) probe.GateReason {
 			return g.Admit(probe.DeliveryTransfer, false).State.Reason
 		}, probe.GateUnknownLength, true},
-		{"unknown_kind", func(g *probe.DeliveryGate, _ chan struct{}) probe.GateReason {
+		{"unknown_kind", func(g *probe.DeliveryGate) probe.GateReason {
 			return g.Admit(255, true).State.Reason
 		}, probe.GateUnknownKind, true},
-		{"unsettled", func(g *probe.DeliveryGate, _ chan struct{}) probe.GateReason {
+		{"unsettled", func(g *probe.DeliveryGate) probe.GateReason {
 			return g.Authorize(probe.ReleaseEvidence{}).Reason
 		}, probe.GateUnsettled, false},
 	} {
@@ -78,22 +78,21 @@ func TestGateReasonClassifiesReachedDecisions(t *testing.T) {
 			if tc.want == probe.GateInputLimit {
 				limit = 1
 			}
-			exhausted := make(chan struct{})
-			g := storageGate(t, limit, exhausted, nil)
+			g := deliveryGate(t, limit, nil)
 			if got := g.Admit(probe.DeliveryClose, false); !got.Admitted || !got.Charged {
 				t.Fatalf("ordinary close control refused: %+v", got)
 			}
 			if got := g.Authorize(settledRelease()); !got.Authorized || got.Reason != "" {
 				t.Fatalf("settled control refused: %+v", got)
 			}
-			reason := tc.fault(g, exhausted)
+			reason := tc.fault(g)
 			if reason != tc.want {
 				t.Fatalf("fault not reached: got %q, want %q", reason, tc.want)
 			}
 			if got := reason.InvalidatesCapture(); got != tc.invalidates {
 				t.Errorf("%q InvalidatesCapture = %t, want %t", reason, got, tc.invalidates)
 			}
-			storageWithdrawal(t, g, tc.invalidates)
+			assertWithdrawal(t, g, tc.invalidates)
 			if got := g.Authorize(settledRelease()); got.Authorized == tc.invalidates {
 				t.Errorf("classification disagrees with later release: %+v", got)
 			}
@@ -125,9 +124,9 @@ func TestGateReasonEnumerationIsCallerOwned(t *testing.T) {
 }
 
 // Run with -run '^TestDeliveryGateUninitializedRefusesEveryEntry$'. The
-// initialized_control/snapshot and initialized_control/consume leaves require
-// their admit sibling to charge the shared gate first. Selecting either leaf
-// alone fails for missing sibling setup, not for the property under test.
+// initialized_control/snapshot leaf requires its admit sibling to charge the
+// shared gate first. Selecting that leaf alone fails for missing sibling setup,
+// not for the property under test.
 func TestDeliveryGateUninitializedRefusesEveryEntry(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -161,13 +160,8 @@ func TestDeliveryGateUninitializedRefusesEveryEntry(t *testing.T) {
 					t.Errorf("snapshot = %+v, want %+v", got, want)
 				}
 			})
-			t.Run("consume", func(t *testing.T) {
-				if got := g.ConsumeStorageExhaustion(); got != want {
-					t.Errorf("consume = %+v, want %+v", got, want)
-				}
-			})
 			t.Run("withdrawal", func(t *testing.T) {
-				storageWithdrawal(t, g, !initialized)
+				assertWithdrawal(t, g, !initialized)
 			})
 		})
 	}

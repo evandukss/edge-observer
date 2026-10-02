@@ -114,7 +114,6 @@ const (
 	DerivedUnknownSource = "unknown_source"
 	DerivedRate          = "rate"
 	DerivedQueueFull     = "queue_full"
-	DerivedBudget        = "budget"
 	DerivedStopped       = "stopped"
 	DerivedWriteFailed   = "write_failed"
 )

@@ -20,9 +20,8 @@ import (
 )
 
 var (
-	ErrNotImplemented = errors.New("processing implementation is not installed")
-	ErrOptions        = errors.New("invalid processing options")
-	ErrFinished       = errors.New("processing worker is finished")
+	ErrOptions  = errors.New("invalid processing options")
+	ErrFinished = errors.New("processing worker is finished")
 )
 
 // Output is the nonblocking enqueue boundary for already processed lines.
