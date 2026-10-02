@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/evandukss/edge-observer/connection"
 	"github.com/evandukss/edge-observer/ebpf"
 	retention "github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/probe"
@@ -106,6 +107,18 @@ func TestIndependentAttachmentChurnReclaimsProcessIdentity(t *testing.T) {
 		admitter.Retract(added.Selections)
 		stop()
 	}
+	producer, ok := live.(connection.Producer)
+	if !ok {
+		t.Fatal("wiring, not the property: attachment cannot settle delivery")
+	}
+	withdrawn, err := producer.StopProducing()
+	if err != nil || !withdrawn.Complete {
+		t.Fatalf("wiring, not the property: production withdrawal %+v %v", withdrawn, err)
+	}
+	drained, err := producer.Drain(3 * time.Second)
+	if err != nil || !drained.Complete {
+		t.Fatalf("wiring, not the property: producer drain %+v %v", drained, err)
+	}
 	after := read()
 	for name, count := range after {
 		if !strings.HasPrefix(name, "attach.") && !strings.HasPrefix(name, "ebpf.") {
@@ -123,6 +136,12 @@ func TestIndependentAttachmentChurnReclaimsProcessIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	for reason, count := range counts {
+		// Each TLS connection was opened before its process was admitted, so
+		// its unobserved socket creation cannot establish socket occupancy.
+		if reason == string(ebpf.SocketLifetimeUnknown) {
+			t.Logf("pre-admission socket association refusals %d -> %d", before[reason], count)
+			continue
+		}
 		if reason == string(ebpf.DescriptorSeenInsideACall) || reason == string(ebpf.SocketWorkOutsideACall) || reason == string(ebpf.SocketDescriptorInvalid) {
 			continue
 		}
