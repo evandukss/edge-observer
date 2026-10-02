@@ -761,7 +761,7 @@ func Render(to io.Writer, a Account, local bool) {
 		"connection",
 		seen.Lost, seen.Cut, seen.Retired, seen.Unsequenced, seen.Unlocated)
 
-	say("overload   %d transfers refused at the held-event bound, %d fragments refused by volatile intake", seen.GateRefused, seen.IntakeRefused)
+	say("overload   %d transfers refused by the admission gate, %d fragments refused by volatile intake", seen.GateRefused, seen.IntakeRefused)
 
 	// Losses only. A dropped event leaves no mark in the stream it would have
 	// joined.
