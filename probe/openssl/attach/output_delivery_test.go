@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +45,20 @@ func TestUnavailableOutputActivatesAndControlReopenRotatesFiles(t *testing.T) {
 			_ = exec.CommandContext(ctx, binary, "stop", c.path).Run()
 		}
 	})
+	// Before the first control request, startup itself must leave enough state
+	// to identify this session if it dies without sealing an account.
+	pidRecord, err := os.ReadFile(filepath.Join(c.directory, "observer.pid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := strings.Fields(string(pidRecord))
+	if len(identity) != 2 {
+		t.Fatalf("activated pid record: %q", pidRecord)
+	}
+	control, err := os.Stat(filepath.Join(c.directory, "sessions", identity[1], "control"))
+	if err != nil || !control.IsDir() {
+		t.Fatalf("startup left no session control directory: %v", err)
+	}
 	initial := inspected(t, binary, c)
 	if initial.Session == "" {
 		t.Fatal("wiring: no activated session identity")
