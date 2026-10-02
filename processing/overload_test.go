@@ -76,11 +76,11 @@ func TestIntakeLossSurvivesAFullQueueAndFreshInputContinues(t *testing.T) {
 	if store.Stats().FragmentsRefused != 1 {
 		t.Fatalf("wiring: intake did not refuse oversized fragment: %+v", store.Stats())
 	}
-	// No payload or retirement is queued. The shared cut alone must release
-	// the entry already leased by processing.
+	// No payload or retirement is queued. The loss token releases the leased
+	// payload while the batch waits to report its retirement.
 	o := p.drain()
-	if store.Stats().Bytes != 0 || o.ConnectionsCut != 1 {
-		t.Fatalf("full-queue cut did not release its batch: %+v %+v", store.Stats(), o)
+	if store.Stats().Bytes != 0 || o.ConnectionsCut != 0 || o.Pending != 1 {
+		t.Fatalf("full-queue loss did not release payload while retaining its retirement: %+v %+v", store.Stats(), o)
 	}
 	p.closed(1)
 	p.drain()
