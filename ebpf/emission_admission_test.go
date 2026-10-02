@@ -51,7 +51,7 @@ func queuedAdmission(t *testing.T) (*ebpf.Session, *armingProcess, process.Proce
 	if len(s.Inventory()) != 1 {
 		t.Fatal("wiring, not the property: initial inventory row is absent")
 	}
-	if string(event.Payload) != "held" {
+	if string(event.Payload) != "GET /held-0 HTTP/1.1\r\nHost: localhost\r\n\r\n" {
 		t.Fatalf("wiring, not the property: held transfer payload %q", event.Payload)
 	}
 	return s, actor, p, event, unblock
@@ -79,7 +79,7 @@ func releasedAdmission(t *testing.T, s *ebpf.Session, event ebpf.Event, untilExi
 			}
 			if e.Kind == ebpf.Transfer {
 				transfers++
-				if e.Generation != event.Generation || string(e.Payload) != "held" {
+				if e.Generation != event.Generation || string(e.Payload) != string(event.Payload) {
 					t.Errorf("delivered transfer changed its emission evidence: generation %d, payload %q", e.Generation, e.Payload)
 				}
 				if !untilExit {
