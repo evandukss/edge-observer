@@ -127,6 +127,15 @@ func describeHolder(content []byte) string {
 // holder is the process and session holding the pid file, or errNotRunning.
 // It asks the lock, not the file's content.
 func holder(directory string) (int, string, error) {
+	return holderUsing(directory, probeHolder)
+}
+
+func probeHolder(file *os.File) (bool, error) {
+	err := syscall.Flock(int(file.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
+	return err != nil, nil
+}
+
+func holderUsing(directory string, probe func(*os.File) (bool, error)) (int, string, error) {
 	path := filepath.Join(directory, pidName)
 	file, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -136,7 +145,11 @@ func holder(directory string) (int, string, error) {
 		return 0, "", fmt.Errorf("open %s: %w", path, err)
 	}
 	defer func() { _ = file.Close() }()
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err == nil {
+	held, err := probe(file)
+	if err != nil {
+		return 0, "", err
+	}
+	if !held {
 		return 0, "", fmt.Errorf("%w: nothing holds %s", errNotRunning, path)
 	}
 	content, err := os.ReadFile(path)
