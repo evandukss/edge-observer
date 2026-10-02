@@ -19,7 +19,7 @@ It is domain-neutral. Nothing here names a business operation or a privacy rule.
 
 | Name here | What it is | Where | Version |
 |---|---|---|---|
-| **operational account** | the observer's own account of a session at three moments - planned, live, sealed - built by one set of functions and sealed beside approved output for new sessions or a raw spool for legacy sessions | `account`, `Account` | `Version` = 1 |
+| **operational account** | the observer's own account of a session at three moments - planned, live, sealed - built by one set of functions and sealed in the session directory; approved output uses stable paths, while legacy sessions may contain a raw spool | `account`, `Account` | `Version` = 1 |
 | **account** | this contract: the published form of a SEALED operational account, with the records it describes carried beside it in a bundle | `contract/account` | `observer.account/2-draft` |
 
 **The relation is one-way and versioned on the operational account's number.** An account at
@@ -262,17 +262,59 @@ artifact-serialization defect instead terminates processing and names the binary
 reason; it does not increment either counter. Neither counter is policy suppression or capture loss,
 which retain their own dispositions and readings. `gate_reason` is empty when the gate has no
 invalidation reason; otherwise it is one of the reasons `probe.GateReasons` classifies as invalidating
-the capture - `input_limit`, `storage_exhausted`, `intake_exhausted`, `unknown_length` and
+the capture - `input_limit`, `intake_exhausted`, `unknown_length` and
 `unknown_kind` - and each remains distinguishable. `intake_exhausted` is the volatile intake refusing a
 record: capture's input is then incomplete, and nothing still pending is released.
 When only this aggregate is supplied, `pipelines` is empty because attribution was not supplied;
 that is not a per-pipeline zero. Aggregate counts must never be copied onto a synthetic pipeline
-or onto every pipeline. The aggregate adds no intake, writer-capacity or cleanup diagnostics.
+or onto every pipeline.
+
+#### Delivery counts by destination
+
+Live and sealed operational accounts use the same paths. The published account
+projects them as follows; counts in the operational account are JSON numbers,
+and counts in the published account are decimal strings.
+
+| Destination | Operational account JSON path | Published account JSON path |
+|---|---|---|
+| Approved file, `<output>/approved.jsonl` | `processing.delivery` | `processing.aggregate.delivery` |
+| Derived file, `<output>/derived-<name>.jsonl` | `processing.extensions[]` entry whose `name` is the configured extension name, then `delivery` | `processing.extensions["<name>"].delivery` |
+| Configured operational-log file | `log_destinations.file` | `log_destinations.file` |
+| Operational-log foreground stdout | `log_destinations.stdout` | `log_destinations.stdout` |
+
+`log_destinations` contains only destinations registered for the session: `file`
+when `log` names a file, and `stdout` in foreground operation. A foreground run
+with a configured log file has both entries. The optional `log_delivery` is the
+aggregate over those log destinations; one record sent to both is two attempts.
+It is not the per-file count. Planned and historical accounts may omit these
+optional delivery objects; absence does not mean zero. Current live and sealed
+accounts carry the registered destinations even when their counts are zero.
+
+Every delivery object has these JSON members: `authorized`, `written`, `failed`,
+`dropped`, `pending`, `discarded`, `bytes`, `pending_bytes`, `high_water_bytes`,
+and `limit_bytes`. `authorized = written + failed + dropped + pending`.
+`discarded` is the shutdown subset of `dropped`, at the same destination path;
+for example, `processing.aggregate.delivery.discarded` for the approved file
+in the published account and `log_destinations.file.discarded` for the log file.
+It is not an additional term in the identity. A failed attempt is not written,
+and failure does not prove that no bytes reached the file. `bytes` counts bytes
+accepted from line attempts before they were classified as discarded, not a
+file's current size. `pending_bytes` includes queued and in-flight encoded
+bytes, including LF; `high_water_bytes` is their maximum. `limit_bytes` is the
+shared queue's bound, not a separately reserved allowance for each destination.
+Approved and derived destinations share one queue; log destinations share another.
+
+After bounded shutdown, pending lines become discarded and `pending` is zero.
+A discarded in-flight line retains its byte charge until its write returns, so
+`pending_bytes` can remain nonzero. Its later completion cannot revise the
+sealed discarded count, and discarded does not prove absence from the file.
+The sealed account's log counts include the attempt to emit its stopped record.
+These counts are never an inventory of files; retention belongs to the operator.
 
 `exchange_ids` is the number of exchange ids the session issued: one per exchange the reconstructor
 produced from a dispatched batch where content is written, numbered from `"1"`
-([PROTOCOL.md](../extension/PROTOCOL.md), Ids). Every line of the approved output carries its connection's
-range, and the ranges together cover `"1"` to this count.
+([PROTOCOL.md](../extension/PROTOCOL.md), Ids). Every approved exchange line carries its session, connection, exchange id and index.
+Best-effort drops do not renumber these identities. Retirement lines carry no id range.
 
 `extensions` holds one entry per configured extension, keyed by its configured name, and `{}` where none is
 configured. **Every value in it is the observer's own count of what it did with the extension; an
@@ -295,7 +337,7 @@ error - is never carried here. Each entry:
 | `late`, `duplicate` | answers discarded: from a generation being retired, or a second answer to one id |
 | `derived_written`, `derived_bytes` | derived lines written to the extension's own file, and their bytes |
 | `derived_refused` | derived records refused |
-| `derived_refused_by` | `{reason: count}` with every reason of the protocol, each present: `malformed`, `unknown_source`, `rate`, `queue_full`, `budget`, `stopped`, `write_failed` |
+| `derived_refused_by` | `{reason: count}` with every reason of the protocol, each present: `malformed`, `unknown_source`, `rate`, `queue_full`, `stopped`, `write_failed` |
 | `stderr_dropped` | lines of its standard error not copied into the log |
 
 **The counts conserve**: `considered` = `changed` + `unchanged` + `failed` + `pending`, `failed` is the sum

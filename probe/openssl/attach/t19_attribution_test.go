@@ -40,7 +40,7 @@ func TestT19AForkedChildIsCreditedToItsParentsTargetAsInherited(t *testing.T) {
 
 	// Wiring: the child was admitted by the fork hook and its transfers reached
 	// the session. Without these nothing below measures attribution.
-	if by := observedBy(t, observer.directory(c)); by[child.PID] == 0 || by[a.root.PID] == 0 {
+	if by := observedBy(t, c.directory); by[child.PID] == 0 || by[a.root.PID] == 0 {
 		t.Fatalf("wiring, not the property: the approved output holds %d entries for the child pid %d and %d for "+
 			"the parent pid %d, so one of them was not admitted or transferred nothing, and no admission "+
 			"below is the one this case is about", by[child.PID], child.PID, by[a.root.PID], a.root.PID)

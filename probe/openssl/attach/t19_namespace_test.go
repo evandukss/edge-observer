@@ -38,7 +38,7 @@ func TestT19EachAdmissionsNamespaceNamesWhatReadIt(t *testing.T) {
 	waitWitnessed(t, witness, roles, before, 3)
 	sealed := ended(t, observer, c)
 
-	by := observedBy(t, observer.directory(c))
+	by := observedBy(t, c.directory)
 	for role, pid := range roles {
 		if by[pid] == 0 {
 			t.Fatalf("wiring, not the property: the approved output holds nothing for %s (pid %d), so it was not "+

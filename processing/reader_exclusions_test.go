@@ -25,6 +25,7 @@ func TestApprovedReaderDistinguishesAllFourExclusionWireForms(t *testing.T) {
 	if err := json.Unmarshal(empty, &members); err != nil {
 		t.Fatal(err)
 	}
+	members["version"] = json.RawMessage(`"observer.approved/1"`)
 	delete(members, "policy_exclusions")
 	absent, err := json.Marshal(members)
 	if err != nil {

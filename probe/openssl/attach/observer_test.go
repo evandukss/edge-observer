@@ -106,7 +106,7 @@ func (c configured) rewrite(t *testing.T, targets, exclusions []map[string]any) 
 		"version":   config.FileVersion,
 		"output":    c.directory,
 		"log":       c.log,
-		"limits":    map[string]any{"output_mib": 1, "state_every_seconds": 1},
+		"limits":    map[string]any{"state_every_seconds": 1},
 		"watch":     written,
 		"ignore":    excluded,
 		"libraries": []any{},
@@ -461,7 +461,7 @@ func TestTheObserverHoldsNothingListensOnNothingAndWritesOnlyItsOwnFiles(t *test
 	// enumeration exists precisely so that a new writable file is a failure.
 	// Restoring the legacy read path does not restore them; only writing would.
 	allowed := map[string]bool{
-		filepath.Join(observer.directory(c), processing.ArtifactName): true,
+		filepath.Join(c.directory, processing.ArtifactName): true,
 		c.log:       true,
 		c.pidFile(): true,
 	}

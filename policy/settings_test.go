@@ -1,33 +1,18 @@
 package policy_test
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/evandukss/edge-observer/policy"
 )
 
-func TestApprovedOutputAllowanceReachesProcessingPlan(t *testing.T) {
+func TestOutputLimitIsUnknownKey(t *testing.T) {
 	document := processingDocument(t)
 	member(document, "limits")["output_mib"] = 13
 	read, err := policy.CompileProcessing([]byte(encoded(t, document)), "")
-	if err != nil {
-		t.Fatalf("approved output allowance refused: %v", err)
-	}
-	content, err := json.Marshal(read.Processing.Observer())
-	if err != nil {
-		t.Fatal(err)
-	}
-	var resolved map[string]any
-	if err := json.Unmarshal(content, &resolved); err != nil {
-		t.Fatal(err)
-	}
-	if resolved["approved_output_bound_mib"] != float64(13) {
-		t.Fatalf("compiled output allowance not 13 MiB: %s", content)
-	}
-	if _, present := resolved["spool_bound_mib"]; present {
-		t.Fatalf("compiled output still publishes retired spool setting: %s", content)
+	if err == nil || read.Processing != nil || !strings.Contains(err.Error(), "output_mib") || !strings.Contains(err.Error(), "unknown_key") {
+		t.Fatalf("unknown output key: %v", err)
 	}
 }
 

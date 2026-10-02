@@ -16,12 +16,11 @@ const (
 
 // The limits a configuration may omit, as values.
 const (
-	DefaultApprovedOutputBoundMiB int64 = 64
-	DefaultStateEverySeconds      int64 = 30
+	DefaultStateEverySeconds int64 = 30
 	// DefaultAdmittedEventLimit chooses a finite diagnostic population with a
 	// nominal 64 MiB intake allowance at the decoder's current payload ceiling.
 	// It is not measured headroom or an execution-memory budget, and remains
-	// independent of the approved durable-output allowance.
+	// independent of the encoded output queue bound.
 	DefaultAdmittedEventLimit int64 = 16384
 	DefaultWorkers            int64 = 1
 )
@@ -57,12 +56,11 @@ const (
 )
 
 // The largest values of limits, so a limit a user can write never overflows
-// what it is multiplied into: output_mib into bytes, events into the intake's
+// what it is multiplied into: events into the intake's
 // byte allowance at the decoder's per-event payload ceiling, and
 // state_every_seconds into a duration. MaxWorkers bounds the processing loops
 // a session starts, each holding its own queue.
 const (
-	MaxOutputMiB         int64 = (1<<63 - 1) >> 20
 	MaxEventPayloadBytes int64 = 4096
 	MaxEvents            int64 = (1<<63 - 1) / MaxEventPayloadBytes
 	MaxStateEverySeconds int64 = (1<<63 - 1) / 1_000_000_000
@@ -123,7 +121,6 @@ type Watch struct {
 // Limits are the observer settings, with every absent one resolved to its
 // default.
 type Limits struct {
-	OutputMiB         int64
 	Events            int64
 	StateEverySeconds int64
 	Workers           int64

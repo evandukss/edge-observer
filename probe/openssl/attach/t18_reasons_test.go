@@ -28,10 +28,9 @@ type t18Reason struct {
 // t18Reasons is keyed by the reason's string, not its constant, so an entry
 // can exist for a reason this tree does not declare yet.
 var t18Reasons = map[string]t18Reason{
-	"input_limit":       {scenario: t18InputLimit},
-	"unknown_length":    {scenario: t18UnknownLength},
-	"storage_exhausted": {scenario: t18StorageExhausted},
-	"intake_exhausted":  {scenario: t18IntakeExhausted},
+	"input_limit":      {scenario: t18InputLimit},
+	"unknown_length":   {scenario: t18UnknownLength},
+	"intake_exhausted": {scenario: t18IntakeExhausted},
 	"unknown_kind": {
 		exception: "the program emits only kind 1, a transfer, and kind 2, a close (bpf/ssl.bpf.h obs_emit), and " +
 			"decoding keeps the kind byte as the program wrote it (ebpf/ebpf.go decode), so only a modified " +
@@ -74,31 +73,6 @@ func t18UnknownLength(t *testing.T, binary string) account.Account {
 		}
 		if answer := reader.say(t, "W"); answer != "would-block 0 2" {
 			t.Fatalf("wiring, not the property: the out-parameter read answered %q", answer)
-		}
-	})
-}
-
-// t18StorageExhausted is a loaded run: forty 3000-byte answers per closed
-// connection, one approved record per connection and route, against the 1 MiB
-// bound configuring writes, until a record does not fit.
-func t18StorageExhausted(t *testing.T, binary string) account.Account {
-	port := t18Serving(t)
-	clients := make([]conversation, 8)
-	for i := range clients {
-		clients[i] = speaking(t, port)
-	}
-	c := configuring(t, target("clients", clients[0].process))
-	t18Edit(t, c, t18Removing)
-	return t18EndedByItself(t, binary, c, func(s *t18Session) {
-		for i, client := range clients {
-			if s.ended() {
-				return
-			}
-			for j := range 40 {
-				t18Ask(t, client, fmt.Sprintf("/blob?asked=t18-reason-storage-%d-%d", i, j))
-			}
-			t18Hangup(client)
-			t18Settled(t, binary, c, s, uint64(2*(i+1)), 20*time.Second)
 		}
 	})
 }

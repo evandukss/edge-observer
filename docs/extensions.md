@@ -62,10 +62,10 @@ receives connection records when each connection ends.
   before the next extension sees it, so an extension cannot put back what `remove` took out. The approved
   output records each extension's outcome for each written exchange.
 - **Its own records.** What an extension writes about exchanges goes to `derived-<name>.jsonl` in the
-  session's directory, never into `approved.jsonl` or the account. Each line names the exchanges it is
-  about by id - every line of `approved.jsonl` carries the ids of its connection's exchanges - and says
-  whether it was observed or inferred. **Derived output uses at most half of `limits.output_mib`**, and
-  running out of it never stops the observer's own output.
+  configured directory, never into `approved.jsonl` or the account. Each line names the exchanges it is
+  about by session and id; each approved exchange line carries that id and its connection index.
+  It says whether the result was observed or inferred. Delivery is best effort: a bounded byte queue
+  drops when full, and write failures cost counted attempts without stopping monitoring.
 - **The account** counts, per extension, every exchange it was given and what became of it: changed,
   unchanged, failed by reason, or still pending; its restarts; and its derived lines written and refused.
   Every count is the observer's own; an extension cannot write into the account.

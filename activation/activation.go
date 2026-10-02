@@ -98,12 +98,8 @@ type Posture struct {
 	ParticipantsExited int `json:"participants_exited"`
 }
 
-// Capture is shared with the processing workers. Both capture
-// sinks write only to Intake. Gate is the one shared delivery and release gate,
-// used by every placement. Intake exhaustion stops input; it does not make
-// already-admitted work unreleasable and is not the gate's storage reason.
-// Closing Intake discards raw records; it never spills. The worker alone owns
-// approved durable output and its permanent refusal is the storage reason.
+// Capture shares volatile intake and the delivery gate with processing.
+// Intake exhaustion invalidates incomplete input; sink outcomes are separate.
 type Capture struct {
 	Recording *capture.Session
 	Intake    *intake.Store
@@ -116,25 +112,17 @@ type Capture struct {
 // int64. The product bounds accepted raw payload, not process memory. It builds
 // both volatile sinks and the shared gate, then verifies posture before returning
 // anything an attachment can use. It opens no durable file and attaches nothing.
-// writerExhausted must be the approved-output writer's non-nil sticky signal,
-// created before this call. A nil signal refuses as delivery_gate; an already
-// closed signal invalidates the new gate and refuses verification. The same
-// signal must be selected by the session controller. The intake's own signal is
-// wired to the gate here as a separate source with its own reason,
-// intake_exhausted: a refused record leaves capture's input incomplete, so
-// nothing still pending is released after it.
-func Prepare(read policy.Policy, participants []process.Process, maxEvents uint64, writerExhausted <-chan struct{}) (*Capture, error) {
+// Output failures cannot refuse activation. Intake exhaustion remains a gate
+// source.
+func Prepare(read policy.Policy, participants []process.Process, maxEvents uint64) (*Capture, error) {
 	if read.Processing == nil || read.ProcessingRevision == "" {
 		return nil, &Refusal{Check: ProcessingPlan, PID: os.Getpid(), Detail: "a compiler-produced processing plan and revision are required"}
-	}
-	if writerExhausted == nil {
-		return nil, &Refusal{Check: DeliveryGate, PID: os.Getpid(), Detail: "the approved-output writer's exhaustion signal is required"}
 	}
 	recording, store, err := RecordingIntake(maxEvents)
 	if err != nil {
 		return nil, &Refusal{Check: DeliveryGate, PID: os.Getpid(), Detail: err.Error()}
 	}
-	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: maxEvents, StorageExhausted: writerExhausted,
+	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: maxEvents,
 		IntakeExhausted: store.Exhausted()})
 	if err != nil {
 		_ = store.Close()

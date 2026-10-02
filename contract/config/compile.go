@@ -325,7 +325,7 @@ func mayMatch(a, b []string) bool {
 // check; a refusal there is the observer's defect.
 func generate(file File, m *merged) (*ProcessingPlan, []Finding) {
 	plan := &ProcessingPlan{resolved: Resolved{Observer: ResolvedObserver{
-		Log: file.Log, Directory: file.Output, ApprovedOutputBoundMiB: file.Limits.OutputMiB,
+		Log: file.Log, Directory: file.Output,
 		StateEverySeconds: file.Limits.StateEverySeconds, AdmittedEventLimit: file.Limits.Events,
 		Workers: file.Limits.Workers,
 	}}}

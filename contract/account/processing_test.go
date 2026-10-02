@@ -40,7 +40,7 @@ func TestProcessingAggregatePreservesDistinctFactsAndCaptureLoss(t *testing.T) {
 				counts.Considered, counts.Changed = 13, 13
 				facts := map[string]any{
 					"gate_reason": reason, "processing_failures": 3, "output_failures": 2,
-					"authorized": 11, "written": 5, "exchange_ids": 13, "extensions": []observed.ExtensionCounts{counts},
+					"authorized": 11, "written": 5, "delivery": map[string]any{"authorized": 11, "written": 5, "failed": 2, "dropped": 1, "pending": 3}, "exchange_ids": 13, "extensions": []observed.ExtensionCounts{counts},
 				}
 				encoded, err := json.Marshal(facts)
 				if err != nil {
@@ -69,7 +69,7 @@ func TestProcessingAggregatePreservesDistinctFactsAndCaptureLoss(t *testing.T) {
 				}
 				want := map[string]any{
 					"gate_reason": reason, "processing_failures": "3", "output_failures": "2",
-					"authorized": "11", "written": "5",
+					"authorized": "11", "written": "5", "delivery": map[string]any{"authorized": "11", "written": "5", "failed": "2", "dropped": "1", "pending": "3", "discarded": "0", "bytes": "0", "pending_bytes": "0", "high_water_bytes": "0", "limit_bytes": "0"},
 				}
 				if got["state"] != string(Carried) || !reflect.DeepEqual(got["aggregate"], want) {
 					t.Fatalf("ruled aggregate missing or dispositions conflated: %s", encoded)
@@ -102,5 +102,25 @@ func TestProcessingAggregatePreservesDistinctFactsAndCaptureLoss(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLogDestinationProjectionPreservesDistinctOutcomes(t *testing.T) {
+	source := filled(t, true)
+	source.LogDestinations = nil
+	raw := []byte(`{"file":{"authorized":7,"written":3,"failed":1,"dropped":2,"pending":1,"discarded":2,"bytes":17,"pending_bytes":19,"high_water_bytes":23,"limit_bytes":29},"stdout":{"authorized":11,"written":0,"failed":11,"dropped":0,"pending":0,"discarded":0,"bytes":0,"pending_bytes":0,"high_water_bytes":31,"limit_bytes":29}}`)
+	if err := json.Unmarshal(raw, &source.LogDestinations); err != nil {
+		t.Fatal(err)
+	}
+	projected, err := Project(source, NotSupplied())
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, ok := projected.LogDestinations["file"]
+	if !ok || len(projected.LogDestinations) != 2 || file.Authorized != "7" || file.Written != "3" || file.Failed != "1" || file.Dropped != "2" || file.Pending != "1" || file.Discarded != "2" || file.Bytes != "17" || file.PendingBytes != "19" || file.HighWaterBytes != "23" || file.LimitBytes != "29" {
+		t.Fatalf("file projection: %+v", projected.LogDestinations)
+	}
+	if out := projected.LogDestinations["stdout"]; out.Authorized != "11" || out.Written != "0" || out.Failed != "11" || out.HighWaterBytes != "31" {
+		t.Fatalf("stdout projection: %+v", out)
 	}
 }

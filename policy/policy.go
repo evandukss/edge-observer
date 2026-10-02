@@ -29,9 +29,6 @@ type Settings struct {
 	// Directory holds the pid file and one subdirectory per session.
 	Directory string
 
-	// ApprovedOutputBoundMiB bounds the aggregate approved durable output per session.
-	ApprovedOutputBoundMiB int64
-
 	// AdmittedEventLimit bounds decoded-event admission for this session.
 	// It is independent of approved output and is not a process-memory bound.
 	AdmittedEventLimit int64
@@ -101,12 +98,11 @@ func assemble(content []byte, file config.File, resolved config.ResolvedObserver
 		return Policy{}, findings
 	}
 	settings := Settings{
-		Log:                    resolved.Log,
-		Directory:              resolved.Directory,
-		ApprovedOutputBoundMiB: resolved.ApprovedOutputBoundMiB,
-		AdmittedEventLimit:     resolved.AdmittedEventLimit,
-		StateEvery:             time.Duration(resolved.StateEverySeconds) * time.Second,
-		Workers:                int(resolved.Workers),
+		Log:                resolved.Log,
+		Directory:          resolved.Directory,
+		AdmittedEventLimit: resolved.AdmittedEventLimit,
+		StateEvery:         time.Duration(resolved.StateEverySeconds) * time.Second,
+		Workers:            int(resolved.Workers),
 	}
 	sum := sha256.Sum256(content)
 	return Policy{Settings: settings, Approval: approval, Revision: "sha256:" + hex.EncodeToString(sum[:])}, nil

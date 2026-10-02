@@ -12,6 +12,7 @@ package account
 
 import (
 	"fmt"
+	"github.com/evandukss/edge-observer/sink"
 	"io"
 	"maps"
 	"slices"
@@ -209,11 +210,13 @@ type Refused struct {
 
 // Account is what the observer says about one session.
 type Account struct {
-	Version int       `json:"version"`
-	Kind    Kind      `json:"kind"`
-	Session string    `json:"session,omitempty"`
-	At      time.Time `json:"at"`
-	Policy  Policy    `json:"policy"`
+	LogDestinations map[string]sink.Stats `json:"log_destinations,omitempty"`
+	LogDelivery     *sink.Stats           `json:"log_delivery,omitempty"`
+	Version         int                   `json:"version"`
+	Kind            Kind                  `json:"kind"`
+	Session         string                `json:"session,omitempty"`
+	At              time.Time             `json:"at"`
+	Policy          Policy                `json:"policy"`
 
 	// Build is what this build can do; Floor the kernel it publishes.
 	Build probe.Capability `json:"build"`
@@ -293,7 +296,7 @@ var (
 		"too_large"}
 	ExtensionRetirementCauses = []string{"start_failed", "startup_timeout", "timeout", "crash", "protocol",
 		"oversized_frame", "unknown_id", "flood"}
-	DerivedRefusalReasons = []string{"malformed", "unknown_source", "rate", "queue_full", "budget", "stopped",
+	DerivedRefusalReasons = []string{"malformed", "unknown_source", "rate", "queue_full", "stopped",
 		"write_failed"}
 )
 
@@ -316,6 +319,7 @@ func NoCounts(name string) ExtensionCounts {
 // Unchanged + Failed + Pending; the maps hold every member of the protocol's
 // vocabularies.
 type ExtensionCounts struct {
+	Delivery         sink.Stats        `json:"delivery"`
 	Name             string            `json:"name"`
 	Considered       uint64            `json:"considered"`
 	Changed          uint64            `json:"changed"`
@@ -350,6 +354,7 @@ type ExtensionCounts struct {
 // worker outcome; the gate is read later.
 // Its presence identifies a session that does not create a raw spool.
 type Processing struct {
+	Delivery           sink.Stats       `json:"delivery"`
 	GateReason         probe.GateReason `json:"gate_reason"`
 	ProcessingFailures uint64           `json:"processing_failures"`
 	OutputFailures     uint64           `json:"output_failures"`
@@ -802,9 +807,13 @@ func Render(to io.Writer, a Account, local bool) {
 		say("joined     %d connection records, %d dropped at the bound, %d refused",
 			a.Spool.Connections, a.Spool.ConnectionsDropped, a.Spool.ConnectionsRefused)
 	}
+	if d := a.LogDelivery; d != nil {
+		say("log        %d authorized, %d written, %d failed, %d dropped, %d pending; %d discarded at shutdown", d.Authorized, d.Written, d.Failed, d.Dropped, d.Pending, d.Discarded)
+	}
 	if p := a.Processing; p != nil {
 		say("processed  %d route processing failures, %d output failures", p.ProcessingFailures, p.OutputFailures)
 		say("approved   %d route records authorized, %d written", p.Authorized, p.Written)
+		say("delivery   %d failed, %d dropped, %d pending; %d discarded at shutdown", p.Delivery.Failed, p.Delivery.Dropped, p.Delivery.Pending, p.Delivery.Discarded)
 		if p.GateReason != "" {
 			say("release    refused: %s", p.GateReason)
 		}

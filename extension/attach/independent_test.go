@@ -180,7 +180,7 @@ func independentLiveStart(t *testing.T, binary, peer, mode string, count int, tw
 	if two {
 		entries = append(entries, map[string]any{"name": "second", "command": []string{peer, "--mode", "record", "--record", f.second}, "fields": []string{"request.line"}, "timeout_ms": 1000})
 	}
-	document := map[string]any{"version": "observer.config/1", "output": filepath.Join(f.dir, "state"), "log": f.log, "watch": []any{map[string]any{"name": "client", "exe": exe, "args": f.client.Args[1:]}}, "extensions": entries, "remove": map[string]any{"headers": []string{"authorization"}}, "limits": map[string]any{"output_mib": 8, "state_every_seconds": 1}, "libraries": []any{}}
+	document := map[string]any{"version": "observer.config/1", "output": filepath.Join(f.dir, "state"), "log": f.log, "watch": []any{map[string]any{"name": "client", "exe": exe, "args": f.client.Args[1:]}}, "extensions": entries, "remove": map[string]any{"headers": []string{"authorization"}}, "limits": map[string]any{"state_every_seconds": 1}, "libraries": []any{}}
 	b, err := json.Marshal(document)
 	if err != nil {
 		t.Fatal(err)
@@ -569,13 +569,9 @@ func TestIndependentExtensionFloodsKeepCaptureAndMemoryBounded(t *testing.T) {
 							t.Errorf("seal not conserved: %+v", c)
 						}
 					}
-					paths, _ := filepath.Glob(filepath.Join(f.dir, "state", "sessions", "*", "approved.jsonl"))
-					if len(paths) != 1 {
-						t.Fatal("wiring, not the property: no approved file")
-					}
-					b, err := os.ReadFile(paths[0])
+					b, err := os.ReadFile(filepath.Join(f.dir, "state", processing.ArtifactName))
 					if err != nil {
-						t.Fatal(err)
+						t.Fatalf("wiring, not the property: no approved file: %v", err)
 					}
 					if bytes.Contains(b, []byte("private-fixture-value")) {
 						t.Error("removed content leaked")

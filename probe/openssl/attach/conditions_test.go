@@ -283,7 +283,7 @@ func TestTheThreeModesAnswerForOneGraphOfIndependentlyWitnessedProcesses(t *test
 			waitWitnessed(t, witness, pids, before, 3)
 			ended(t, observer, c)
 
-			by := observedBy(t, observer.directory(c))
+			by := observedBy(t, c.directory)
 			for role, want := range one.want {
 				if got := by[pids[role]] > 0; got != want {
 					t.Errorf("under %s, %s (pid %d) observed %v with %d records, want %v", one.mode, role,
@@ -325,7 +325,7 @@ func TestAllFourConditionsOnOneTargetSelectOnlyTheProcessMeetingEveryOne(t *test
 	waitWitnessed(t, witness, map[string]int32{"T": toServer.PID, "K": toControl.PID}, nil, 3)
 	ended(t, observer, c)
 
-	by := observedBy(t, observer.directory(c))
+	by := observedBy(t, c.directory)
 	if by[server.PID] == 0 {
 		t.Errorf("the process meeting all four conditions was not observed")
 	}
@@ -364,7 +364,7 @@ func TestAnExcludedProcessAndItsDescendantProduceNothingWhileAControlOutsideItDo
 	live := inspected(t, binary, c)
 	ended(t, observer, c)
 
-	by := observedBy(t, observer.directory(c))
+	by := observedBy(t, c.directory)
 	if by[control.PID] == 0 {
 		t.Fatalf("the control outside the subtree was not observed, so nothing below is evidence of a denial")
 	}
@@ -485,7 +485,7 @@ func TestACgroupTargetIsASnapshotAndTheObjectItResolvedToDecides(t *testing.T) {
 	waitWitnessed(t, witness, roles, before, 3)
 	ended(t, observer, c)
 
-	by := observedBy(t, observer.directory(c))
+	by := observedBy(t, c.directory)
 	for role, one := range map[string]struct {
 		pid  int32
 		want bool

@@ -251,6 +251,7 @@ type session struct {
 	stdout    []string
 	id        string
 	directory string
+	output    string
 	activated activationRecord
 }
 
@@ -276,7 +277,7 @@ func started(t *testing.T, binary, path, output string) *session {
 		t.Fatalf("start the observer: %v", err)
 	}
 	t.Cleanup(func() { _ = command.Process.Kill(); _ = command.Wait() })
-	s := &session{command: command, lines: bufio.NewScanner(out)}
+	s := &session{command: command, lines: bufio.NewScanner(out), output: output}
 	s.lines.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for s.lines.Scan() {
 		s.stdout = append(s.stdout, s.lines.Text())
@@ -356,7 +357,7 @@ func TestASessionRunsAnExtensionAfterItsActivationRecordAndAccountsForEveryExcha
 	}
 	document := map[string]any{
 		"version": config.FileVersion, "output": output, "log": log,
-		"limits":    map[string]any{"output_mib": 1, "state_every_seconds": 1},
+		"limits":    map[string]any{"state_every_seconds": 1},
 		"watch":     []any{map[string]any{"name": "client", "exe": c.process.Executable, "args": arguments, "children": config.ChildrenAll}},
 		"libraries": []any{},
 		"extensions": []any{map[string]any{"name": "recorder", "command": extensiontest.Command(self, does),
@@ -417,16 +418,15 @@ func TestASessionRunsAnExtensionAfterItsActivationRecordAndAccountsForEveryExcha
 	}
 
 	// The approved output: read back by the reader, every line with its id
-	// range, every written exchange with the extension's outcome.
+	// identity, every written exchange with the extension's outcome.
 	var exchanges, changed int
 	var issued uint64
-	err = processing.ReadArtifacts(os.DirFS(s.directory), func(a processing.Artifact) error {
-		if a.ExchangeIDs == nil {
-			return fmt.Errorf("connection %s's line carries no id range", a.Connection.ID)
-		}
-		if a.Route.Pipeline == config.ConnectionsPipeline {
-			n, _ := strconv.ParseUint(a.ExchangeIDs.Count, 10, 64)
-			issued += n
+	err = processing.ReadArtifactFiles(os.DirFS(s.output), []string{processing.ArtifactName}, s.id, func(a processing.Artifact) error {
+		if a.Record == processing.ArtifactExchange {
+			if n, err := strconv.ParseUint(a.ExchangeID, 10, 64); err != nil || n == 0 {
+				return fmt.Errorf("exchange has invalid id %q", a.ExchangeID)
+			}
+			issued++
 		}
 		if a.Reconstruction == nil {
 			return nil
@@ -456,7 +456,7 @@ func TestASessionRunsAnExtensionAfterItsActivationRecordAndAccountsForEveryExcha
 	}
 
 	// The derived file: the extension's own, 0600, stamped.
-	derivedPath := filepath.Join(s.directory, processing.DerivedName("recorder"))
+	derivedPath := filepath.Join(s.output, processing.DerivedName("recorder"))
 	info, err := os.Stat(derivedPath)
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("the derived file is missing or not 0600: %v %v", info, err)

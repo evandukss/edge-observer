@@ -7,6 +7,7 @@ package processing
 import (
 	"context"
 	"errors"
+	"github.com/evandukss/edge-observer/sink"
 
 	"github.com/evandukss/edge-observer/account"
 	"github.com/evandukss/edge-observer/connection"
@@ -19,21 +20,20 @@ import (
 )
 
 var (
-	ErrNotImplemented = errors.New("processing implementation is not installed")
-	ErrOptions        = errors.New("invalid processing options")
-	ErrFinished       = errors.New("processing worker is finished")
+	ErrOptions  = errors.New("invalid processing options")
+	ErrFinished = errors.New("processing worker is finished")
 )
 
-// Output is the approved write boundary. Implementations must not retain the
-// argument after returning. The concrete Writer enforces the disk allowance.
-// An error means this record was not delivered; no raw fallback is permitted.
-// Context cancellation cannot undo a write that already crossed the boundary.
+// Output is the nonblocking enqueue boundary for already processed lines.
+// Implementations transfer immutable bytes to a bounded queue or refuse them;
+// they must never perform sink I/O here. Writer implements that boundary.
+// Authorization cannot be recalled after enqueue by a later invalidation.
 type Output interface {
 	WriteApproved(context.Context, Approved) error
 }
 
 // Options is fixed before capture admission. Plan, Intake, Gate and Output must
-// be non-nil, and PolicyRevision must be nonempty. Plan must be produced by
+// be non-nil, and PolicyRevision and Session must be nonempty. Plan must be produced by
 // config.Compile; its detached views are taken once at construction.
 // No raw configuration, exclusion revalidation or policy resolution occurs here.
 // Limits uses reconstruct's defaults for zero fields; negative fields refuse.
@@ -58,14 +58,12 @@ type Options struct {
 	// hold one worker in it.
 	Taken func(worker int, process fragment.Process, connection fragment.ConnectionID)
 
-	// Session is the session id. Extensions are sent it in start, and it is
-	// stamped on every derived line. Required when Plan configures an
-	// extension.
+	// Session is stamped on every approved and derived line, and sent to
+	// extensions at start. A nonempty session id is required.
 	Session string
 	// Derived is the writer whose directory holds the extensions' derived
-	// files, derived-<name>.jsonl, and whose allowance they share with the
-	// approved output: derived lines take at most half of it, and a refused
-	// derived line never exhausts it for approved lines. Required when Plan
+	// files, derived-<name>.jsonl. They share its bounded queue with approved
+	// output, with no cumulative output or half-budget cap. Required when Plan
 	// configures an extension; usually the same Writer as Output.
 	Derived *Writer
 	// Clock is what extension supervision reads time from. Nil is
@@ -103,6 +101,7 @@ type Options struct {
 // when no complete candidate reached authorization. It is never permission;
 // an incomplete input can also have an independently counted processing failure.
 type Outcome struct {
+	Delivery           sink.Stats
 	Batches            uint64
 	Authorized         uint64
 	Written            uint64
@@ -167,7 +166,7 @@ func New(options Options) (*Worker, error) {
 }
 
 func (o Options) valid() bool {
-	if o.Plan == nil || o.Intake == nil || o.Gate == nil || o.Output == nil || o.PolicyRevision == "" || o.Workers < 0 {
+	if o.Plan == nil || o.Intake == nil || o.Gate == nil || o.Output == nil || o.PolicyRevision == "" || o.Session == "" || o.Workers < 0 {
 		return false
 	}
 	h, j := o.Limits.HTTP, o.Limits.JSON
@@ -323,6 +322,9 @@ func (w *Worker) snapshot() Outcome {
 	}
 	o.Pending = len(w.batches) + len(w.waiting)
 	o.ExchangeIDs = w.release.issued.Load()
+	if w.queue == nil {
+		o = deliveryOutcome(o, w.options.Output)
+	}
 	return o
 }
 
@@ -422,4 +424,12 @@ func (w *Worker) drain(ctx context.Context, final bool) error {
 	}
 	w.order = remaining
 	return nil
+}
+
+func deliveryOutcome(o Outcome, output Output) Outcome {
+	if writer, ok := output.(*Writer); ok {
+		o.Delivery = writer.DeliveryStats()
+		o.Authorized, o.Written, o.OutputFailures = o.Delivery.Authorized, o.Delivery.Written, o.Delivery.Failed
+	}
+	return o
 }

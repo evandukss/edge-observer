@@ -132,6 +132,7 @@ func (r *Run) Snapshot() Outcome {
 		o.GateReason = reason
 	}
 	o.Extensions = r.extensions.counts()
+	o = deliveryOutcome(o, r.options.Output)
 	return o
 }
 
@@ -165,6 +166,7 @@ func (r *Run) Finish(ctx context.Context, final Finalization) (Outcome, error) {
 	o, err := r.sumLocked(), r.err
 	r.mutex.Unlock()
 	o.Extensions = r.extensions.counts()
+	o = deliveryOutcome(o, r.options.Output)
 	return o, err
 }
 

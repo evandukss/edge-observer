@@ -84,21 +84,28 @@ func TestP3T9BCondition2PublicInspection(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			lines, exchanges := t20iOneRecordPerRoute(t, file)
-			wire := lines[exchanges]
+			lines, exchanges := p3t9bRoutes(t, file, p3t9bExchanges(name))
+			wire := lines[exchanges[0]]
 			var members map[string]json.RawMessage
 			if err := json.Unmarshal(wire, &members); err != nil {
 				t.Fatal(err)
 			}
 			if name == "legacy_absent" || name == "legacy_null" {
 				// An artifact written before the member existed lacks it on
-				// every record, the connection record included.
+				// every record, the connection record included. Only a
+				// historical version may lack it, so the records are made
+				// version 1 records: that version's label, and none of the
+				// members a later version added.
 				for i, line := range lines {
 					var each map[string]json.RawMessage
 					if err := json.Unmarshal(line, &each); err != nil {
 						t.Fatal(err)
 					}
 					delete(each, "policy_exclusions")
+					for _, later := range []string{"record", "session", "exchange_id", "index"} {
+						delete(each, later)
+					}
+					each["version"] = json.RawMessage(strconv.Quote(processing.ArtifactVersion1))
 					line, err = json.Marshal(each)
 					if err != nil {
 						t.Fatal(err)
@@ -119,7 +126,7 @@ func TestP3T9BCondition2PublicInspection(t *testing.T) {
 					}
 					lines[i] = line
 				}
-				wire = lines[exchanges]
+				wire = lines[exchanges[0]]
 				if err := os.WriteFile(path, append(bytes.Join(lines, []byte{'\n'}), '\n'), 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -172,13 +179,17 @@ func TestP3T9BCondition2PublicInspection(t *testing.T) {
 			if err != nil {
 				t.Fatalf("PUBLIC_READ: unexpected refusal: %v\n%s", err, out)
 			}
-			p3t9bAssertOutput(t, name, out, t20iExchangesSection(t, string(out)), persisted.PolicyRevision)
+			p3t9bAssertOutput(t, name, out, p3t9bSections(t, string(out), config.ExchangesPipeline, p3t9bExchanges(name)),
+				p3t9bSections(t, string(out), config.ConnectionsPipeline, 1)[0], persisted.PolicyRevision)
 		})
 	}
 }
 
-func p3t9bAssertOutput(t *testing.T, name string, out []byte, text string, revision string) {
+// p3t9bAssertOutput reads the public text: exchanges is each exchange
+// record's rendering in order, connection the retirement record's.
+func p3t9bAssertOutput(t *testing.T, name string, out []byte, exchanges []string, connection string, revision string) {
 	t.Helper()
+	text := exchanges[0]
 	// Check the whole public output, including account, diagnostics and the
 	// renderer's decoded body section. This is an explicit marker oracle, not
 	// an assertion that every possible encoding or unrelated value is covered.
@@ -251,8 +262,14 @@ func p3t9bAssertOutput(t *testing.T, name string, out []byte, text string, revis
 			t.Fatalf("NONE_EXCLUDED: known empty evidence misrepresented\n%s", out)
 		}
 	}
+	// Truncation evidence describes the connection's incomplete suffix, so it is
+	// on the retirement record; an exchange record holds one complete pair.
+	retired := p3t9bPublicArtifact(t, connection)
+	if a.ReconstructionTruncation != nil {
+		t.Fatalf("DECIDABLE_CONTROL: an exchange record carries truncation: %+v", a.ReconstructionTruncation)
+	}
 	if name == "suffix_withheld" {
-		trunc := a.ReconstructionTruncation
+		trunc := retired.ReconstructionTruncation
 		if trunc == nil || trunc.State != "truncated" || trunc.Suffix != "indeterminate" || len(trunc.Stops) != 1 {
 			t.Fatalf("SUFFIX_EVIDENCE: missing truncation: %+v", trunc)
 		}
@@ -260,15 +277,16 @@ func p3t9bAssertOutput(t *testing.T, name string, out []byte, text string, revis
 		if stop.Direction != "sent" || stop.Offset != strconv.Itoa(len(p3t9bRequest(""))) || stop.Reason != "incomplete_message" || stop.EvidenceOffset != strconv.Itoa(len(p3t9bRequest("")+p3t9bTail(false))) {
 			t.Fatalf("SUFFIX_EVIDENCE: wrong boundary: %+v", stop)
 		}
-		u := a.Reconstruction.Unplaced
-		if u.State != record.Undetermined || u.Unit != record.Bytes || u.Value != "" || u.Why != "reconstruction_truncated" || len(a.Reconstruction.Exchanges) != 1 {
-			t.Fatalf("SUFFIX_EVIDENCE: not a useful prefix with unknown remainder: %+v", a.Reconstruction)
+		if first.Request.Message.Target != "/retained" {
+			t.Fatalf("SUFFIX_EVIDENCE: the exchange record is not the useful prefix: %+v", first.Request.Message)
 		}
-	} else if a.ReconstructionTruncation != nil {
-		t.Fatalf("DECIDABLE_CONTROL: unexpected truncation: %+v", a.ReconstructionTruncation)
+	} else if retired.ReconstructionTruncation != nil {
+		t.Fatalf("DECIDABLE_CONTROL: unexpected truncation: %+v", retired.ReconstructionTruncation)
 	}
 	if name == "suffix_complete" {
-		if len(a.Reconstruction.Exchanges) != 2 || a.Reconstruction.Exchanges[1].Request.Message.Target != "/"+p3t9bSuffix || !strings.Contains(text, p3t9bSuffix) {
+		second := p3t9bPublicArtifact(t, exchanges[1])
+		if second.Reconstruction == nil || len(second.Reconstruction.Exchanges) != 1 ||
+			second.Reconstruction.Exchanges[0].Request.Message.Target != "/"+p3t9bSuffix || !strings.Contains(exchanges[1], p3t9bSuffix) {
 			t.Fatal("SUFFIX_CONTROL: completed suffix was not displayed")
 		}
 	}
@@ -321,15 +339,24 @@ func t20iRenderedCount(lines []string, e processing.PolicyExclusion) int {
 	return count
 }
 
-// t20iOneRecordPerRoute is the approved output's lines, which must be exactly
-// one exchanges record and one connections record by route.pipeline, and the
-// index of the exchanges one. A total would absorb a missing exchanges record
-// beside an extra connections record.
-func t20iOneRecordPerRoute(t *testing.T, file []byte) ([][]byte, int) {
+// p3t9bExchanges is how many exchange records a case makes: one per complete
+// pair, so two where the suffix completes.
+func p3t9bExchanges(name string) int {
+	if name == "suffix_complete" {
+		return 2
+	}
+	return 1
+}
+
+// p3t9bRoutes is the approved output's lines, which must be exactly want
+// exchanges records and one connections record by route.pipeline, and the
+// indexes of the exchanges ones. A total would absorb a missing exchanges
+// record beside an extra connections record.
+func p3t9bRoutes(t *testing.T, file []byte, want int) ([][]byte, []int) {
 	t.Helper()
 	var lines [][]byte
+	var exchanges []int
 	counts := map[string]int{}
-	exchanges := -1
 	for _, line := range bytes.Split(bytes.TrimSpace(file), []byte{'\n'}) {
 		if len(line) == 0 {
 			continue
@@ -344,24 +371,24 @@ func t20iOneRecordPerRoute(t *testing.T, file []byte) ([][]byte, int) {
 		}
 		counts[route.Route.Pipeline]++
 		if route.Route.Pipeline == config.ExchangesPipeline {
-			exchanges = len(lines)
+			exchanges = append(exchanges, len(lines))
 		}
 		lines = append(lines, line)
 	}
-	if counts[config.ExchangesPipeline] != 1 {
-		t.Fatalf("apparatus, not the property: the approved output holds %d exchanges records, want 1; records by route %v",
-			counts[config.ExchangesPipeline], counts)
+	if counts[config.ExchangesPipeline] != want {
+		t.Fatalf("apparatus, not the property: the approved output holds %d exchanges records, want %d; records by route %v",
+			counts[config.ExchangesPipeline], want, counts)
 	}
 	if counts[config.ConnectionsPipeline] != 1 || len(counts) != 2 {
-		t.Fatalf("apparatus: the approved output holds records by route %v, want one exchanges and one connections record", counts)
+		t.Fatalf("apparatus: the approved output holds records by route %v, want %d exchanges and one connections record",
+			counts, want)
 	}
 	return lines, exchanges
 }
 
-// t20iExchangesSection is the public text rendering of the exchanges record
-// alone: from its heading to the next record's heading or the end. The
-// connection record is rendered beside it with a disposition of its own.
-func t20iExchangesSection(t *testing.T, text string) string {
+// p3t9bSections is the public text rendering of each record of one route, in
+// order: from its heading to the next record's heading or the end.
+func p3t9bSections(t *testing.T, text, pipeline string, want int) []string {
 	t.Helper()
 	const heading = "approved artifact  version="
 	var sections []string
@@ -372,7 +399,7 @@ func t20iExchangesSection(t *testing.T, text string) string {
 			if in {
 				sections = append(sections, strings.Join(current, "\n"))
 			}
-			current, in = nil, strings.Contains(line, `pipeline="`+config.ExchangesPipeline+`"`)
+			current, in = nil, strings.Contains(line, `pipeline="`+pipeline+`"`)
 		}
 		if in {
 			current = append(current, line)
@@ -381,10 +408,11 @@ func t20iExchangesSection(t *testing.T, text string) string {
 	if in {
 		sections = append(sections, strings.Join(current, "\n"))
 	}
-	if len(sections) != 1 {
-		t.Fatalf("apparatus, not the property: the public text renders %d exchanges records, want 1\n%s", len(sections), text)
+	if len(sections) != want {
+		t.Fatalf("apparatus, not the property: the public text renders %d %s records, want %d\n%s", len(sections),
+			pipeline, want, text)
 	}
-	return sections[0]
+	return sections
 }
 
 func p3t9bAbsent(t *testing.T, assertion string, out []byte, value string) {
@@ -481,7 +509,7 @@ func p3t9bProduce(t *testing.T, destination, name string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t20iOneRecordPerRoute(t, written)
+	p3t9bRoutes(t, written, p3t9bExchanges(name))
 	for _, file := range []string{sealedName, processing.ArtifactName} {
 		data, err := os.ReadFile(filepath.Join(f.d.directory, file))
 		if err != nil {
@@ -491,7 +519,7 @@ func p3t9bProduce(t *testing.T, destination, name string) {
 			t.Fatal(err)
 		}
 	}
-	fmt.Printf("REACHED case=%s transfers=2 rejected=0 request_bytes=%d response_bytes=%d protected_input=%t suffix_input=%t exchanges_records=1 connections_records=1 sealed=true\n", name, len(request), len(response), strings.Contains(request, p3t9bSecret), strings.Contains(request, p3t9bSuffix))
+	fmt.Printf("REACHED case=%s transfers=2 rejected=0 request_bytes=%d response_bytes=%d protected_input=%t suffix_input=%t exchanges_records=%d connections_records=1 sealed=true\n", name, len(request), len(response), strings.Contains(request, p3t9bSecret), strings.Contains(request, p3t9bSuffix), p3t9bExchanges(name))
 }
 
 func p3t9bConfiguration(t *testing.T, implementation, arguments string) []byte {
@@ -553,14 +581,14 @@ func p3t9bController(t *testing.T, configuration []byte) *processingControllerFi
 	if err != nil {
 		t.Fatal(err)
 	}
-	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 100, StorageExhausted: output.Exhausted()})
+	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
 	f := &processingControllerFixture{stop: make(chan os.Signal, 1), done: make(chan struct{})}
 	f.producer = &processingProducer{withdrawn: true, drained: true, stamp: &f.stamp}
 	f.d = &daemon{policy: read, session: "condition2", directory: directory, capture: recording,
-		intake: store, gate: gate, output: output, storageExhausted: output.Exhausted(), attached: f.producer,
+		intake: store, gate: gate, output: output, attached: f.producer,
 		plan: account.Account{Version: account.Version, Session: "condition2", Policy: account.Policy{Revision: read.Revision, Generation: 1}},
 	}
 	go func() { f.d.serveUntilStop(f.stop, nil, nil, nil, nil, account.Account{}); close(f.done) }()

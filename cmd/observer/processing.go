@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"strconv"
 	"sync"
 	"time"
@@ -47,8 +46,8 @@ func (d *daemon) startProcessing() <-chan struct{} {
 		return nil
 	}
 	// Extensions start here, after the capabilities were given up and after
-	// the activation record listing them was written, so none receives data
-	// before that record exists.
+	// the activation record listing them was enqueued. Log delivery is best
+	// effort and cannot prevent monitoring.
 	opts := processing.Options{Plan: d.policy.Processing, PolicyRevision: d.policy.ProcessingRevision,
 		Intake: d.intake, Gate: d.gate, Output: d.output, Workers: d.policy.Settings.Workers, Taken: d.processingTaken,
 		Session: d.session, Derived: d.output, Supervision: d.extensionLogged}
@@ -85,7 +84,7 @@ func (r *processingRun) serve(output *processing.Writer) {
 			if r.run != nil {
 				_, err = r.run.Finish(context.Background(), facts)
 			}
-			err = errors.Join(err, output.Close())
+			_ = output.Close()
 			r.record(r.run != nil, err)
 			return
 		case <-failed:
@@ -120,6 +119,9 @@ func (d *daemon) processingSnapshot() *account.Processing {
 		state.Authorized, state.Written = outcome.Authorized, outcome.Written
 		state.ExchangeIDs, state.Extensions = outcome.ExchangeIDs, outcome.Extensions
 	}
+	delivery := d.output.DeliveryStats()
+	state.Authorized, state.Written, state.OutputFailures = delivery.Authorized, delivery.Written, delivery.Failed
+	state.Delivery = delivery
 	state.GateReason = d.gate.Snapshot().Reason
 	if state.Extensions == nil {
 		state.Extensions = []account.ExtensionCounts{}

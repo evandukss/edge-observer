@@ -50,7 +50,7 @@ func TestP3T9StorageRefusalOrdersHeldAuthorization(t *testing.T) {
 					unblock := func() { once.Do(func() { close(release) }) }
 					defer unblock()
 					g, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{
-						MaxEvents: 16, StorageExhausted: s.Exhausted(),
+						MaxEvents: 16, IntakeExhausted: s.Exhausted(),
 						BeforeAuthorize: func() {
 							if hold.Load() {
 								close(entered)
@@ -150,14 +150,14 @@ func TestP3T9StorageRefusalOrdersHeldAuthorization(t *testing.T) {
 					}
 					want := probe.GateReason("")
 					if exhaust {
-						want = probe.GateStorageExhausted
+						want = probe.GateIntakeExhausted
 					}
 					// In the other branch, NO gate call occurs between the actual
 					// refusal above and the held Authorize resuming below. Calling
 					// Snapshot here would mask a missing Authorize observation.
 					if controller {
 						consumed := make(chan probe.GateSnapshot, 1)
-						go func() { consumed <- g.ConsumeStorageExhaustion() }()
+						go func() { consumed <- g.Snapshot() }()
 						select {
 						case state := <-consumed:
 							if state.Reason != want || state.Charged != 2 {

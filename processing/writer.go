@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
-	"os"
+	"github.com/evandukss/edge-observer/sink"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/contract/record"
@@ -19,7 +19,8 @@ const (
 	// ArtifactVersion is what the worker writes. The reader also reads
 	// ArtifactVersion1, under that version's rules; a reader of version 1
 	// alone refuses a version 2 artifact.
-	ArtifactVersion  = "observer.approved/2"
+	ArtifactVersion  = ArtifactVersion3
+	ArtifactVersion2 = "observer.approved/2"
 	ArtifactVersion1 = "observer.approved/1"
 )
 
@@ -42,9 +43,16 @@ const (
 )
 
 var (
-	ErrOutputLimit  = errors.New("approved output storage limit reached")
 	ErrUnapproved   = errors.New("record has no release authorization")
 	ErrOutputClosed = errors.New("approved output is closed")
+)
+
+// ArtifactVersion3 identifies one exchange per line, or a retirement line.
+const ArtifactVersion3 = "observer.approved/3"
+
+const (
+	ArtifactExchange   = "exchange"
+	ArtifactConnection = "connection"
 )
 
 // Artifact is one JSON line, followed by LF, in approved.jsonl. All pipelines
@@ -54,12 +62,9 @@ var (
 // Reconstruction is present only on reconstruction routes and contains only
 // processed, decidable exchanges. Its published Body.Kept is base64 payload,
 // and headers/trailers retain permitted values. Connection routes omit it.
-// ReconstructionTruncation accompanies a retained prefix whose suffix could
-// not be established. On those records Reconstruction.Unplaced is undetermined,
-// has no numeric value, and gives reconstruction_truncated as its reason. A
-// reader must retain both facts; a complete exchange is not a complete stream.
-// Connection routes omit both reconstruction fields. Untruncated reconstructions
-// omit ReconstructionTruncation; that omission never asserts a transport close.
+// ReconstructionTruncation is carried on the retirement line, describing an
+// incomplete suffix independently of the connection's ending. Exchange lines
+// carry one complete pair; they never assert that a whole stream is complete.
 // PolicyExclusions names actual removals by policy in retained messages,
 // independently for this pipeline. New artifacts always carry an array: empty
 // means no field was removed from the published population, including metadata
@@ -72,6 +77,11 @@ var (
 // No raw observation, undecidable tail, or source copy accompanies this line.
 // A reader decodes this shape directly and must not re-run local policy.
 type Artifact struct {
+	Record     string `json:"record,omitempty"`
+	Session    string `json:"session,omitempty"`
+	ExchangeID string `json:"exchange_id,omitempty"`
+	Index      *int   `json:"index,omitempty"`
+
 	Version                  string                    `json:"version"`
 	PolicyRevision           string                    `json:"policy_revision"`
 	Route                    config.DurableRoute       `json:"route"`
@@ -79,8 +89,8 @@ type Artifact struct {
 	Reconstruction           *record.Reconstruction    `json:"reconstruction,omitempty"`
 	ReconstructionTruncation *ReconstructionTruncation `json:"reconstruction_truncation,omitempty"`
 	PolicyExclusions         []PolicyExclusion         `json:"policy_exclusions"`
-	// ExchangeIDs is the range of exchange ids issued to this connection's
-	// exchanges, on every route. Version 1 artifacts have none.
+	// ExchangeIDs is historical version 2 data. Version 3 uses ExchangeID
+	// on each exchange line; versions 1 and 3 have no range.
 	ExchangeIDs *IDRange `json:"exchange_ids,omitempty"`
 	// ExtensionOutcomes is, per retained exchange and configured extension in
 	// the order they ran, what the extension did to it. Empty with no
@@ -211,196 +221,100 @@ type Approved struct{ line []byte }
 // output boundary or inspection test. Mutating it cannot alter the approved data.
 func (a Approved) Bytes() []byte { return append([]byte(nil), a.line...) }
 
-// WriterStats counts encoded disk bytes, including LF and JSON/base64 overhead.
-// Written counts complete lines. Bytes includes a partial failed write; a partial
-// write is an output failure and permanently stops the writer, never a delivery.
-// Exhausted reports a permanent write refusal, whether from the byte allowance
-// or a terminal I/O failure. It is not a count of successful writes.
+// WriterStats describes best-effort attempts for one session. LimitBytes is
+// the retained queue bound, never a total disk allowance. Bytes includes partial
+// failed writes.
 type WriterStats struct {
-	LimitBytes int64
-	Bytes      int64
-	// DerivedBytes is what the extensions' derived files hold, which shares
-	// LimitBytes: at most half of it, and never so much that Bytes and
-	// DerivedBytes together pass it.
-	DerivedBytes int64
-	Written      uint64
-	Refused      uint64
-	Exhausted    bool
-	Closed       bool
+	LimitBytes     int64
+	Bytes          int64
+	DerivedBytes   int64
+	Written        uint64
+	Refused        uint64
+	Closed         bool
+	Authorized     uint64
+	Failed         uint64
+	Dropped        uint64
+	Pending        uint64
+	Discarded      uint64
+	PendingBytes   int64
+	HighWaterBytes int64
 }
 
-// Writer owns the aggregate approved-output allowance for one session. Every
-// route and both record types share it, in encoded bytes in approved.jsonl.
-// There are no other payload files, spill files or temporary output files.
-// The session account files are metadata owned by the controller and outside
-// this allowance, as they were outside the legacy spool's two-file allowance.
-// The controller passes the resolved ApprovedOutputBoundMiB converted to bytes; this is
-// independent of volatile intake accounting and is not a heap budget.
-//
-// A line exceeding the remaining allowance is refused whole with ErrOutputLimit
-// before writing any of it. Exhaustion is sticky, including after Close. No
-// eviction, rotation, refund or overwrite makes room. Previously written lines
-// stay usable. Output failure never retries or falls back to source bytes.
-// The private file is an io.WriteCloser so tests can force partial writes and
-// I/O errors deterministically. Open always supplies the exclusively created
-// *os.File; this seam does not add a public output-injection API.
 type Writer struct {
 	mutex     sync.Mutex
 	directory string
-	file      io.WriteCloser
-	stats     WriterStats
-	exhausted chan struct{}
-	failed    bool
+	queue     *sink.Queue
+	factory   sink.Factory
+	closed    bool
+	derived   []string
 }
 
-// Open requires nonempty dir and positive limitBytes. Relative and absolute
-// directory paths are accepted. Parents may already exist; missing directories
-// are created with mode 0700. approved.jsonl is created exclusively with mode
-// 0600: any existing entry (including a symlink) refuses activation. No append
-// or resume is supported. Parent symlinks follow ordinary filesystem resolution.
-func Open(dir string, limitBytes int64) (*Writer, error) {
-	if dir == "" || limitBytes <= 0 {
-		return nil, ErrOptions
-	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return nil, errors.New("create approved output directory")
-	}
-	f, err := os.OpenFile(filepath.Join(dir, ArtifactName), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		return nil, errors.New("create fresh approved output file")
-	}
-	return &Writer{directory: dir, file: f, stats: WriterStats{LimitBytes: limitBytes}, exhausted: make(chan struct{})}, nil
+// Open opens stable output with a bound on queued and in-flight bytes.
+// An unavailable destination is a failed attempt when a line reaches it,
+// never a construction error. Use Reopen to recover it.
+func Open(dir string, queueBytes int64) (*Writer, error) {
+	return OpenWriter(WriterOptions{Directory: dir, QueueBytes: queueBytes})
 }
-
 func (w *Writer) WriteApproved(ctx context.Context, result Approved) error {
-	if w == nil {
+	if w == nil || w.queue == nil {
 		return ErrOutputClosed
-	}
-	w.mutex.Lock()
-	defer w.mutex.Unlock()
-	if w.file == nil || w.failed {
-		return ErrOutputClosed
-	}
-	if w.stats.Exhausted {
-		w.stats.Refused++
-		return ErrOutputLimit
 	}
 	if len(result.line) == 0 {
-		w.stats.Refused++
 		return ErrUnapproved
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// Subtraction prevents overflow. Every byte passed to Write fits the same
-	// allowance, even if the filesystem accepts only part of this line, and
-	// derived output holds part of it.
-	if int64(len(result.line)) > w.stats.LimitBytes-w.stats.Bytes-w.stats.DerivedBytes {
-		w.stats.Refused++
-		w.stats.Exhausted = true
-		close(w.exhausted)
-		return ErrOutputLimit
-	}
-	n, err := w.file.Write(result.line)
-	w.stats.Bytes += int64(n)
-	if err != nil || n != len(result.line) {
-		w.failed = true
-		w.stats.Exhausted = true
-		// The mutex serializes all attempts. failed refuses every later call
-		// before either closure site; byte exhaustion also returns before I/O.
-		close(w.exhausted)
-		if err == nil {
-			return io.ErrShortWrite
-		}
-		return errors.New("write approved output failed")
-	}
-	w.stats.Written++
-	return nil
+	return w.queue.Enqueue(ArtifactName, result.line)
 }
-
-// Exhausted closes on permanent write refusal, with no receiver required: this
-// owner can no longer write. Byte-limit refusal, an I/O error and a short write
-// all close it; cancellation before I/O leaves it open and permits a later call.
-// The signal is sticky, including after Close. The controller consumes it to
-// withdraw capture. Nil/zero writers are unusable and expose a closed signal.
-// A writer error is reported independently of gate permission: permission never
-// asserts that output succeeded.
-func (w *Writer) Exhausted() <-chan struct{} {
-	if w == nil || w.exhausted == nil {
-		return unusableWriter
-	}
-	return w.exhausted
-}
-
-var unusableWriter = func() <-chan struct{} { c := make(chan struct{}); close(c); return c }()
 
 func (w *Writer) Stats() WriterStats {
 	if w == nil {
 		return WriterStats{Closed: true}
 	}
+	approved, all := w.DeliveryStats(), w.queue.Stats()
 	w.mutex.Lock()
-	defer w.mutex.Unlock()
-	return w.stats
+	closed := w.closed
+	var derivedBytes int64
+	for _, route := range w.derived {
+		derivedBytes += w.queue.DestinationStats(route).Bytes
+	}
+	w.mutex.Unlock()
+	return WriterStats{LimitBytes: all.LimitBytes, Bytes: approved.Bytes, DerivedBytes: derivedBytes,
+		Written: approved.Written, Refused: approved.Dropped, Closed: closed, Authorized: approved.Authorized,
+		Failed: approved.Failed, Dropped: approved.Dropped, Pending: approved.Pending, Discarded: approved.Discarded,
+		PendingBytes: all.PendingBytes, HighWaterBytes: all.HighWaterBytes}
 }
-
-// DerivedName is the derived file of the extension named name.
 func DerivedName(name string) string { return "derived-" + name + ".jsonl" }
-
-// openDerived creates the derived file of the extension named name beside
-// approved.jsonl, exclusively, with mode 0600. The name is the configuration's
-// validated extension name, which cannot leave the directory.
 func (w *Writer) openDerived(name string) (*derivedFile, error) {
-	if w == nil || w.directory == "" {
+	if w == nil || !config.ExtensionName.MatchString(name) {
 		return nil, ErrOptions
 	}
-	f, err := os.OpenFile(filepath.Join(w.directory, DerivedName(name)), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, errors.New("create fresh derived output file")
-	}
-	return &derivedFile{writer: w, file: f}, nil
-}
-
-// writeDerived writes one derived line of n bytes only where D + n <= M/2 and
-// C + D + n <= M, with M the allowance, C the approved bytes and D the derived
-// bytes, and returns "" or why it did not. A refusal never exhausts the
-// approved output; an exhausted or closed approved output stops derived
-// output too.
-func (w *Writer) writeDerived(f *derivedFile, line []byte) string {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
-	if w.file == nil || w.failed || w.stats.Exhausted || f.file == nil {
+	if w.closed {
+		return nil, ErrOutputClosed
+	}
+	route := DerivedName(name)
+	if err := w.queue.Register(route, w.factory(filepath.Join(w.directory, route))); err != nil {
+		return nil, err
+	}
+	w.derived = append(w.derived, route)
+	return &derivedFile{writer: w, name: route}, nil
+}
+func (w *Writer) writeDerived(f *derivedFile, line []byte) string {
+	err := w.queue.Enqueue(f.name, line)
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, sink.ErrQueueFull):
+		return extension.DerivedQueueFull
+	default:
 		return extension.DerivedStopped
 	}
-	if f.failed {
-		return extension.DerivedWriteFailed
-	}
-	n, limit := int64(len(line)), w.stats.LimitBytes
-	if n > limit/2-w.stats.DerivedBytes || n > limit-w.stats.Bytes-w.stats.DerivedBytes {
-		return extension.DerivedBudget
-	}
-	written, err := f.file.Write(line)
-	w.stats.DerivedBytes += int64(written)
-	if err != nil || written != len(line) {
-		f.failed = true
-		return extension.DerivedWriteFailed
-	}
-	return ""
 }
-
 func (w *Writer) Close() error {
-	if w == nil {
-		return nil
-	}
-	w.mutex.Lock()
-	defer w.mutex.Unlock()
-	w.stats.Closed = true
-	if w.file == nil {
-		return nil
-	}
-	f := w.file
-	w.file = nil
-	if err := f.Close(); err != nil {
-		return errors.New("close approved output failed")
-	}
-	return nil
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	return w.Shutdown(ctx)
 }

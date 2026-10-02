@@ -33,9 +33,9 @@ type Config struct {
 	// Issued is how many exchange ids the session has issued so far, so a
 	// derived record's source is valid when it is at most this.
 	Issued func() uint64
-	// Derived writes one stamped derived line, line feed included, and
-	// returns "" or the reason it was refused: DerivedBudget, DerivedStopped
-	// or DerivedWriteFailed.
+	// Derived enqueues one stamped line, including LF. It returns an empty
+	// string on acceptance or a refusal reason such as DerivedQueueFull or
+	// DerivedStopped. Acceptance is not evidence of sink completion.
 	Derived func(line []byte) string
 }
 
@@ -79,7 +79,7 @@ type Counts struct {
 // RetirementCauses and DerivedRefusals are the vocabularies Counts is kept by.
 var (
 	RetirementCauses = []string{StartFailed, StartupTimeout, Timeout, Crash, ProtocolError, OversizedFrame, UnknownID, Flood}
-	DerivedRefusals  = []string{DerivedMalformed, DerivedUnknownSource, DerivedRate, DerivedQueueFull, DerivedBudget,
+	DerivedRefusals  = []string{DerivedMalformed, DerivedUnknownSource, DerivedRate, DerivedQueueFull,
 		DerivedStopped, DerivedWriteFailed}
 )
 

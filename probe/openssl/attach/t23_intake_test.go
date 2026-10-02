@@ -243,7 +243,7 @@ func TestAFullVolatileIntakeIsStatedAsIntakeExhaustedBesideTheRecordsItRefused(t
 		if err := json.Unmarshal(raw, &sealed); err != nil {
 			t.Fatalf("decode the sealed account: %v", err)
 		}
-		if n := t23Retained(t, directory, server.PID, "t23-intake-control"); n != 1 {
+		if n := t23Retained(t, c.directory, server.PID, "t23-intake-control"); n != 1 {
 			t.Fatalf("wiring, not the property: the control exchange is retained %d times, so the session did not "+
 				"capture and its silence says nothing", n)
 		}

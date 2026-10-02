@@ -1,8 +1,6 @@
 package extension_test
 
 import (
-	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,11 +11,9 @@ import (
 
 	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/extension"
-	"github.com/evandukss/edge-observer/fragment"
 	"github.com/evandukss/edge-observer/intake"
 	"github.com/evandukss/edge-observer/internal/extensiontest"
 	"github.com/evandukss/edge-observer/internal/workload"
-	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/processing"
 )
 
@@ -278,7 +274,7 @@ func TestOtherConnectionsAreWrittenWhileOneWaitsOnAnExtension(t *testing.T) {
 	s := startedWith(t, plan, 1<<26, nil, 1).ready(t, plan)
 	w := generate(t, workload.Shape{Connections: 2, Exchanges: 2, Seed: 10})
 	s.feed(t, w)
-	s.waitFor(t, "the second connection's lines", func(o processing.Outcome) bool { return o.Written == 2 })
+	s.waitFor(t, "the second connection's lines", func(o processing.Outcome) bool { return o.Written == 3 })
 	if o := s.run.Snapshot(); o.Extensions[0].Pending != 2 || o.Pending != 1 {
 		t.Fatalf("wiring, not the property: the first connection is not waiting on the extension: %+v", o)
 	}
@@ -292,172 +288,12 @@ func TestOtherConnectionsAreWrittenWhileOneWaitsOnAnExtension(t *testing.T) {
 		t.Fatal(err)
 	}
 	o := s.finish(t)
-	if o.Written != 4 {
-		t.Fatalf("written %d lines, want both connections' 4", o.Written)
+	if o.Written != 6 {
+		t.Fatalf("written %d lines, want both connections' 6", o.Written)
 	}
 	conserved(t, o)
 }
 
-// The observer's own lines and derived lines share the allowance: once
-// derived output holds part of it, the observer's own output is refused where
-// its next line would take the two together over the allowance, not where
-// its own bytes alone would.
-func TestTheObserversOwnOutputStopsWhereItAndDerivedOutputFillTheAllowance(t *testing.T) {
-	const allowance = 200_000
-	sizes := filepath.Join(t.TempDir(), "derived-size")
-	if err := os.WriteFile(sizes, []byte("90000"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	plan := planOf(t, "", entry{name: "emitter", fields: []string{config.FieldRequestLine},
-		does: extensiontest.Config{DerivedSizeFile: sizes}})
-	s := started(t, plan, allowance, nil).ready(t, plan)
-	w := generate(t, workload.Shape{Connections: 200, Exchanges: 1, ResponseBodyBytes: 3000, Seed: 13})
-	byConnection := map[fragment.ConnectionID]*workload.Workload{}
-	for _, e := range w.Entries {
-		id := fragment.ConnectionID(0)
-		if e.Fragment != nil {
-			id = e.Fragment.Connection
-		} else {
-			id = e.Connection.ID
-		}
-		if byConnection[id] == nil {
-			byConnection[id] = &workload.Workload{}
-		}
-		byConnection[id].Entries = append(byConnection[id].Entries, e)
-	}
-	// The first connection's exchange makes the derived line; the rest are
-	// fed once it is written.
-	s.feed(t, byConnection[w.Connections[0].ID])
-	s.waitFor(t, "the derived line", func(o processing.Outcome) bool {
-		return len(o.Extensions) == 1 && o.Extensions[0].DerivedWritten == 1
-	})
-	for _, c := range w.Connections[1:] {
-		s.feed(t, byConnection[c.ID])
-	}
-	select {
-	case <-s.run.Failed():
-	case <-time.After(30 * time.Second):
-		t.Fatal("the observer's own output was never refused")
-	}
-	stats := s.writer.Stats()
-	if stats.DerivedBytes < 90_000 || !stats.Exhausted {
-		t.Fatalf("wiring, not the property: derived bytes %d, exhausted %v", stats.DerivedBytes, stats.Exhausted)
-	}
-	if stats.Bytes+stats.DerivedBytes > allowance {
-		t.Fatalf("approved %d and derived %d bytes together are over the %d byte allowance", stats.Bytes,
-			stats.DerivedBytes, allowance)
-	}
-	if stats.Bytes > allowance-stats.DerivedBytes || stats.Bytes < allowance-stats.DerivedBytes-20_000 {
-		t.Fatalf("the observer's own output stopped at %d bytes, beside %d derived, of %d", stats.Bytes,
-			stats.DerivedBytes, allowance)
-	}
-}
-
-// Derived output obeys the session's release gate: once the gate has
-// stopped the session's output, a derived record is refused as stopped.
-func TestDerivedOutputStopsWithTheSessionsOutput(t *testing.T) {
-	sizes := filepath.Join(t.TempDir(), "derived-size")
-	if err := os.WriteFile(sizes, []byte("100"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	plan := planOf(t, "", entry{name: "emitter", fields: []string{config.FieldRequestLine},
-		does: extensiontest.Config{DerivedSizeFile: sizes}})
-	w := generate(t, workload.Shape{Connections: 1, Exchanges: 1, Seed: 11})
-	store, err := intake.New(1 << 20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if n, err := w.Write(store); err != nil || n != len(w.Entries) {
-		t.Fatalf("wiring, not the property: %v", err)
-	}
-	// One record over what is left refuses capture's input, which stops the
-	// session's output at the gate.
-	if err := store.Write(fragment.Record{Payload: make([]byte, 2<<20)}); err == nil {
-		t.Fatal("wiring, not the property: the intake took a record over its allowance")
-	}
-	s := startedOn(t, plan, 1<<26, nil, 2, store).ready(t, plan)
-	s.run.Route()
-	o := s.waitFor(t, "the derived record's refusal", func(o processing.Outcome) bool {
-		return len(o.Extensions) == 1 && o.Extensions[0].DerivedRefused == 1
-	})
-	if c := o.Extensions[0]; c.DerivedRefusedBy[extension.DerivedStopped] != 1 || c.DerivedWritten != 0 {
-		t.Fatalf("refused by %v, written %d; want one refusal as %s", c.DerivedRefusedBy, c.DerivedWritten,
-			extension.DerivedStopped)
-	}
-	if o.Written != 0 || o.GateReason == "" {
-		t.Fatalf("wiring, not the property: the gate did not stop the output: %+v", o)
-	}
-}
-
-// An extension's derived file is created fresh: one already there refuses
-// the run rather than being written into.
-func TestADerivedFileAlreadyThereRefusesTheRun(t *testing.T) {
-	plan := planOf(t, "", entry{name: "fresh", fields: []string{config.FieldRequestLine}})
-	directory := t.TempDir()
-	writer, err := processing.Open(directory, 1<<20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = writer.Close() })
-	if err := os.WriteFile(filepath.Join(directory, processing.DerivedName("fresh")), []byte("left\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	store, _ := intake.New(1 << 20)
-	t.Cleanup(func() { _ = store.Close() })
-	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 1 << 40, IntakeExhausted: store.Exhausted()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	run, err := processing.Start(processing.Options{Plan: plan, PolicyRevision: "sha256:t", Intake: store, Gate: gate,
-		Output: writer, Derived: writer, Session: "s"})
-	if err == nil {
-		_ = run.Close()
-		t.Fatal("a run started over a derived file already there")
-	}
-	content, _ := os.ReadFile(filepath.Join(directory, processing.DerivedName("fresh")))
-	if string(content) != "left\n" {
-		t.Fatalf("the file already there was changed: %q", content)
-	}
-}
-
-// A derived line longer than half the allowance is refused for the budget
-// while the allowance as a whole has room for it.
-func TestADerivedLineOverHalfTheAllowanceIsRefusedForBudget(t *testing.T) {
-	const allowance = 400_000
-	sizes := filepath.Join(t.TempDir(), "derived-size")
-	if err := os.WriteFile(sizes, []byte(fmt.Sprint(allowance/2)), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	plan := planOf(t, "", entry{name: "emitter", fields: []string{config.FieldRequestLine},
-		does: extensiontest.Config{DerivedSizeFile: sizes}})
-	s := started(t, plan, allowance, nil).ready(t, plan)
-	s.feed(t, generate(t, workload.Shape{Connections: 1, Exchanges: 1, Seed: 12}))
-	o := s.finish(t)
-	core, err := os.Stat(filepath.Join(s.directory, processing.ArtifactName))
-	if err != nil || core.Size()+allowance/2+1024 > allowance {
-		t.Fatalf("wiring, not the property: the approved output's %v bytes leave no room under the whole "+
-			"allowance, so a refusal would not separate the two clauses: %v", core.Size(), err)
-	}
-	c := counts(t, o, "emitter")
-	if c.DerivedRefusedBy[extension.DerivedBudget] != 1 || c.DerivedWritten != 0 {
-		t.Fatalf("a %d byte derived line under a %d byte allowance: written %d, refused by %v", allowance/2,
-			allowance, c.DerivedWritten, c.DerivedRefusedBy)
-	}
-	var lines []json.RawMessage
-	content, _ := os.ReadFile(filepath.Join(s.directory, processing.DerivedName("emitter")))
-	for _, line := range strings.Split(strings.TrimSpace(string(content)), "\n") {
-		if line != "" {
-			lines = append(lines, json.RawMessage(line))
-		}
-	}
-	if len(lines) != 0 || o.Written != 2 {
-		t.Fatalf("%d derived lines written, %d approved; want none and both", len(lines), o.Written)
-	}
-}
-
-// A command that cannot be run when its generation starts is retired as
-// start_failed, not as a crash, and the next attempt waits the backoff.
 func TestACommandThatCannotStartIsRetiredAsStartFailed(t *testing.T) {
 	clock := extensiontest.NewManual(time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC))
 	directory := t.TempDir()

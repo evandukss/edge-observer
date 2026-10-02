@@ -190,7 +190,7 @@ func p3t9ProtectedWithIntakeLimit(t *testing.T, maxEvents uint64, intakeBytes in
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	g, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: maxEvents, StorageExhausted: s.Exhausted(), BeforeAuthorize: hook})
+	g, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: maxEvents, IntakeExhausted: s.Exhausted(), BeforeAuthorize: hook})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func p3t9ProtectedWithIntakeLimit(t *testing.T, maxEvents uint64, intakeBytes in
 	}
 	t.Cleanup(func() { _ = w.Close() })
 	b := &p3t9ApprovedBoundary{writer: w}
-	worker, err := processing.New(processing.Options{Plan: plan, PolicyRevision: "p3t9-policy", Intake: s, Gate: g, Output: b})
+	worker, err := processing.New(processing.Options{Plan: plan, PolicyRevision: "p3t9-policy", Session: "p3t9-session", Intake: s, Gate: g, Output: b})
 	if err != nil {
 		t.Fatalf("real worker unavailable; protected property NOT reached: %v", err)
 	}
@@ -283,11 +283,28 @@ func (f *p3t9ProtectedCapture) finish() processing.Outcome {
 	return o
 }
 
+// delivered waits until the approved writer has finished with every line
+// handed to it: delivery is asynchronous to the worker's handing.
+func (f *p3t9ProtectedCapture) delivered() {
+	f.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := f.boundary.writer.Drain(ctx); err != nil {
+		f.t.Fatalf("the approved writer did not finish the lines handed to it: %v", err)
+	}
+}
+
 func (f *p3t9ProtectedCapture) artifacts(want int) ([]processing.Artifact, []byte) {
 	f.t.Helper()
+	f.delivered()
 	entries, err := os.ReadDir(f.dir)
 	if err != nil {
 		f.t.Fatal(err)
+	}
+	// The stable approved file is opened by its sink, which may not have
+	// created it where nothing was ever written.
+	if len(entries) == 0 && want == 0 && f.boundary.t20iHanded(config.ExchangesPipeline) == 0 {
+		return nil, nil
 	}
 	if len(entries) != 1 || entries[0].Name() != processing.ArtifactName {
 		f.t.Fatalf("unexpected durable path population: %v", entries)
@@ -335,7 +352,11 @@ func (f *p3t9ProtectedCapture) artifacts(want int) ([]processing.Artifact, []byt
 // t20iPersisted is how many records of this route the approved output holds.
 func (f *p3t9ProtectedCapture) t20iPersisted(pipeline string) int {
 	f.t.Helper()
+	f.delivered()
 	raw, err := os.ReadFile(filepath.Join(f.dir, processing.ArtifactName))
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -489,7 +510,7 @@ func TestP3T9ProtectedDrainedLimitAndPendingFinish(t *testing.T) {
 }
 
 func TestP3T9ProtectedWorkerHeldAuthorizationKeepsPriorResult(t *testing.T) {
-	for _, fault := range []probe.GateReason{probe.GateUnknownLength, probe.GateInputLimit, probe.GateStorageExhausted} {
+	for _, fault := range []probe.GateReason{probe.GateUnknownLength, probe.GateInputLimit, probe.GateIntakeExhausted} {
 		t.Run(string(fault), func(t *testing.T) {
 			for _, inject := range []bool{false, true} {
 				name := "successful_neighbor"
@@ -508,7 +529,7 @@ func TestP3T9ProtectedWorkerHeldAuthorizationKeepsPriorResult(t *testing.T) {
 							limit = 6
 						}
 					}
-					if fault == probe.GateStorageExhausted {
+					if fault == probe.GateIntakeExhausted {
 						intakeBytes = 16384
 						if inject {
 							intakeBytes = 8192
@@ -562,7 +583,7 @@ func TestP3T9ProtectedWorkerHeldAuthorizationKeepsPriorResult(t *testing.T) {
 					delivered := make(chan struct{})
 					go func() {
 						defer close(delivered)
-						if fault == probe.GateStorageExhausted {
+						if fault == probe.GateIntakeExhausted {
 							for i := 0; i < 2; i++ {
 								f.send(99, fragment.Sent, strings.Repeat("S", 4096), true, false)
 							}
@@ -583,7 +604,7 @@ func TestP3T9ProtectedWorkerHeldAuthorizationKeepsPriorResult(t *testing.T) {
 					if inject && fault == probe.GateInputLimit {
 						charged = 6
 					}
-					if fault == probe.GateStorageExhausted {
+					if fault == probe.GateIntakeExhausted {
 						charged = 8
 						after := f.store.Stats()
 						if after.Leased != leased {
@@ -606,7 +627,7 @@ func TestP3T9ProtectedWorkerHeldAuthorizationKeepsPriorResult(t *testing.T) {
 							if !after.Exhausted || after.FragmentsRefused != 1 || after.Fragments != 5 || after.ConnectionsRefused != 0 || f.capture.Stats().Rejected != 1 {
 								t.Fatalf("fixed storage population did not reach exactly the second-fragment refusal: %+v capture %+v", after, f.capture.Stats())
 							}
-							t.Log("storage_exhausted_reached: actual ErrLimit, store-owned signal, one rejected fragment, real closed batch still leased at authorization, prior artifact already useful")
+							t.Log("intake_exhausted_reached: actual ErrLimit, store-owned signal, one rejected fragment, real closed batch still leased at authorization, prior artifact already useful")
 						} else {
 							select {
 							case err := <-f.callbackErrors:
