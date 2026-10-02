@@ -286,7 +286,7 @@ func (a *socketEvidenceActor) project(t *testing.T, transfer probe.Transfer) con
 	if live := session.Live(time.Now()); len(live) != 1 {
 		t.Fatalf("one in-flight transfer projected to %d live connections", len(live))
 	}
-	session.Finish(time.Now(), connection.Counted(int64(transfer.Stamp)))
+	session.Finish(time.Now())
 	records := session.Records()
 	if len(records) != 1 || len(fragments.taken()) != 1 {
 		t.Fatalf("one real transfer projected to %d connections and %d fragments", len(records), len(fragments.taken()))

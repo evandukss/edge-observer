@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -132,6 +133,102 @@ func waitIndependentMarker(t *testing.T, disk *spool.Spool, marker string) fragm
 	}
 }
 
+type lossDirection struct {
+	handle    uint64
+	direction fragment.Direction
+}
+
+// Observe the decoded producer evidence before capture interprets it. These
+// numbers, not capture's loss counters, select the affected suffix assertions.
+type decodedLossEvidence struct {
+	inner       probe.Sink
+	capture     *capture.Session
+	mutex       sync.Mutex
+	numbers     map[lossDirection][]uint64
+	finals      map[uint64]probe.Final
+	occupancies map[uint64]uint64
+	unlocated   uint64
+	ambiguous   int
+	settler     probe.Settler
+}
+
+func (s *decodedLossEvidence) Settling(settler probe.Settler) {
+	s.settler = settler
+	s.capture.Settling(settler)
+}
+
+func (s *decodedLossEvidence) Transfer(v probe.Transfer) {
+	s.mutex.Lock()
+	s.unlocated = max(s.unlocated, v.Sequence.Unlocated)
+	if v.Length > 0 {
+		if v.Sequence.Occupancy == 0 || v.Sequence.Number == 0 || !v.Sequence.Born || v.Sequence.Overlapped {
+			s.ambiguous++
+		}
+		if before := s.occupancies[v.Endpoint]; before != 0 && before != v.Sequence.Occupancy {
+			s.ambiguous++
+		}
+		s.occupancies[v.Endpoint] = v.Sequence.Occupancy
+		key := lossDirection{v.Endpoint, v.Direction}
+		s.numbers[key] = append(s.numbers[key], v.Sequence.Number)
+	}
+	s.mutex.Unlock()
+	s.inner.Transfer(v)
+}
+
+func (s *decodedLossEvidence) Closed(v probe.Connection) {
+	s.mutex.Lock()
+	s.unlocated = max(s.unlocated, v.Sequence.Unlocated)
+	if s.occupancies[v.Endpoint] != v.Sequence.Occupancy {
+		s.ambiguous++
+	}
+	s.finals[v.Endpoint] = v.Final
+	s.mutex.Unlock()
+	s.inner.Closed(v)
+}
+
+func (s *decodedLossEvidence) gaps(t *testing.T, streams int) (map[lossDirection]uint64, uint64) {
+	t.Helper()
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	if s.settler == nil {
+		t.Fatal("wiring, not the property: attachment supplied no settlement interface")
+	}
+	unlocated, err := s.settler.Unlocated()
+	if err != nil {
+		t.Fatalf("wiring, not the property: cannot read settled unlocated losses: %v", err)
+	}
+	unlocated = max(unlocated, s.unlocated)
+	if len(s.numbers) != streams*2 || s.ambiguous != 0 {
+		t.Fatalf("wiring, not the property: decoded direction population %d, want %d; ambiguous evidence %d", len(s.numbers), streams*2, s.ambiguous)
+	}
+	gaps := make(map[lossDirection]uint64)
+	for key, numbers := range s.numbers {
+		var last uint64
+		for _, n := range numbers {
+			if n <= last {
+				t.Fatalf("wiring, not the property: serial direction %v delivered number %d after %d", key, n, last)
+			}
+			gaps[key] += n - last - 1
+			last = n
+		}
+		final, ok := s.finals[key.handle]
+		if !ok || !final.Known {
+			t.Fatalf("wiring, not the property: no known terminal evidence for handle %d", key.handle)
+		}
+		terminal := final.Sent
+		if key.direction == fragment.Received {
+			terminal = final.Received
+		}
+		if terminal.InFlight || terminal.Last < last {
+			t.Fatalf("wiring, not the property: unsettled terminal %v for direction %v", terminal, key)
+		}
+		gaps[key] += terminal.Last - last
+		t.Logf("observed handle=%d direction=%s missing_numbers=%d", key.handle, key.direction, gaps[key])
+	}
+	t.Logf("observed unlocated_losses=%d", unlocated)
+	return gaps, unlocated
+}
+
 func exerciseIndependentStreamLoss(t *testing.T, streams int) {
 	var peerCalls atomic.Int64
 	peer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -152,7 +249,8 @@ func exerciseIndependentStreamLoss(t *testing.T, streams int) {
 	t.Cleanup(func() { _ = disk.Close() })
 	recording := capture.Recording(disk, disk)
 	sink := &independentHeldSink{capture: recording, entered: make(chan struct{}), release: make(chan struct{})}
-	live, err := attach.NeweBPF(process.Approval{}).Attach(probe.Request{Processes: []process.Process{parent}, Admit: authorise(parent)}, sink)
+	evidence := &decodedLossEvidence{inner: sink, capture: recording, numbers: make(map[lossDirection][]uint64), finals: make(map[uint64]probe.Final), occupancies: make(map[uint64]uint64)}
+	live, err := attach.NeweBPF(process.Approval{}).Attach(probe.Request{Processes: []process.Process{parent}, Admit: authorise(parent)}, evidence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,32 +318,27 @@ func exerciseIndependentStreamLoss(t *testing.T, streams int) {
 	if !seal.Counters.ReservationFailures.Known || seal.Counters.ReservationFailures.Value != finalLoss.Dropped {
 		t.Fatalf("the measured reservation loss did not reach the seal: %+v", seal)
 	}
-	if !seal.Counters.Ordered.Known {
-		t.Fatalf("the real finalisation did not expose the production allocator: %+v", seal.Counters.Ordered)
+	gaps, unlocated := evidence.gaps(t, streams)
+	var located uint64
+	for _, count := range gaps {
+		located += count
 	}
-	recording.Finish(seal.Sealed, seal.Counters.Ordered)
+	if located == 0 && unlocated == 0 {
+		t.Fatalf("wiring, not the property: %d reservation failures produced neither a direction gap nor unlocated evidence", finalLoss.Dropped)
+	}
+	if located == 0 {
+		t.Log("UNPROVED: located-loss branch observed zero missing numbers")
+	}
+	if unlocated == 0 {
+		t.Log("UNPROVED: unattributable-loss branch observed zero unlocated losses")
+	}
+	recording.Finish(seal.Sealed)
 	records := independentConnections(t, disk.ConnectionsPath())
 	if len(records) < streams {
 		t.Fatalf("persisted population lost physical streams: %d records for %d streams", len(records), streams)
 	}
 	fragments := independentFragments(t, disk.Path())
 	for _, record := range records {
-		hasAfter := false
-		for _, one := range fragments {
-			if one.Connection == record.ID && strings.Contains(string(one.Payload), "/after-") {
-				hasAfter = true
-				break
-			}
-		}
-		if !hasAfter {
-			for _, direction := range []fragment.Direction{fragment.Sent, fragment.Received} {
-				placement, ok := record.Placement(direction)
-				if !ok || placement.Positions == connection.PositionsEstablished || record.Placeable(direction) {
-					t.Errorf("retired stream %d claimed placeability after a lost observation: %+v", record.ID, placement)
-				}
-			}
-			continue
-		}
 		for _, direction := range []fragment.Direction{fragment.Sent, fragment.Received} {
 			var afterOffset uint64
 			found := false
@@ -258,18 +351,26 @@ func exerciseIndependentStreamLoss(t *testing.T, streams int) {
 				}
 			}
 			if !found {
-				t.Fatalf("stream %d %s has no persisted peer-confirmed after-loss fragment", record.ID, direction)
+				t.Fatalf("wiring, not the property: stream %d %s has no persisted after-loss fragment", record.ID, direction)
+			}
+			missing, observed := gaps[lossDirection{record.Handle.Address, direction}]
+			if !observed {
+				t.Fatalf("wiring, not the property: captured handle %d direction %s did not join decoded evidence", record.Handle.Address, direction)
 			}
 			placement, ok := record.Placement(direction)
-			// Production stamps can establish a prefix now. The guarantee is
-			// that lost bytes do not become invented positions, not that the
-			// observer must discard knowledge of the prefix it can locate.
-			// Bound that claim by the ACTUAL persisted after-loss offset in
-			// each direction of EVERY stream, rather than accepting any prefix.
+			if !ok {
+				t.Fatalf("wiring, not the property: stream %d has no %s placement", record.ID, direction)
+			}
+			if missing == 0 && unlocated == 0 {
+				if !placement.Whole() {
+					t.Errorf("untouched direction lost its placement: stream %d %s: %+v", record.ID, direction, placement)
+				}
+				continue
+			}
 			unknown := placement.Positions == connection.PositionsUnknownThroughout ||
 				(placement.Positions == connection.PositionsUnknownFrom && placement.From <= afterOffset)
-			if !ok || !unknown || placement.Placeable(afterOffset) || record.Placeable(direction) {
-				t.Errorf("ring loss left persisted stream %d %s claiming positions at after-loss offset %d: %+v", record.ID, direction, afterOffset, placement)
+			if !unknown || placement.Placeable(afterOffset) || record.Placeable(direction) {
+				t.Errorf("ring loss left stream %d %s claiming after-loss offset %d; missing=%d unlocated=%d: %+v", record.ID, direction, afterOffset, missing, unlocated, placement)
 			}
 		}
 	}
@@ -278,6 +379,6 @@ func exerciseIndependentStreamLoss(t *testing.T, streams int) {
 func TestOneStreamKeepsItsBytesAndLosesItsPlacementAfterRingLoss(t *testing.T) {
 	exerciseIndependentStreamLoss(t, 1)
 }
-func TestUnlocalizableRingLossInvalidatesBothInterleavedStreams(t *testing.T) {
+func TestRingLossPlacementFollowsEachInterleavedDirectionsEvidence(t *testing.T) {
 	exerciseIndependentStreamLoss(t, 2)
 }

@@ -103,13 +103,12 @@ func TestT18AnUnmeasuredTransferRetiresTheSessionUnderItsOwnReason(t *testing.T)
 			t.Logf("processing %+v; seen %+v; stopped record %v", sealed.Processing, sealed.Seen, s.records("stopped"))
 
 			targets := t18Targets(t18Approved(t, s.directory(c)))
-			// Row 17's falsifier "an unknown-length transfer reported as a
-			// missing-stamp count": the transfer the gate refused never reaches
-			// capture, and nothing else is missing, so no gap may be counted.
+			// The refused transfer supplies its producer evidence without
+			// retaining payload. Nothing is missing, so no per-direction gap
+			// may be counted as loss.
 			if sealed.Seen.Lost != 0 || sealed.Loss.Dropped != 0 {
-				t.Errorf("FINDING: the account counts %d observations as accounted for by located losses and %d streams "+
-					"retired by them, where the ring dropped %d: the refused transfer is reported as a missing-stamp count",
-					sealed.Seen.Lost, sealed.Seen.Interrupted, sealed.Loss.Dropped)
+				t.Errorf("the account counts %d missing per-direction observations where the ring dropped %d: the refused transfer is reported as capture loss",
+					sealed.Seen.Lost, sealed.Loss.Dropped)
 			}
 			if !unmeasured {
 				if sealed.Processing == nil || sealed.Processing.GateReason != "" || !slices.Contains(targets, "/?asked=t18-before") {

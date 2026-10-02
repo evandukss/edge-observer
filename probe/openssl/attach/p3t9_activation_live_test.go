@@ -162,6 +162,12 @@ func p3t9ActivationCompiled(t *testing.T, peer process.Process) policy.Policy {
 type p3t9ActivationWitness struct {
 	recording *capture.Session
 	marker    atomic.Uint64
+	settling  bool
+}
+
+func (w *p3t9ActivationWitness) Settling(s probe.Settler) {
+	w.settling = true
+	w.recording.Settling(s)
 }
 
 func (w *p3t9ActivationWitness) Transfer(x probe.Transfer) {
@@ -318,6 +324,9 @@ func p3t9ActivationChild(t *testing.T) {
 	if !live.Capability().Payload {
 		t.Fatal("attachment cannot copy payload")
 	}
+	if !witness.settling {
+		t.Fatal("wiring, not the property: attachment has no per-occupancy settlement evidence")
+	}
 	fmt.Println("P3T9_READY")
 	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil || line != "exchange_done\n" {
@@ -344,7 +353,7 @@ func p3t9ActivationChild(t *testing.T) {
 	if err != nil || !drained.Complete {
 		t.Fatalf("real drain incomplete: %+v %v", drained, err)
 	}
-	counters, err := producer.Account()
+	_, err = producer.Account()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +381,7 @@ func p3t9ActivationChild(t *testing.T) {
 	if c.Gate.Snapshot() != before {
 		t.Fatal("initial re-verification changed the active gate")
 	}
-	c.Recording.Finish(time.Now(), counters.Ordered)
+	c.Recording.Finish(time.Now())
 	out, err := worker.Finish(context.Background(), processing.Finalization{Withdrawn: withdrawn.Complete, Drained: drained.Complete})
 	if err != nil || handed.written(config.ExchangesPipeline) != 1 || handed.handed(config.ExchangesPipeline) != 1 || out.GateReason != "" {
 		t.Fatalf("real approved-result control failed: exchanges records written %d, authorized %d, %+v %v",

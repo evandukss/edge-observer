@@ -306,7 +306,7 @@ func TestT25InProcessNotTheSyscallBoundaryAnExpiredDrainDiscardsPendingPayload(t
 	if seal.Drain.Complete || seal.Complete {
 		t.Fatalf("wiring, not the property: the drain completed with delivery held: %+v", seal.Drain)
 	}
-	recording.Finish(seal.Sealed, seal.Counters.ReservationAttempts)
+	recording.Finish(seal.Sealed)
 	written := writer.Stats().Written
 	outcome, err := worker.Finish(context.Background(), processing.Finalization{Withdrawn: seal.Withdrawal.Complete, Drained: seal.Drain.Complete})
 	t.Logf("seal because %q; outcome %+v (%v); intake before finish %+v, after %+v", seal.Because, outcome, err, pending, store.Stats())
