@@ -212,9 +212,11 @@ func main() {
 	}
 }
 
-// floodStderr emits overlong lines to exercise the stderr receiver.
+// floodStderr reuses its line so the traffic generator's allocations do not
+// grow with the workload whose receiver is being measured.
 func floodStderr(w io.Writer, count int) {
+	line := []byte("stderr\x1b\t" + strings.Repeat("s", 4096) + "\n")
 	for i := 0; count == 0 || i < count; i++ {
-		fmt.Fprintln(w, "stderr\x1b\t"+strings.Repeat("s", 4096))
+		_, _ = w.Write(line)
 	}
 }
