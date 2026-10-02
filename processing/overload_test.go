@@ -189,11 +189,11 @@ func (s *lossTap) Write(r fragment.Record) error { s.loss = r.Loss; return s.sto
 
 func TestAConnectionCutOrdersAgainstHeldOutputAuthorization(t *testing.T) {
 	arrived, resume := make(chan struct{}), make(chan struct{})
-	var once sync.Once
+	var once, reached sync.Once
 	defer once.Do(func() { close(resume) })
 	out := &outputLog{}
 	p := newPipeline(t, 100, 100, out)
-	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 100, BeforeAuthorize: func() { close(arrived); <-resume }})
+	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 100, BeforeAuthorize: func() { reached.Do(func() { close(arrived); <-resume }) }})
 	if err != nil {
 		t.Fatal(err)
 	}
