@@ -882,7 +882,7 @@ func (a *ebpfAttachment) refusals(read func() (ebpf.Refusals, error)) (map[strin
 	counted[probe.DeliveryWithoutGate] = a.ungated.Load()
 	a.mutex.Lock()
 	for _, reason := range probe.GateReasons() {
-		if reason.InvalidatesCapture() {
+		if reason.InvalidatesCapture() || reason == probe.GateInputLimit {
 			counted[probe.GateRefusal(reason)] = a.gateRefused[reason]
 		}
 	}

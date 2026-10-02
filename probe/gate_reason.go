@@ -4,11 +4,9 @@ package probe
 // capture fault. Graceful operator stops use zero.
 const CaptureFailureExitStatus = 1
 
-// GateReason identifies a gate refusal. GateInputLimit,
-// GateIntakeExhausted, GateUnknownLength and GateUnknownKind invalidate the
-// entire capture; the first such reason is retained until session end. GateUnsettled refuses one candidate
-// without invalidating the capture. GateUninitialized refuses work on a nil or
-// zero-value gate, which has no initialized capture to invalidate.
+// GateReason identifies a refusal. Unknown length and kind invalidate the
+// capture until session end. Input and intake limits cut only affected input.
+// Unsettled refuses one candidate; uninitialized refuses an unusable gate.
 //
 // GateReasons enumerates the declared reasons. InvalidatesCapture classifies
 // them so callers can derive populations without maintaining another list.

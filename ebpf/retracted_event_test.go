@@ -13,49 +13,62 @@ import (
 )
 
 func TestALateRetractedEventCannotPreventReadmission(t *testing.T) {
-	port := sequencePeer(t, nil)
-	actor := independentActor(t, sequenceActorSource, port)
-	p := loaded(t, int32(actor.command.Process.Pid))
-	arrived, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	s, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: points(t, p), Admit: authorise(p),
-		BeforeRecord: func(event ebpf.Event) {
-			if event.Kind == ebpf.Transfer {
-				once.Do(func() { close(arrived); <-release })
+	for _, readmitFirst := range []bool{false, true} {
+		t.Run(map[bool]string{false: "absent grant", true: "replacement grant"}[readmitFirst], func(t *testing.T) {
+			port := sequencePeer(t, nil)
+			actor := independentActor(t, sequenceActorSource, port)
+			p := loaded(t, int32(actor.command.Process.Pid))
+			arrived, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			s, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: points(t, p), Admit: authorise(p),
+				BeforeRecord: func(event ebpf.Event) {
+					if event.Kind == ebpf.Transfer {
+						once.Do(func() { close(arrived); <-release })
+					}
+				}})
+			if err != nil {
+				t.Fatal(err)
 			}
-		}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = s.Close() }()
-	var released sync.Once
-	unblock := func() { released.Do(func() { close(release) }) }
-	defer unblock()
-	command(t, actor, "O 1", "O 0")
-	if _, err := io.WriteString(actor.input, "X 0 held\n"); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-arrived:
-	case <-time.After(5 * time.Second):
-		t.Fatal("wiring: no decoded transfer reached the barrier")
-	}
-	s.Retract(authorise(p))
-	if len(s.Inventory()) != 0 {
-		t.Fatal("wiring: Retract did not remove the initial inventory")
-	}
-	unblock()
-	select {
-	case <-s.Events():
-	case <-time.After(5 * time.Second):
-		t.Fatal("wiring: held event did not pass recording")
-	}
-	refused, err := s.Refusals()
-	if err != nil || refused.Counted[ebpf.RetractedEvent] < 1 {
-		t.Fatalf("late recording was not counted: %+v, %v", refused.Counted, err)
-	}
-	if granted, skipped, err := s.Admit(authorise(p)); err != nil || len(granted) != 1 || len(skipped) != 0 {
-		t.Fatalf("late event prevented readmission: granted %v, skipped %v, err %v", granted, skipped, err)
+			defer func() { _ = s.Close() }()
+			var released sync.Once
+			unblock := func() { released.Do(func() { close(release) }) }
+			defer unblock()
+			command(t, actor, "O 1", "O 0")
+			if _, err := io.WriteString(actor.input, "X 0 held\n"); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-arrived:
+			case <-time.After(5 * time.Second):
+				t.Fatal("wiring: no decoded transfer reached the barrier")
+			}
+			s.Retract(authorise(p))
+			if len(s.Inventory()) != 0 {
+				t.Fatal("wiring: Retract did not remove the initial inventory")
+			}
+			if readmitFirst {
+				if granted, _, err := s.Admit(authorise(p)); err != nil || len(granted) != 1 {
+					t.Fatalf("new grant: %v %v", granted, err)
+				}
+			}
+			unblock()
+			select {
+			case <-s.Events():
+			case <-time.After(5 * time.Second):
+				t.Fatal("wiring: held event did not pass recording")
+			}
+			refused, err := s.Refusals()
+			if err != nil || refused.Counted[ebpf.RetractedEvent] < 1 {
+				t.Fatalf("late recording was not counted: %+v, %v", refused.Counted, err)
+			}
+			if readmitFirst {
+				return
+			}
+			if granted, skipped, err := s.Admit(authorise(p)); err != nil || len(granted) != 1 || len(skipped) != 0 {
+				t.Fatalf("late event prevented readmission: granted %v, skipped %v, err %v", granted, skipped, err)
+			}
+
+		})
 	}
 }
 

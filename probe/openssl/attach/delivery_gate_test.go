@@ -97,14 +97,15 @@ func TestDeliveryGateEntryRefusesTailBeforeIdentityAndCapture(t *testing.T) {
 	tail := decodedPayload(4)
 	tail.PID, tail.NamespacePID, tail.SSL = 442, 442, 18
 	a.deliverEvent(tail)
-	if state := g.Snapshot(); state.Charged != 3 || state.Reason != probe.GateInputLimit {
+	if state := g.Snapshot(); state.Charged != 3 || state.Reason != "" || state.InputRefused != 1 {
 		t.Fatalf("N+1 refusal not reached: %+v", state)
 	}
+	before.GateRefused++
 	if len(a.known) != 1 || captured.Stats() != before || len(records.records) != 1 {
 		t.Fatalf("refused tail grew identity/capture state: identities %d, stats %+v, records %d", len(a.known), captured.Stats(), len(records.records))
 	}
-	if got := g.Authorize(probe.ReleaseEvidence{InputsSettled: true, LifecycleSettled: true}); got.Authorized || got.Reason != probe.GateInputLimit {
-		t.Fatalf("pending payload stayed releasable after refused tail: %+v", got)
+	if got := g.Authorize(probe.ReleaseEvidence{InputsSettled: true, LifecycleSettled: true}); !got.Authorized || got.Reason != "" {
+		t.Fatalf("unrelated payload lost eligibility after refused tail: %+v", got)
 	}
 }
 

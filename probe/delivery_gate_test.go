@@ -75,7 +75,6 @@ func TestDeliveryGateFaultsRevokePendingButKeepPriorAuthorization(t *testing.T) 
 	}{
 		{"unknown length", probe.DeliveryTransfer, false, 10, 2, true, probe.GateUnknownLength},
 		{"unknown kind", 255, true, 10, 2, true, probe.GateUnknownKind},
-		{"refused tail", probe.DeliveryClose, false, 1, 1, false, probe.GateInputLimit},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := deliveryGate(t, tc.limit, nil)

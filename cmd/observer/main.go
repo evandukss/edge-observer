@@ -912,6 +912,12 @@ func (d *daemon) follows(activatedAt time.Time) *follows {
 	if err != nil || last.Session == "" {
 		return nil
 	}
+	content, err := os.ReadFile(last.Account)
+	var prior account.Account
+	if err != nil || json.Unmarshal(content, &prior) != nil || prior.Kind != account.Sealed ||
+		prior.Session != last.Session || prior.Seal == nil || !prior.Seal.Sealed.Equal(last.Sealed) {
+		return nil
+	}
 	return &follows{
 		Session: last.Session, Sealed: last.Sealed,
 		Gap: fmt.Sprintf("nothing was observed from %s, when session %s sealed, to %s, when this one activated",

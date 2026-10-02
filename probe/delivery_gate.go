@@ -37,12 +37,12 @@ type DeliveryGateOptions struct {
 	// MaxEvents must be positive. It bounds the decoded events held at once,
 	// not bytes or heap usage: each admitted event holds a slot until whatever
 	// retained its input returns it (held.Slot). An event arriving while N slots
-	// are held is refused and makes every pending release ineligible.
+	// are held is refused; capture cuts the affected connection.
 	MaxEvents uint64
 
-	// IntakeExhausted is observed under the ordering lock at Admit, Authorize
-	// and Snapshot. A refused input leaves capture incomplete and invalidates
-	// pending release. Nil means no intake signal is connected.
+	// IntakeExhausted is retained for source compatibility. Intake loss is now
+	// carried by each record's loss token, so this diagnostic signal does not
+	// invalidate unrelated work.
 	IntakeExhausted <-chan struct{}
 
 	// BeforeAuthorize is an optional test seam called just before authorization

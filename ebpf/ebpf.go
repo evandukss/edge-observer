@@ -582,7 +582,7 @@ const MaxEventPayloadBytes = 4096
 // padding bytes, then the dropped count appended after that padding): 240. The
 // padding is explicit so no offset depends on the compiler, and package bpf's
 // layout guard pins every offset against the source (bpf/ssl.bpf.h).
-const rawHeader = 240
+const rawHeader = 248
 
 // Attach loads the program, places the points, fills the allowlist and begins
 // reading. Nothing is captured before this and nothing after Close.
@@ -2455,12 +2455,13 @@ func originOf(sample []byte) Origin {
 func sequenceOf(sample []byte) probe.Sequence {
 	order := binary.LittleEndian
 	return probe.Sequence{
-		Occupancy:  order.Uint64(sample[184:192]),
-		Number:     order.Uint64(sample[192:200]),
-		Unlocated:  order.Uint64(sample[200:208]),
-		Born:       sample[224] != 0,
-		Overlapped: sample[225] != 0,
-		Dropped:    order.Uint64(sample[232:240]),
+		Occupancy:      order.Uint64(sample[184:192]),
+		Number:         order.Uint64(sample[192:200]),
+		Unlocated:      order.Uint64(sample[200:208]),
+		Born:           sample[224] != 0,
+		Overlapped:     sample[225] != 0,
+		Dropped:        order.Uint64(sample[232:240]),
+		BeginUnlocated: order.Uint64(sample[240:248]),
 	}
 }
 

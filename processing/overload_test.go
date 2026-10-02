@@ -101,10 +101,10 @@ func TestAnObservedBirthRecoversAfterUnlocatedLoss(t *testing.T) {
 		} {
 			p.capture.Transfer(probe.Transfer{Process: pipelineProcess, Instance: pipelineInstance, Endpoint: 1,
 				Direction: part.direction, Measured: true, Length: uint32(len(part.text)), Payload: []byte(part.text), At: p.at,
-				Sequence: probe.Sequence{Occupancy: 1, Number: 1, Born: born, Unlocated: 1}})
+				Sequence: probe.Sequence{Occupancy: 1, Number: 1, Born: born, Unlocated: 1, BeginUnlocated: 1}})
 		}
 		p.capture.Closed(probe.Connection{Process: pipelineProcess, Instance: pipelineInstance, Endpoint: 1, At: p.at,
-			Sequence: probe.Sequence{Occupancy: 1, Born: born, Unlocated: 1},
+			Sequence: probe.Sequence{Occupancy: 1, Born: born, Unlocated: 1, BeginUnlocated: 1},
 			Final:    probe.Final{Known: true, Sent: probe.Terminal{Last: 1}, Received: probe.Terminal{Last: 1}}})
 		if _, err := p.worker.Drain(context.Background()); err != nil {
 			t.Fatal(err)
@@ -122,4 +122,52 @@ func stringJoin(lines [][]byte) string {
 		all.Write(line)
 	}
 	return all.String()
+}
+
+// Producer numbers and births, rather than HTTP-looking bytes, determine
+// whether a loss boundary can be crossed.
+func TestRecoveryDoesNotManufactureACompletePrefix(t *testing.T) {
+	for _, scenario := range []string{"old hole", "unseen first loss", "lost close reused", "delayed old event", "fresh birth", "prior occupancy"} {
+		t.Run(scenario, func(t *testing.T) {
+			out := &outputLog{}
+			p := newPipeline(t, 100, 100, out)
+			p.exchange(10, "/certified")
+			p.closed(10)
+			p.drain()
+			send := func(occupancy, number, begin uint64, born bool, direction fragment.Direction, body string) {
+				p.capture.Transfer(probe.Transfer{Process: pipelineProcess, Instance: pipelineInstance, Endpoint: 1,
+					Direction: direction, Measured: true, Length: uint32(len(body)), Payload: []byte(body), At: p.at,
+					Sequence: probe.Sequence{Occupancy: occupancy, Number: number, Born: born, Unlocated: 1, BeginUnlocated: begin}})
+			}
+			occupancy, number, begin, born := uint64(1), uint64(1), uint64(1), false
+			want := false
+			switch scenario {
+			case "old hole":
+				send(1, 1, 0, true, fragment.Sent, "GET /broken HTTP/1.1\r\nX-Missing: ")
+				number, begin, born = 3, 0, true
+			case "unseen first loss":
+				number = 2
+			case "lost close reused", "delayed old event":
+				send(1, 1, 0, true, fragment.Sent, "GET /old HTTP/1.1\r\nIncomplete: ")
+				occupancy, born, want = 2, true, true
+			case "fresh birth":
+				born, want = true, true
+			case "prior occupancy":
+				begin, want = 0, true
+			}
+			send(occupancy, number, begin, born, fragment.Sent, "GET /candidate HTTP/1.1\r\n\r\n")
+			if scenario == "delayed old event" {
+				send(1, 2, 0, true, fragment.Sent, "GET /stale HTTP/1.1\r\n\r\n")
+			}
+			send(occupancy, 1, begin, born, fragment.Received, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+			p.capture.Closed(probe.Connection{Process: pipelineProcess, Instance: pipelineInstance, Endpoint: 1, At: p.at,
+				Sequence: probe.Sequence{Occupancy: occupancy, Born: born, Unlocated: 1, BeginUnlocated: begin},
+				Final:    probe.Final{Known: true, Sent: probe.Terminal{Last: number}, Received: probe.Terminal{Last: 1}}})
+			p.drain()
+			lines := stringJoin(out.lines)
+			if !strings.Contains(lines, "/certified") || strings.Contains(lines, "/stale") || strings.Contains(lines, "/candidate") != want {
+				t.Fatalf("wrong eligibility after %s: %s", scenario, lines)
+			}
+		})
+	}
 }

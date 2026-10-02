@@ -252,10 +252,14 @@ func (w *Worker) step(d *dispatch) (bool, error) {
 		if err != nil {
 			return false, errors.New("internal observer defect: cannot encode an exchange for an extension")
 		}
-		reason := exts.supervisors[k].Submit(extension.Call{ID: d.first + uint64(d.i), Bytes: d.bytes,
-			Message: message, Done: func(result extension.Result) {
-				w.queue.complete(completion{d: d, k: k, result: result})
-			}})
+		reason := extension.Unavailable
+		// Submit only enqueues; order that handoff against this connection's cut.
+		d.b.loss.Authorize(func() {
+			reason = exts.supervisors[k].Submit(extension.Call{ID: d.first + uint64(d.i), Bytes: d.bytes,
+				Message: message, Done: func(result extension.Result) {
+					w.queue.complete(completion{d: d, k: k, result: result})
+				}})
+		})
 		if reason == "" {
 			return true, nil
 		}

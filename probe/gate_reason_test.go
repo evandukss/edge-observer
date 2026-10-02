@@ -60,8 +60,8 @@ func TestGateReasonClassifiesReachedDecisions(t *testing.T) {
 		invalidates bool
 	}{
 		{"input_limit", func(g *probe.DeliveryGate) probe.GateReason {
-			return g.Admit(probe.DeliveryClose, false).State.Reason
-		}, probe.GateInputLimit, true},
+			return g.Admit(probe.DeliveryTransfer, true).State.Reason
+		}, probe.GateInputLimit, false},
 
 		{"unknown_length", func(g *probe.DeliveryGate) probe.GateReason {
 			return g.Admit(probe.DeliveryTransfer, false).State.Reason

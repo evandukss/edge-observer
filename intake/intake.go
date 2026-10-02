@@ -49,11 +49,10 @@ type Stats struct {
 // it. The process execution envelope separately bounds those costs.
 //
 // An insertion exceeding the shared limit is refused whole with ErrLimit.
-// Exhaustion is permanent; subsequent writes fail even after Release. There
-// is no eviction, spill, parsing, structural validation or gate operation.
+// The refused record's loss token stops its connection outside this queue.
+// Release makes capacity available again; Exhausted remains a diagnostic that
+// at least one insertion was refused. There is no eviction, spill or parsing.
 // Callers may store malformed or incomplete records for the worker to judge.
-// The controller consumes Exhausted to stop capture; pending entries are not
-// evidence of complete input after a storage refusal.
 type Store struct {
 	mutex      sync.Mutex
 	stats      Stats
@@ -231,7 +230,7 @@ func (s *Store) Stats() Stats {
 
 // Exhausted closes on the first storage-limit refusal; nil and zero stores
 // return an already-closed signal. No receiver is needed for a callback to
-// return. This requests controller action, not release authorization.
+// return. It is diagnostic, not a request to stop capture.
 func (s *Store) Exhausted() <-chan struct{} {
 	if s == nil || s.exhausted == nil {
 		return uninitialized

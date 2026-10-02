@@ -630,6 +630,7 @@ struct event {
 	__u8  exited;
 	__u8  padding_place[4];
 	__u64 dropped;
+	__u64 begin_unlocated;
 	__u8  data[OBS_CHUNK];
 };
 
@@ -1408,6 +1409,7 @@ static __always_inline void obs_unhold(struct occupancy *occ, __u8 dir, __u64 th
 // the event's place fields from. bytes says the call moved bytes, so losing its
 // event with no occupancy to take its number is an unlocated loss.
 struct place {
+	__u64 begin_unlocated;
 	__u64 occupancy;
 	__u64 number;
 	__u64 dropped;
@@ -1900,6 +1902,7 @@ static __always_inline int obs_emit(const struct instance_key *who, __u64 genera
 	e->in_flight = in_flight;
 	e->exited = at->exited;
 	e->dropped = at->dropped;
+	e->begin_unlocated = at->begin_unlocated;
 	__builtin_memset(e->padding_place, 0, sizeof(e->padding_place));
 	__u64 id = bpf_get_current_pid_tgid();
 	e->stamp = stamp;
@@ -2241,6 +2244,7 @@ static __always_inline int obs_return(void *ctx, __u32 func)
 		at.occupancy = occ->id;
 		at.number = number;
 		at.born = occ->born;
+	at.begin_unlocated = occ->unlocated;
 		at.overlapped = c->dir == OBS_SENT ? occ->overlapped_sent : occ->overlapped_received;
 		// The drops in this direction so far, read before this call's own reservation:
 		// a delivered event carries the count of refused reservations below its number,
@@ -2869,6 +2873,7 @@ static __always_inline int obs_release(void *ctx, int recycled)
 	if (occ) {
 		at.occupancy = occ->id;
 		at.born = occ->born;
+	at.begin_unlocated = occ->unlocated;
 		last_sent = occ->sent;
 		last_received = occ->received;
 		if (occ->busy_sent)
@@ -3167,6 +3172,7 @@ static long obs_reclaim_occupancy(struct bpf_map *map, struct handle_key *key, s
 	struct place at = {};
 	at.occupancy = occ->id;
 	at.born = occ->born;
+	at.begin_unlocated = occ->unlocated;
 	at.exited = 1;
 	__u8 in_flight = 0;
 	if (occ->busy_sent)

@@ -209,6 +209,23 @@ session's account as it stands.
 completely, on the same line anything the account says was lost and why release was refused, and the
 path of the account it sealed.
 
+For supervised operation, adapt [examples/systemd/observer.service](examples/systemd/observer.service).
+It runs the observer in its own finite memory domain with swap disabled and `Restart=on-failure`.
+Keep watched processes outside that unit. The 512M limit is an example; use the same envelope for preflight.
+The unit expects the binary in `/opt/observer` and the configuration in `/etc/observer`.
+
+`input_limit` and volatile intake exhaustion refuse and count affected connection input; capture
+continues and fresh occupancies can produce output. A cut never resumes parsing on the affected
+connection. An unlocated loss preserves established prefixes and occupancies begun before it. A
+later first-call occupancy has no established origin; an observed `SSL_new` proves a fresh origin.
+
+The remaining terminal capture reasons are `unknown_length` and `unknown_kind`. They prevent
+pending release, seal the available account and exit with status 1. Startup errors, internal
+processing errors and failures to write the sealed account also exit nonzero. A normal operator
+stop exits zero after successful finalization. A supervisor restart starts a new session; its
+activation records the gap since the prior seal only when that session's matching sealed account
+is still readable. A missing or unreadable account does not imply a zero gap.
+
 ### 4. Inspect
 
 Each session keeps its sealed account in `<output>/sessions/<session>`, the
