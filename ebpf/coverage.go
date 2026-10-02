@@ -63,6 +63,17 @@ type Coverage struct {
 	// asked order. Fork and socket points are not catalogued functions; their
 	// absence shows in the booleans above.
 	Unobserved []string
+
+	// Unprobed names the entry points capture requires - byte-moving or lifecycle
+	// (SSL_new, SSL_free) - that were present to probe but could not be
+	// (Session.Unprobed). While it is non-empty capture is not live: no occupancy
+	// forms, nothing is sequenced, and the whole attachment certifies no exchange,
+	// though metadata still flows. Empty is capture live; an export absent from the
+	// library is not here, since nothing asked to probe it. Session.Coverage fills
+	// it from the session; CoverageOf, which sees only the kernel's per-point
+	// answers, cannot tell an unplaced probe from an unfired return and leaves it
+	// empty.
+	Unprobed []string
 }
 
 // CoverageOf reduces what the kernel answered to what this session observes.
@@ -71,9 +82,10 @@ func CoverageOf(answered []Placed) Coverage {
 	for _, one := range answered {
 		if !one.Confirmed {
 			// A catalogued entry point, or an uncatalogued byte-moving route, that the
-			// kernel did not confirm is reported, so its absence is not silent. (The
-			// attachment also refuses outright when a byte-moving probe is unconfirmed;
-			// this is what a reader of coverage sees.)
+			// kernel did not confirm is reported, so its absence is not silent. When the
+			// unconfirmed point is a byte mover whose entry did not place, capture is left
+			// not live and Session.Coverage names it in Unprobed; the session runs, so
+			// this list is what a reader of coverage sees either way.
 			if catalogued(one.Point) || one.Point.Entry == progSendfile {
 				coverage.Unobserved = append(coverage.Unobserved, one.Point.Symbol)
 			}
@@ -112,6 +124,7 @@ func (c Coverage) Narrow(built probe.Capability) probe.Capability {
 	built.SocketEvidence = built.SocketEvidence && c.SocketEvidence
 	built.IPv6 = built.IPv6 && c.IPv6
 	built.Unobserved = slices.Clone(c.Unobserved)
+	built.Unprobed = slices.Clone(c.Unprobed)
 	built.Withheld = slices.Clone(c.Withheld)
 	return built
 }
@@ -137,6 +150,12 @@ func (s *Session) Coverage() Coverage {
 	coverage.SocketEvidence = s.evidence
 	coverage.IPv6 = s.sixes
 	coverage.Withheld = s.withheld
+
+	// The byte movers that were present to probe and could not be: while any
+	// remains, capture is not live and the session sequences nothing. Read from the
+	// session, not CoverageOf, which cannot tell an unplaced entry from an unfired
+	// return.
+	coverage.Unprobed = slices.Clone(s.unprobed)
 
 	// Descendants are admitted at the kernel's fork event, which every session
 	// has, so the policy decides and is answered here.

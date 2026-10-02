@@ -296,7 +296,8 @@ func factsOf(c probe.Capability) Facts {
 	facts := Facts{
 		Backend: string(c.Backend), Program: c.Program, MinimumKernel: c.MinimumKernel, Payload: c.Payload,
 		Filtered: c.Filtered, Descendants: c.Descendants, Lifecycle: c.Lifecycle, Binding: c.Binding,
-		SocketEvidence: c.SocketEvidence, IPv6: c.IPv6, Unobserved: nonNil(c.Unobserved), Withheld: []Withheld{},
+		SocketEvidence: c.SocketEvidence, IPv6: c.IPv6, Unobserved: nonNil(c.Unobserved),
+		Unprobed: nonNil(c.Unprobed), Withheld: []Withheld{},
 	}
 	for _, one := range c.Withheld {
 		facts.Withheld = append(facts.Withheld, Withheld{Claim: string(one.Claim), Member: one.Member, Reason: one.Reason})

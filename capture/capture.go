@@ -152,11 +152,11 @@ type stream struct {
 	// numbered is the last producer number seen in each direction.
 	numbered map[fragment.Direction]uint64
 
-	// locatedByNumber is how many losses number() has already counted mid-stream
-	// in each direction, from gaps below a delivered number. settleLocked subtracts
-	// it from the direction's total located losses (taken, less submitted, less any
-	// one in-flight call) so the tail's losses are counted once, not a second time.
-	locatedByNumber map[fragment.Direction]int64
+	// droppedBelow is the producer's refused-reservation count as of the last
+	// number seen in each direction (carried on that event). settleLocked subtracts
+	// it from the occupancy's final dropped total so the tail counts only the drops
+	// below it that capture has not already located, and never a non-drop gap.
+	droppedBelow map[fragment.Direction]uint64
 
 	// unlocated is the producer's count of losses no occupancy could take, as of
 	// this stream's last observation.
@@ -408,6 +408,10 @@ func (s *Session) Refused(t probe.Transfer) {
 				"between are counted as abandoned, not here")
 	}
 	found.numbered[t.Direction] = t.Sequence.Number
+	// A gate-refused transfer is still an event the producer put on the ring, so it
+	// carries the drops below its number; it advances the last seen number, so the
+	// tail counts only drops above it (settleLocked).
+	found.droppedBelow[t.Direction] = t.Sequence.Dropped
 }
 
 // number reads one transfer's place in its occupancy before its bytes are
@@ -447,7 +451,6 @@ func (s *Session) number(found *stream, t probe.Transfer) {
 	case sequence.Number > last+1:
 		missing := int64(sequence.Number - last - 1)
 		s.stats.Lost += missing
-		found.locatedByNumber[direction] += missing
 		s.cutLocked(found, direction, at, connection.ObservationLost, missing, "")
 	default:
 		s.cutLocked(found, direction, at, connection.OperationsOverlapped, 0,
@@ -455,6 +458,9 @@ func (s *Session) number(found *stream, t probe.Transfer) {
 	}
 	if sequence.Number > last {
 		found.numbered[direction] = sequence.Number
+		// The drops below this number, carried on its event, so settleLocked counts
+		// only the tail drops this has not already located.
+		found.droppedBelow[direction] = sequence.Dropped
 	}
 }
 
@@ -538,21 +544,21 @@ func (s *Session) follow(t probe.Transfer) *stream {
 	s.next++
 	s.occupancies[place]++
 	found = &stream{
-		lifetime:        !s.told() || s.observing.Lifecycle,
-		id:              s.next,
-		process:         t.Process,
-		instance:        t.Instance,
-		network:         connection.Netns{Device: t.Network.Device, Inode: t.Network.Inode},
-		generation:      s.occupancies[place],
-		endpoint:        t.Endpoint,
-		firstSeen:       t.At,
-		opened:          t.Ends.OpenedAt,
-		offsets:         make(map[fragment.Direction]uint64, 2),
-		begun:           begun,
-		occupancy:       t.Sequence.Occupancy,
-		numbered:        make(map[fragment.Direction]uint64, 2),
-		locatedByNumber: make(map[fragment.Direction]int64, 2),
-		unlocated:       t.Sequence.Unlocated,
+		lifetime:     !s.told() || s.observing.Lifecycle,
+		id:           s.next,
+		process:      t.Process,
+		instance:     t.Instance,
+		network:      connection.Netns{Device: t.Network.Device, Inode: t.Network.Inode},
+		generation:   s.occupancies[place],
+		endpoint:     t.Endpoint,
+		firstSeen:    t.At,
+		opened:       t.Ends.OpenedAt,
+		offsets:      make(map[fragment.Direction]uint64, 2),
+		begun:        begun,
+		occupancy:    t.Sequence.Occupancy,
+		numbered:     make(map[fragment.Direction]uint64, 2),
+		droppedBelow: make(map[fragment.Direction]uint64, 2),
+		unlocated:    t.Sequence.Unlocated,
 	}
 	if t.Sequence.Unlocated > 0 && t.Sequence.Occupancy != 0 {
 		// The conservative rule for a stream begun after a loss nothing located:
@@ -629,13 +635,16 @@ func (s *Session) settleLocked(found *stream, final probe.Final, ending bool) {
 			if !ending {
 				// An open connection settled at session end. Only the producer's refused
 				// ring reservations in the tail are located losses (decision 476): the
-				// dropped count, less the drops number() already located mid-stream (a drop
-				// below a delivered number), is the tail's drops. Counting the producer's
-				// own failed reservations, not the shortfall, is what counts a drop that
-				// sits below a later submitted-but-abandoned event and leaves the abandoned
-				// event, a return refused for a lost grant, and a nested call nothing
-				// numbers as the uncounted, explicitly incomplete tail (decision 475).
-				located = int64(one.terminal.Dropped) - found.locatedByNumber[one.direction]
+				// occupancy's final dropped total, less the drops already BELOW the last
+				// number seen (carried on that event, droppedBelow), is the tail's drops.
+				// Subtracting the drops below, not every gap below, is what keeps a non-drop
+				// gap - a sendfile number, an unmeasurable return, a refused return, a
+				// nested call - from hiding a real tail drop. Counting the producer's own
+				// failed reservations, not the shortfall, is what counts a drop that sits
+				// below a later submitted-but-abandoned event and leaves the abandoned
+				// event and those non-drop gaps as the uncounted, explicitly incomplete
+				// tail (decision 475).
+				located = int64(one.terminal.Dropped) - int64(found.droppedBelow[one.direction])
 				if located < 0 {
 					located = 0
 				}

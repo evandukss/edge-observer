@@ -591,7 +591,11 @@ struct event {
 	// ending and on a call that moved no bytes. last_sent and last_received are an
 	// ending's last numbers, and in_flight which directions had a call that had
 	// not returned (bit OBS_SENT, bit OBS_RECEIVED). unlocated is the count of
-	// losses no occupancy could take, read as this event was produced.
+	// losses no occupancy could take, read as this event was produced. dropped is
+	// this direction's refused-reservation count read as this event was produced,
+	// so a reader knows how many drops lie below this number and never counts one
+	// twice at the tail (capture settleLocked). It is appended after the padding so
+	// no offset above it moves; only the payload's start does (rawHeader).
 	__u64 occupancy;
 	__u64 number;
 	__u64 unlocated;
@@ -601,6 +605,7 @@ struct event {
 	__u8  overlapped;
 	__u8  in_flight;
 	__u8  padding_place[5];
+	__u64 dropped;
 	__u8  data[OBS_CHUNK];
 };
 
@@ -1332,6 +1337,7 @@ static __always_inline void obs_unhold(struct occupancy *occ, __u8 dir, __u64 th
 struct place {
 	__u64 occupancy;
 	__u64 number;
+	__u64 dropped;
 	__u8  born;
 	__u8  overlapped;
 };
@@ -1754,6 +1760,7 @@ static __always_inline int obs_emit(const struct instance_key *who, __u64 genera
 	e->born = at->born;
 	e->overlapped = at->overlapped;
 	e->in_flight = in_flight;
+	e->dropped = at->dropped;
 	__builtin_memset(e->padding_place, 0, sizeof(e->padding_place));
 	__u64 id = bpf_get_current_pid_tgid();
 	e->stamp = stamp;
@@ -2090,6 +2097,10 @@ static __always_inline int obs_return(void *ctx, __u32 func)
 		at.number = number;
 		at.born = occ->born;
 		at.overlapped = c->dir == OBS_SENT ? occ->overlapped_sent : occ->overlapped_received;
+		// The drops in this direction so far, read before this call's own reservation:
+		// a delivered event carries the count of refused reservations below its number,
+		// so the tail counts only drops capture has not already located (settleLocked).
+		at.dropped = c->dir == OBS_SENT ? occ->dropped_sent : occ->dropped_received;
 	}
 	if (!moved) {
 		// The call returned having moved nothing. Its entry number is filled with a

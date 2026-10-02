@@ -531,3 +531,17 @@ func TestEverySelectedProcessIsJudgedInTheOrderGiven(t *testing.T) {
 		t.Errorf("second = %+v, want pid 4243 missing", tls[1])
 	}
 }
+
+// Decision 477 item 2: preflight runs before attach, so it states the conditional
+// consequence a user must know - a present byte mover that cannot be probed leaves
+// capture not live - in the TLS library requirement it reads.
+func TestThePreflightTLSRequirementStatesTheNotLiveConsequence(t *testing.T) {
+	c := meeting(t)
+	p := c.live()
+	tls := requirement(t, assess(c, p), preflight.TLSLibrary)
+	for _, want := range []string{"capture is not live", "sequences no exchange"} {
+		if !strings.Contains(tls.Declared, want) {
+			t.Errorf("the TLS library requirement does not state %q: %q", want, tls.Declared)
+		}
+	}
+}

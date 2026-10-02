@@ -157,6 +157,14 @@ type Sequence struct {
 	// counted when this observation was produced. It only grows, so a rise between
 	// two observations says such a loss fell between them.
 	Unlocated uint64
+
+	// Dropped is how many of this transfer's direction had their event refused a
+	// ring reservation, counted when this observation was produced: the drops that
+	// lie below this number. It only grows within an occupancy. Settling an open
+	// tail counts the occupancy's final dropped total less this, so a drop already
+	// located below a delivered number is not counted a second time, and a non-drop
+	// gap below the tail does not hide a tail drop.
+	Dropped uint64
 }
 
 // Terminal is one direction's last number when an occupancy's numbers were read.
@@ -380,6 +388,14 @@ type Capability struct {
 	// Unobserved is every catalogued entry point asked for that the kernel holds
 	// no probe on, by name, since a reader acts on which function is unwatched.
 	Unobserved []string `json:"unobserved,omitempty"`
+
+	// Unprobed names the entry points capture requires - byte-moving or lifecycle
+	// (SSL_new, SSL_free) - that were present to probe and could not be. While it is
+	// non-empty capture is not live: no transfer is sequenced and no exchange is
+	// certified across the whole attachment, though metadata still flows. Empty is
+	// capture live. An export absent from the library is not here; it withdraws only
+	// its own claim, not sequencing.
+	Unprobed []string `json:"unprobed,omitempty"`
 
 	// SocketEvidence is whether this attachment establishes the socket from the
 	// object the kernel acquired for a call's own I/O, rather than from a table of

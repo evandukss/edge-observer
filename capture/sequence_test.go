@@ -19,6 +19,13 @@ func numberedAs(p fragment.Process, endpoint uint64, direction fragment.Directio
 	return one
 }
 
+// withDropped marks a transfer's event as carrying the producer's refused-
+// reservation count: how many drops lay below its number when it was produced.
+func withDropped(t probe.Transfer, dropped uint64) probe.Transfer {
+	t.Sequence.Dropped = dropped
+	return t
+}
+
 // placementOf is one direction's placement of the record with id, failing the
 // case where there is none: a missing placement measured nothing.
 func placementOf(t *testing.T, records []connection.Record, id fragment.ConnectionID,
@@ -326,17 +333,40 @@ func TestADropLocatedMidStreamIsNotCountedAgainAtTheTail(t *testing.T) {
 	s := capture.Recording(&collected{}, nil, capture.Settles(settler{held: probe.Settlement{Occupancy: 7,
 		Final: probe.Final{Known: true, Sent: probe.Terminal{Last: 6, Dropped: 3}}}}))
 	// Numbers 1 and 4 arrive; numbers 2 and 3 were refused and are located
-	// mid-stream by number 4. One more reservation was refused at the tail (number
-	// 5), and number 6 was submitted and abandoned.
+	// mid-stream by number 4, which carries dropped=2 (the drops below it). One more
+	// reservation was refused at the tail (number 5), and number 6 was submitted and
+	// abandoned (Final.Dropped=3, Last=6).
 	s.Transfer(numberedAs(worker, 0x18, fragment.Sent, 10, 7, 1))
-	s.Transfer(numberedAs(worker, 0x18, fragment.Sent, 6, 7, 4))
+	s.Transfer(withDropped(numberedAs(worker, 0x18, fragment.Sent, 6, 7, 4), 2))
 	s.Finish(at)
 
 	// Three reservations were refused in all: two located mid-stream, one at the
 	// tail. Counting each once is three, not the four a tail that re-counted the two
-	// mid-stream drops against the shortfall would report.
+	// mid-stream drops would report.
 	if got := s.Stats().Lost; got != 3 {
 		t.Errorf("the session counts %d lost over two mid-stream drops and one tail drop, want 3", got)
+	}
+}
+
+// The mixed case T8's re-check found: a NON-DROP gap below a dropped tail (an
+// SSL_sendfile number, an unmeasurable return, a nested call) must not hide a
+// tail drop. The tail subtracts the drops BELOW the last number seen, carried on
+// its event, not every gap, so the non-drop gap is counted mid-stream and the
+// tail drops are counted in full.
+func TestANonDropGapBelowADroppedTailCountsTheTailExactly(t *testing.T) {
+	s := capture.Recording(&collected{}, nil, capture.Settles(settler{held: probe.Settlement{Occupancy: 7,
+		Final: probe.Final{Known: true, Sent: probe.Terminal{Last: 5, Dropped: 2}}}}))
+	// Number 2 is a non-drop gap (no event, no reservation refused), located
+	// mid-stream by number 3, which carries dropped=0. Numbers 4 and 5 were refused
+	// at the tail (Final.Dropped=2).
+	s.Transfer(numberedAs(worker, 0x18, fragment.Sent, 10, 7, 1))
+	s.Transfer(withDropped(numberedAs(worker, 0x18, fragment.Sent, 6, 7, 3), 0))
+	s.Finish(at)
+
+	// One non-drop gap plus two tail drops is three. A tail that subtracted the
+	// non-drop gap from its dropped count would report two, hiding one tail drop.
+	if got := s.Stats().Lost; got != 3 {
+		t.Errorf("the session counts %d lost over one non-drop gap and two tail drops, want 3", got)
 	}
 }
 

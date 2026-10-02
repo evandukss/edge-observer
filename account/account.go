@@ -636,6 +636,10 @@ func Describe(capability probe.Capability) string {
 	if !capability.SocketEvidence {
 		line += "; which socket a transfer crossed is not established, so every association is unknown"
 	}
+	if len(capability.Unprobed) > 0 {
+		line += "; capture is not live, no probe held for " + strings.Join(capability.Unprobed, ", ") +
+			", so the whole attachment sequences nothing and certifies no exchange"
+	}
 	if len(capability.Unobserved) > 0 {
 		line += "; the kernel holds no probe on " + strings.Join(capability.Unobserved, ", ")
 	}

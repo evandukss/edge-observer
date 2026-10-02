@@ -101,6 +101,7 @@ type Facts struct {
 	SocketEvidence bool       `json:"socket_evidence"`
 	IPv6           bool       `json:"ipv6"`
 	Unobserved     []string   `json:"unobserved"`
+	Unprobed       []string   `json:"unprobed"`
 	Withheld       []Withheld `json:"withheld"`
 }
 

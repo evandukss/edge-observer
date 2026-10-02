@@ -195,6 +195,7 @@ func init() {
 			represented[from+"."+name] = into + "." + name
 		}
 		represented[from+".unobserved[]"] = into + ".unobserved[]"
+		represented[from+".unprobed[]"] = into + ".unprobed[]"
 		represented[from+".withheld[].claim"] = into + ".withheld[].claim"
 		represented[from+".withheld[].member"] = into + ".withheld[].member"
 		represented[from+".withheld[].reason"] = into + ".withheld[].reason"

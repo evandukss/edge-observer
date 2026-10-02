@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1101,8 +1102,14 @@ func TestAnUnplacedByteMoverLeavesCaptureNotLiveAndCertifiesNothing(t *testing.T
 			actor := independentActor(t, sequenceActorSource, port)
 			run := deliverHeldWith(t, actor, ebpf.Options{FailEntry: []string{symbol}})
 
-			if named := run.session.UnprobedByteMovers(); len(named) == 0 {
+			if named := run.session.Unprobed(); len(named) == 0 {
 				t.Fatalf("wiring, not the property: %s was not recorded unplaced", symbol)
+			}
+			// The not-live state must show where a user reads it: coverage names the
+			// unprobed byte mover, so a reader sees the whole attachment sequences nothing.
+			if named := run.session.Coverage().Unprobed; !slices.Contains(named, symbol) {
+				t.Errorf("coverage does not name %s unprobed (%v), so a user cannot see capture is not live",
+					symbol, named)
 			}
 			command(t, actor, "O 1", "O 0")
 			// A send through the held SSL_write_ex2 path and a receive. With a sent
@@ -1129,8 +1136,11 @@ func TestAnUnplacedByteMoverLeavesCaptureNotLiveAndCertifiesNothing(t *testing.T
 		port := sequencePeer(t, nil)
 		actor := independentActor(t, sequenceActorSource, port)
 		run := deliverHeld(t, actor, nil, 0)
-		if named := run.session.UnprobedByteMovers(); len(named) != 0 {
+		if named := run.session.Unprobed(); len(named) != 0 {
 			t.Fatalf("the control has unplaced byte movers %v", named)
+		}
+		if named := run.session.Coverage().Unprobed; len(named) != 0 {
+			t.Errorf("the control's coverage names unprobed byte movers %v, so it reads as not live", named)
 		}
 		command(t, actor, "O 1", "O 0")
 		command(t, actor, "X 0 whole", "X 0")
@@ -1145,4 +1155,90 @@ func TestAnUnplacedByteMoverLeavesCaptureNotLiveAndCertifiesNothing(t *testing.T
 			t.Error("the control, every probe placed, certified no whole sent direction")
 		}
 	})
+}
+
+// Third C9 repair (decision 475 class, a lifecycle probe in place of a byte
+// mover): a refused SSL_new or SSL_free probe leaves capture not live, so a
+// reused handle address cannot join two connections into one stream. Decision
+// 477: only a PRESENT probe that failed does this. The control, the lifecycle
+// probes held, gives the same reuse two occupancies, both whole.
+func TestARefusedLifecycleProbeKeepsAReusedHandleFromJoiningTwoConnections(t *testing.T) {
+	for name, forced := range map[string]bool{
+		"the lifecycle probes refused": true,
+		"the control, nothing forced":  false,
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts := ebpf.Options{}
+			if forced {
+				opts.FailEntry = []string{"SSL_new", "SSL_free"}
+			}
+			port := sequencePeer(t, nil)
+			actor := independentActor(t, sequenceActorSource, port)
+			run := deliverHeldWith(t, actor, opts)
+
+			if forced {
+				named := run.session.Unprobed()
+				if !slices.Contains(named, "SSL_free") || !slices.Contains(named, "SSL_new") {
+					t.Fatalf("wiring, not the property: the lifecycle probes were not recorded unplaced: %v", named)
+				}
+				// The not-live state shows where a user reads coverage (finding 2).
+				if cov := run.session.Coverage().Unprobed; !slices.Contains(cov, "SSL_free") {
+					t.Errorf("coverage does not name SSL_free unprobed: %v", cov)
+				}
+			}
+
+			command(t, actor, "O 1", "O 0")
+			command(t, actor, "X 0 first", "X 0")
+			if _, err := io.WriteString(actor.input, "F 0\n"); err != nil {
+				t.Fatal(err)
+			}
+			var freed uint64
+			if line, err := actor.output.ReadString('\n'); err != nil {
+				t.Fatalf("free: %q: %v", line, err)
+			} else if _, scan := fmt.Sscanf(line, "F %d", &freed); scan != nil {
+				t.Fatalf("free: %q", line)
+			}
+			var reused, opened uint64
+			for attempt := 0; attempt < 8; attempt++ {
+				if _, err := io.WriteString(actor.input, "N 0\n"); err != nil {
+					t.Fatal(err)
+				}
+				line, err := actor.output.ReadString('\n')
+				if _, scan := fmt.Sscanf(line, "N %d %d", &opened, &reused); err != nil || scan != nil || opened != 0 {
+					t.Fatalf("new handle: %q: %v", line, err)
+				}
+				if reused == freed {
+					break
+				}
+			}
+			if reused != freed {
+				t.Skip("UNPROVED, not a pass: the handle address was not reused")
+			}
+			command(t, actor, "X 0 second", "X 0")
+			records := run.seal(t)
+			t.Logf("precondition: handle address %#x reused across two connections", freed)
+
+			if forced {
+				for _, record := range records {
+					for _, direction := range []fragment.Direction{fragment.Sent, fragment.Received} {
+						if placement, ok := record.Placement(direction); ok && placement.Whole() {
+							t.Errorf("a connection's %s is whole while a lifecycle probe was unplaced, so a reused "+
+								"handle could join two connections into one stream: %s", direction, placement)
+						}
+					}
+				}
+				return
+			}
+			whole := 0
+			for _, record := range records {
+				if placement, ok := record.Placement(fragment.Sent); ok && placement.Whole() {
+					whole++
+				}
+			}
+			if whole < 2 {
+				t.Errorf("the control, lifecycle probes held, certified %d whole sent directions over a reuse, "+
+					"want the two distinct connections", whole)
+			}
+		})
+	}
 }

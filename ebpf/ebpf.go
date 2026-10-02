@@ -547,10 +547,10 @@ const MaxEventPayloadBytes = 4096
 // then the socket's start (144), then the admission's origin (three eight-byte
 // fields, three four-byte, a kind and three padding bytes: 184), then the
 // event's place in its occupancy (five eight-byte fields, three flags and five
-// padding bytes): 232. The padding is explicit so no offset depends on the
-// compiler, and package bpf's layout guard pins every offset against the source
-// (bpf/ssl.bpf.h).
-const rawHeader = 232
+// padding bytes, then the dropped count appended after that padding): 240. The
+// padding is explicit so no offset depends on the compiler, and package bpf's
+// layout guard pins every offset against the source (bpf/ssl.bpf.h).
+const rawHeader = 240
 
 // Attach loads the program, places the points, fills the allowlist and begins
 // reading. Nothing is captured before this and nothing after Close.
@@ -631,7 +631,7 @@ func Attach(options Options) (*Session, error) {
 	// live: no occupancy forms, every connection is unsequenced, and nothing is
 	// certified. The session still runs and reports the unplaced points through
 	// coverage; the unplaced ones are named here for the account.
-	session.unprobed = session.unprobedByteMovers()
+	session.unprobed = session.unprobedRequired()
 	if !options.DeferCaptureLive && len(session.unprobed) == 0 {
 		if err := session.markCaptureLive(); err != nil {
 			_ = session.Close()
@@ -1133,11 +1133,13 @@ func (s *Session) markCaptureLive() error {
 // that first drives the window in which no occupancy may form.
 func (s *Session) MarkCaptureLive() error { return s.markCaptureLive() }
 
-// UnprobedByteMovers is the byte-moving entry points whose entry probe could not
-// be placed. While it is non-empty the session is not capture-live: nothing is
-// sequenced and no exchange is certified, so no exchange is written across the
-// bytes those unplaced functions move. Empty on a full placement.
-func (s *Session) UnprobedByteMovers() []string { return s.unprobed }
+// Unprobed is the entry points capture requires - byte-moving or lifecycle -
+// that were present and could not be placed. While it is non-empty the session is
+// not capture-live: nothing is sequenced and no exchange is certified, so no
+// exchange is written across bytes an unplaced byte mover moves, and no reused
+// handle joins two connections an unplaced lifecycle probe would have kept apart.
+// Empty on a full placement.
+func (s *Session) Unprobed() []string { return s.unprobed }
 
 // Declined is what this session would not authorise, and why.
 func (s *Session) Declined() []Declined { return s.declined }
@@ -1521,18 +1523,28 @@ func (s *Session) measurable() error {
 // a host that can attach, and would not place these (unlike ErrUnavailable).
 var ErrRefused = errors.New("the kernel placed none of the probes it was asked for")
 
-// unprobedByteMovers is the byte-moving entry points whose entry probe this
-// session could not place: the catalogued transfer functions and the
-// uncatalogued routes (SSL_sendfile). It keys on the ENTRY probe being absent,
-// not on confirmation: a function whose entry is placed but whose return is not
-// is measurable-only (its calls are gaps, which is sound), while one whose entry
-// is absent is invisible, which is what keeps capture from going live.
-func (s *Session) unprobedByteMovers() []string {
+// unprobedRequired is the entry points that were present to place and could not
+// be, without which capture cannot sequence safely, so it is not made live. Two
+// kinds: a byte-moving entry (the catalogued transfer functions and the
+// uncatalogued SSL_sendfile route), whose absence lets bytes move invisibly; and
+// a lifecycle probe (SSL_free's release, SSL_new's birth), whose absence lets a
+// reused handle address join two connections into one stream. It keys on the
+// needed probe being absent, not on confirmation: a byte-moving function whose
+// entry is placed but whose return is not is measurable-only (its calls are gaps,
+// which is sound). A symbol absent from the library is not placed and so is not
+// here (decision 477): only a present route whose probe failed leaves capture not
+// live.
+func (s *Session) unprobedRequired() []string {
 	var unprobed []string
 	for _, put := range s.placed {
-		if byteMovingEntry(put.point.Entry) && put.entry == nil {
-			unprobed = append(unprobed, put.point.Symbol)
+		switch {
+		case byteMovingEntry(put.point.Entry) && put.entry == nil:
+		case put.point.Entry == progFreeEntry && put.entry == nil:
+		case put.point.Return == progNewReturn && put.back == nil:
+		default:
+			continue
 		}
+		unprobed = append(unprobed, put.point.Symbol)
 	}
 	return unprobed
 }
@@ -2582,6 +2594,7 @@ func sequenceOf(sample []byte) probe.Sequence {
 		Unlocated:  order.Uint64(sample[200:208]),
 		Born:       sample[224] != 0,
 		Overlapped: sample[225] != 0,
+		Dropped:    order.Uint64(sample[232:240]),
 	}
 }
 
