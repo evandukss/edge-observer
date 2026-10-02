@@ -278,37 +278,3 @@ func TestAnInstanceInAPIDNamespaceNobodyEnumeratedIsRefusedAndTheReasonIsNamed(t
 		}
 	}
 }
-
-// aChild starts a process below this one that outlives the reading, in its own
-// pid namespace or this one's.
-func aChild(t *testing.T, ownNamespace bool) int32 {
-	t.Helper()
-	command := exec.Command("sleep", "300")
-	if ownNamespace {
-		// clone(CLONE_NEWPID) puts the child in the new namespace; unshare would move
-		// only this process's later children.
-		command.SysProcAttr = &unix.SysProcAttr{Cloneflags: unix.CLONE_NEWPID}
-	}
-	if err := command.Start(); err != nil {
-		t.Fatalf("start a child (own pid namespace: %v): %v", ownNamespace, err)
-	}
-	t.Cleanup(func() { _ = command.Process.Kill(); _ = command.Wait() })
-	return int32(command.Process.Pid)
-}
-
-// settled is the process at pid once its pid namespace can be read.
-func settled(t *testing.T, pid int32) process.Process {
-	t.Helper()
-	for range 400 {
-		table, err := process.Read(procfs)
-		if err != nil {
-			t.Fatalf("read processes: %v", err)
-		}
-		if p, ok := table.Lookup(pid); ok && p.Namespace.Known() {
-			return p
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("pid %d never appeared with a pid namespace this run could read", pid)
-	return process.Process{}
-}

@@ -1074,19 +1074,6 @@ func (s *Session) targetIdentity(one admission.Provenance) uint32 {
 	return identity
 }
 
-// provenanceOf is the target a grant's target field names, read back through
-// the identities this session gave (targetIdentity). One it never gave keeps
-// only its number.
-func (s *Session) provenanceOf(identity, rule uint32) admission.Provenance {
-	s.held.Lock()
-	target, known := s.targets[identity]
-	s.held.Unlock()
-	if !known {
-		return admission.Provenance{Number: int(identity), Rule: int(rule)}
-	}
-	return admission.Provenance{Target: target.Target, Number: target.Number, Rule: int(rule)}
-}
-
 // enumerate passes the pid namespaces of everything being admitted to the
 // program, which can resolve a pid only in those. A namespace beyond the
 // array's size is left out and every instance in it is declined by name.
