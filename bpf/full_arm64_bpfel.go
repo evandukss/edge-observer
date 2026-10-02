@@ -116,6 +116,8 @@ type fullOccupancy struct {
 	Unlocated          uint64
 	Sent               uint64
 	Received           uint64
+	DroppedSent        uint64
+	DroppedReceived    uint64
 	BusySent           uint64
 	BusyReceived       uint64
 	OverlappedSent     uint8

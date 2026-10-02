@@ -734,7 +734,12 @@ func TestCallsNestedInsideAnotherHandlesCallAreNumberedAsLost(t *testing.T) {
 		placement, ok := outerRecord.Placement(direction)
 		if ok && !placement.Whole() {
 			cut++
-			if placement.Because != connection.ObservationLost || !placement.Lost.Known || placement.Lost.Value == 0 {
+			// The nested calls took numbers nothing delivered, at the tail of a connection
+			// still open at the seal. A nested call is not a refused ring reservation, so
+			// its tail is explicitly incomplete, not a located loss (decision 476); the
+			// loss is counted once, on the nested-elsewhere counter (the precondition
+			// above), and not a second time here.
+			if placement.Because != connection.TerminalUnsettled || placement.Lost.Known {
 				t.Errorf("the outer connection's %s direction is %s", direction, placement)
 			}
 		}
@@ -990,7 +995,11 @@ func TestAnUncataloguedRouteShowsAsAGapInTheSentDirection(t *testing.T) {
 // A3: a return that never fires shows as a gap, because the number is taken at
 // entry. SSL_read's return probe is left unplaced (SkipReturn), so every read
 // enters, takes a received number, and never returns to us: the received
-// direction is a gap. The sent direction, whose return fires, stays whole.
+// direction is cut. Nothing received is ever delivered, so the gap is at the tail
+// of a connection open at the seal; a return that never fires is not a refused
+// ring reservation, so the tail is explicitly incomplete and counted on the
+// unmeasurable counter, not as a located loss (decision 476). The sent direction,
+// whose return fires, stays whole.
 func TestAReturnThatNeverFiresShowsAsAGap(t *testing.T) {
 	port := sequencePeer(t, nil)
 	actor := independentActor(t, sequenceActorSource, port)
@@ -1012,8 +1021,8 @@ func TestAReturnThatNeverFiresShowsAsAGap(t *testing.T) {
 		t.Errorf("the sent direction, whose return fires, is %+v", sent)
 	}
 	received, ok := records[0].Placement(fragment.Received)
-	if !ok || received.Whole() || received.Because != connection.ObservationLost {
-		t.Errorf("the received direction, whose returns never fire, is %+v, want a located gap", received)
+	if !ok || received.Whole() || received.Because != connection.TerminalUnsettled {
+		t.Errorf("the received direction, whose returns never fire, is %+v, want an incomplete tail", received)
 	}
 }
 

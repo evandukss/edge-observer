@@ -255,6 +255,91 @@ func TestAConnectionOpenWhenProductionStopsIsSettledByWhatTheProducerHolds(t *te
 	}
 }
 
+// An open connection's undelivered tail counts exactly the producer's refused
+// ring reservations (decision 476) and nothing else. A drop is counted even
+// where it sits below a later event the producer submitted and the stop
+// abandoned - the case the "highest submitted number" form misses; an abandoned
+// tail with no drop is not counted.
+func TestAnOpenTailCountsItsDroppedReservationsAndNotItsAbandonedEvents(t *testing.T) {
+	// drop is what a producer holds for an open connection: its last number taken,
+	// and how many of that direction's reservations the ring refused.
+	drop := func(last, dropped uint64) probe.Final {
+		return probe.Final{Known: true, Sent: probe.Terminal{Last: last, Dropped: dropped}}
+	}
+	for name, one := range map[string]struct {
+		deliver int // transfers delivered before the stop, of 10 then 6 bytes
+		final   probe.Final
+		from    uint64
+		because connection.Reason
+		lost    int64 // the located loss, -1 for an unsettled tail that counts none
+	}{
+		// Two delivered (numbers 1, 2); number 3's reservation was refused. The drop is
+		// the tail's located loss.
+		"a refused reservation in the tail": {deliver: 2, final: drop(3, 1),
+			from: 16, because: connection.ObservationLost, lost: 1},
+		// One delivered (number 1); number 2's reservation was refused and number 3 was
+		// submitted but the stop abandoned it. Counting the producer's drops, not the
+		// shortfall and not the highest submitted number, counts the drop and leaves the
+		// abandoned event inside the cut, uncounted.
+		"a drop below a submitted-but-abandoned event": {deliver: 1, final: drop(3, 1),
+			from: 10, because: connection.ObservationLost, lost: 1},
+		// Two delivered; number 3 was submitted and not drained. No reservation was
+		// refused, so the tail is incomplete, not a located loss.
+		"an abandoned tail with no drop": {deliver: 2, final: drop(3, 0),
+			from: 16, because: connection.TerminalUnsettled, lost: -1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := capture.Recording(&collected{}, nil,
+				capture.Settles(settler{held: probe.Settlement{Occupancy: 7, Final: one.final}}))
+			lengths := []uint32{10, 6}
+			for i := 0; i < one.deliver; i++ {
+				s.Transfer(numberedAs(worker, 0x18, fragment.Sent, lengths[i], 7, uint64(i+1)))
+			}
+			s.Finish(at)
+
+			held := placementOf(t, s.Records(), 1, fragment.Sent)
+			if held.Positions != connection.PositionsUnknownFrom || held.From != one.from ||
+				held.Because != one.because {
+				t.Fatalf("the tail is %s, want unknown from %d because %s", held, one.from, one.because)
+			}
+			if one.lost < 0 && held.Lost.Known {
+				t.Errorf("an abandoned tail counts %v lost, and a drop is what the tail counts", held.Lost)
+			}
+			if one.lost >= 0 && (!held.Lost.Known || held.Lost.Value != one.lost) {
+				t.Errorf("the tail counts %v lost, want %d", held.Lost, one.lost)
+			}
+			wantStats := one.lost
+			if wantStats < 0 {
+				wantStats = 0
+			}
+			if got := s.Stats().Lost; got != wantStats {
+				t.Errorf("the session counts %d lost, want %d", got, wantStats)
+			}
+		})
+	}
+}
+
+// A drop already located mid-stream, where a later number was delivered, is not
+// counted a second time when the tail is settled: the tail counts the dropped
+// total less what number() already located for the direction.
+func TestADropLocatedMidStreamIsNotCountedAgainAtTheTail(t *testing.T) {
+	s := capture.Recording(&collected{}, nil, capture.Settles(settler{held: probe.Settlement{Occupancy: 7,
+		Final: probe.Final{Known: true, Sent: probe.Terminal{Last: 6, Dropped: 3}}}}))
+	// Numbers 1 and 4 arrive; numbers 2 and 3 were refused and are located
+	// mid-stream by number 4. One more reservation was refused at the tail (number
+	// 5), and number 6 was submitted and abandoned.
+	s.Transfer(numberedAs(worker, 0x18, fragment.Sent, 10, 7, 1))
+	s.Transfer(numberedAs(worker, 0x18, fragment.Sent, 6, 7, 4))
+	s.Finish(at)
+
+	// Three reservations were refused in all: two located mid-stream, one at the
+	// tail. Counting each once is three, not the four a tail that re-counted the two
+	// mid-stream drops against the shortfall would report.
+	if got := s.Stats().Lost; got != 3 {
+		t.Errorf("the session counts %d lost over two mid-stream drops and one tail drop, want 3", got)
+	}
+}
+
 // A handle reused after an ending nobody delivered: the producer's next
 // occupancy there is a different number, which retires the old connection
 // with both tails unsettled and begins a new one. The ending of a later

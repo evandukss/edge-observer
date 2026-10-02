@@ -152,6 +152,12 @@ type stream struct {
 	// numbered is the last producer number seen in each direction.
 	numbered map[fragment.Direction]uint64
 
+	// locatedByNumber is how many losses number() has already counted mid-stream
+	// in each direction, from gaps below a delivered number. settleLocked subtracts
+	// it from the direction's total located losses (taken, less submitted, less any
+	// one in-flight call) so the tail's losses are counted once, not a second time.
+	locatedByNumber map[fragment.Direction]int64
+
 	// unlocated is the producer's count of losses no occupancy could take, as of
 	// this stream's last observation.
 	unlocated uint64
@@ -441,6 +447,7 @@ func (s *Session) number(found *stream, t probe.Transfer) {
 	case sequence.Number > last+1:
 		missing := int64(sequence.Number - last - 1)
 		s.stats.Lost += missing
+		found.locatedByNumber[direction] += missing
 		s.cutLocked(found, direction, at, connection.ObservationLost, missing, "")
 	default:
 		s.cutLocked(found, direction, at, connection.OperationsOverlapped, 0,
@@ -531,20 +538,21 @@ func (s *Session) follow(t probe.Transfer) *stream {
 	s.next++
 	s.occupancies[place]++
 	found = &stream{
-		lifetime:   !s.told() || s.observing.Lifecycle,
-		id:         s.next,
-		process:    t.Process,
-		instance:   t.Instance,
-		network:    connection.Netns{Device: t.Network.Device, Inode: t.Network.Inode},
-		generation: s.occupancies[place],
-		endpoint:   t.Endpoint,
-		firstSeen:  t.At,
-		opened:     t.Ends.OpenedAt,
-		offsets:    make(map[fragment.Direction]uint64, 2),
-		begun:      begun,
-		occupancy:  t.Sequence.Occupancy,
-		numbered:   make(map[fragment.Direction]uint64, 2),
-		unlocated:  t.Sequence.Unlocated,
+		lifetime:        !s.told() || s.observing.Lifecycle,
+		id:              s.next,
+		process:         t.Process,
+		instance:        t.Instance,
+		network:         connection.Netns{Device: t.Network.Device, Inode: t.Network.Inode},
+		generation:      s.occupancies[place],
+		endpoint:        t.Endpoint,
+		firstSeen:       t.At,
+		opened:          t.Ends.OpenedAt,
+		offsets:         make(map[fragment.Direction]uint64, 2),
+		begun:           begun,
+		occupancy:       t.Sequence.Occupancy,
+		numbered:        make(map[fragment.Direction]uint64, 2),
+		locatedByNumber: make(map[fragment.Direction]int64, 2),
+		unlocated:       t.Sequence.Unlocated,
 	}
 	if t.Sequence.Unlocated > 0 && t.Sequence.Occupancy != 0 {
 		// The conservative rule for a stream begun after a loss nothing located:
@@ -615,22 +623,41 @@ func (s *Session) settleLocked(found *stream, final probe.Final, ending bool) {
 			terminal--
 		}
 		switch {
-		case terminal > last && ending:
-			// A connection the producer saw end (a release): its last numbers are
-			// settled, so a number past the last delivered is a lost last transfer,
-			// located and counted.
-			missing := int64(terminal - last)
-			s.stats.Lost += missing
-			s.cutLocked(found, one.direction, at, connection.ObservationLost, missing, "")
 		case terminal > last:
-			// An open connection settled at session end: a number past the last
-			// delivered is an undelivered tail, not a located capture loss. The session
-			// ended before it arrived; whether it was dropped by the ring, refused at
-			// the gate, or admitted and not drained is counted on its own counter, not
-			// a second time here. The tail is cut so no exchange spans it, uncounted.
-			s.cutLocked(found, one.direction, at, connection.TerminalUnsettled, 0,
-				"the producer numbered transfers past the last delivered that the session end did not "+
-					"deliver; whether they were lost, refused or undrained is counted elsewhere")
+			missing := int64(terminal - last)
+			located := missing
+			if !ending {
+				// An open connection settled at session end. Only the producer's refused
+				// ring reservations in the tail are located losses (decision 476): the
+				// dropped count, less the drops number() already located mid-stream (a drop
+				// below a delivered number), is the tail's drops. Counting the producer's
+				// own failed reservations, not the shortfall, is what counts a drop that
+				// sits below a later submitted-but-abandoned event and leaves the abandoned
+				// event, a return refused for a lost grant, and a nested call nothing
+				// numbers as the uncounted, explicitly incomplete tail (decision 475).
+				located = int64(one.terminal.Dropped) - found.locatedByNumber[one.direction]
+				if located < 0 {
+					located = 0
+				}
+				if located > missing {
+					located = missing
+				}
+			}
+			if located > 0 {
+				// A connection the producer saw end counts its whole shortfall; an open one
+				// with a refused reservation in its tail counts those drops. The direction
+				// is cut from where it stood: any abandoned events beyond the drops lie
+				// inside the cut, uncounted here and counted on their own counter.
+				s.stats.Lost += located
+				s.cutLocked(found, one.direction, at, connection.ObservationLost, located, "")
+			} else {
+				// No refused reservation accounts for the shortfall: an event submitted and
+				// not drained, a return refused for a lost grant, or a nested call. The
+				// direction is cut so no exchange spans it, counted on its own counter.
+				s.cutLocked(found, one.direction, at, connection.TerminalUnsettled, 0,
+					"the producer numbered transfers past the last delivered that the session end did not "+
+						"deliver and that no refused reservation accounts for; counted as incomplete, not lost")
+			}
 		case terminal < last:
 			s.cutLocked(found, one.direction, at, connection.TerminalUnsettled, 0,
 				"the producer's last number is behind one delivered, so the direction's evidence disagrees")

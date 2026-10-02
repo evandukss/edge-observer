@@ -12,14 +12,19 @@ import (
 
 // sequenceValue is one handle's occupancy as the program declares it
 // (bpf/ssl.bpf.h, struct occupancy): its name, the admission it was begun
-// under, the unlocated count then, the last number taken per direction, the
-// thread in a call per direction, and the overlap and birth marks.
+// under, the unlocated count then, the last number taken per direction, how many
+// of each direction's numbers were lost to a refused ring reservation, the thread
+// in a call per direction, and the overlap and birth marks. The field order
+// mirrors the C struct exactly; the ABI guard reads the compiled object's own
+// size.
 type sequenceValue struct {
 	ID                 uint64
 	Generation         uint64
 	Unlocated          uint64
 	Sent               uint64
 	Received           uint64
+	DroppedSent        uint64
+	DroppedReceived    uint64
 	BusySent           uint64
 	BusyReceived       uint64
 	OverlappedSent     uint8
@@ -57,8 +62,8 @@ func (s *Session) Settled(handle probe.Handle) (probe.Settlement, error) {
 		Occupancy: value.ID,
 		Final: probe.Final{
 			Known:    true,
-			Sent:     probe.Terminal{Last: value.Sent, InFlight: value.BusySent != 0},
-			Received: probe.Terminal{Last: value.Received, InFlight: value.BusyReceived != 0},
+			Sent:     probe.Terminal{Last: value.Sent, Dropped: value.DroppedSent, InFlight: value.BusySent != 0},
+			Received: probe.Terminal{Last: value.Received, Dropped: value.DroppedReceived, InFlight: value.BusyReceived != 0},
 		},
 	}, nil
 }

@@ -853,6 +853,16 @@ struct occupancy {
 	__u64 unlocated;   // the unlocated count when it began
 	__u64 sent;        // the last number taken in each direction
 	__u64 received;
+	// How many byte-moving calls in each direction lost their event to a refused ring
+	// reservation (the event did not fit). This is the located loss at the tail of an
+	// open connection: settle counts it, less what capture already located mid-stream,
+	// so a drop that sits below a later submitted-but-abandoned event is still counted
+	// and an abandoned event is not (decision 476; settleLocked, package capture). A
+	// return refused for a lost grant and a nested call nothing numbers are gaps too,
+	// but not reservation failures, so they are the uncounted incomplete tail, not
+	// this.
+	__u64 dropped_sent;
+	__u64 dropped_received;
 	__u64 busy_sent;   // the pid_tgid of the call in flight in each direction, or zero
 	__u64 busy_received;
 	__u8  overlapped_sent;
@@ -1709,8 +1719,10 @@ static __always_inline void obs_origin(const struct admission *grant, struct ori
 
 // obs_emit submits an event. length is meaningful only when measured is set.
 // who, generation and origin come from the grant that was checked, not the pid
-// alone.
-static __always_inline void obs_emit(const struct instance_key *who, __u64 generation,
+// alone. It returns 1 when the event reached the ring and 0 when the reservation
+// was refused, so a byte-moving call's return can count its number as submitted
+// only where it was (obs_submitted).
+static __always_inline int obs_emit(const struct instance_key *who, __u64 generation,
 				     const struct origin *origin,
 				     __u64 ssl, __u32 length, __u8 dir,
 				     __u8 early, __u8 measured, __u8 kind,
@@ -1732,7 +1744,7 @@ static __always_inline void obs_emit(const struct instance_key *who, __u64 gener
 		// locate it. A transfer the occupancy numbered leaves its gap there instead.
 		if (kind == OBS_TRANSFER && length > 0 && !at->occupancy)
 			obs_unlocate();
-		return;
+		return 0;
 	}
 	e->occupancy = at->occupancy;
 	e->number = at->number;
@@ -1800,6 +1812,23 @@ static __always_inline void obs_emit(const struct instance_key *who, __u64 gener
 #endif
 
 	bpf_ringbuf_submit(e, 0);
+	return 1;
+}
+
+// obs_dropped records that a byte-moving call's event did NOT reach the ring, so
+// its number is a located loss the settle can count at the tail. occ is the one
+// obs_return already holds, so this takes no further lookup and no stack; a call
+// with no occupancy counts nothing (it was an unlocated loss already). Counting
+// each failed reservation, rather than the highest number submitted, is what keeps
+// a drop below a later submitted-but-abandoned event counted.
+static __always_inline void obs_dropped(struct occupancy *occ, __u8 dir, int reserved)
+{
+	if (!occ || reserved)
+		return;
+	if (dir == OBS_SENT)
+		occ->dropped_sent++;
+	else
+		occ->dropped_received++;
 }
 
 // obs_wraps says an entry point reaches another on the same handle and
@@ -2070,8 +2099,9 @@ static __always_inline int obs_return(void *ctx, __u32 func)
 		// measured 0, the shape P4.1-T3 repairs (it is the unknown-length path), and
 		// its number is filled all the same.
 		__u8 measured = c->count == OBS_COUNT_RETURNED ? 1 : 0;
-		obs_emit(&key, generation, &origin, c->ssl, 0, c->dir, c->early, measured, OBS_TRANSFER, 0,
-			 fd, binding, socket, fd_state, c->outcome, &ends, &at, 0, 0, 0);
+		obs_dropped(occ, c->dir,
+			obs_emit(&key, generation, &origin, c->ssl, 0, c->dir, c->early, measured, OBS_TRANSFER, 0,
+				 fd, binding, socket, fd_state, c->outcome, &ends, &at, 0, 0, 0));
 		obs_unhold(occ, c->dir, id);
 		return 0;
 	}
@@ -2083,8 +2113,9 @@ static __always_inline int obs_return(void *ctx, __u32 func)
 			obs_unhold(occ, c->dir, id);
 			return 0;
 		}
-		obs_emit(&key, generation, &origin, c->ssl, (__u32)rc, c->dir, c->early, 1,
-			 OBS_TRANSFER, c->buf, fd, binding, socket, fd_state, c->outcome, &ends, &at, 0, 0, 0);
+		obs_dropped(occ, c->dir,
+			obs_emit(&key, generation, &origin, c->ssl, (__u32)rc, c->dir, c->early, 1,
+				 OBS_TRANSFER, c->buf, fd, binding, socket, fd_state, c->outcome, &ends, &at, 0, 0, 0));
 		obs_unhold(occ, c->dir, id);
 		return 0;
 	}
@@ -2101,15 +2132,17 @@ static __always_inline int obs_return(void *ctx, __u32 func)
 		obs_read_taken(generation);
 		if (bpf_probe_read_user(&count, sizeof(count), (void *)c->pcount) == 0 &&
 		    count > 0 && count <= c->cap) {
-			obs_emit(&key, generation, &origin, c->ssl, (__u32)count, c->dir, c->early, 1,
-				 OBS_TRANSFER, c->buf, fd, binding, socket, fd_state, c->outcome, &ends, &at, 0, 0, 0);
+			obs_dropped(occ, c->dir,
+				obs_emit(&key, generation, &origin, c->ssl, (__u32)count, c->dir, c->early, 1,
+					 OBS_TRANSFER, c->buf, fd, binding, socket, fd_state, c->outcome, &ends, &at, 0, 0, 0));
 			obs_unhold(occ, c->dir, id);
 			return 0;
 		}
 	}
 #endif
-	obs_emit(&key, generation, &origin, c->ssl, 0, c->dir, c->early, 0, OBS_TRANSFER, 0,
-		 fd, binding, socket, fd_state, c->outcome, &ends, &at, 0, 0, 0);
+	obs_dropped(occ, c->dir,
+		obs_emit(&key, generation, &origin, c->ssl, 0, c->dir, c->early, 0, OBS_TRANSFER, 0,
+			 fd, binding, socket, fd_state, c->outcome, &ends, &at, 0, 0, 0));
 	obs_unhold(occ, c->dir, id);
 	return 0;
 }
