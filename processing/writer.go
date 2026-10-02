@@ -47,6 +47,14 @@ var (
 	ErrOutputClosed = errors.New("approved output is closed")
 )
 
+// ArtifactVersion3 identifies one exchange per line, or a retirement line.
+const ArtifactVersion3 = "observer.approved/3"
+
+const (
+	ArtifactExchange   = "exchange"
+	ArtifactConnection = "connection"
+)
+
 // Artifact is one JSON line, followed by LF, in approved.jsonl. All pipelines
 // and sinks share this file. Route carries the compiled pipeline, sink and kind;
 // PolicyRevision identifies the configuration used at capture, never at read.
@@ -72,6 +80,11 @@ var (
 // No raw observation, undecidable tail, or source copy accompanies this line.
 // A reader decodes this shape directly and must not re-run local policy.
 type Artifact struct {
+	Record     string `json:"record,omitempty"`
+	Session    string `json:"session,omitempty"`
+	ExchangeID string `json:"exchange_id,omitempty"`
+	Index      *int   `json:"index,omitempty"`
+
 	Version                  string                    `json:"version"`
 	PolicyRevision           string                    `json:"policy_revision"`
 	Route                    config.DurableRoute       `json:"route"`

@@ -19,6 +19,61 @@ extension's derived records, never to these.
 Every record carries `record` (its kind) and `version`. A record set covers ONE capture session: connection
 ids are unique within a session and mean nothing across sessions.
 
+## Approved line envelope
+
+Durable approved output is LF-terminated JSON, version `observer.approved/3`.
+Each line is fully processed under its `policy_revision`. Stable files append
+across sessions, so `session` is required on every line.
+
+| Member | Meaning |
+|---|---|
+| `version` | `observer.approved/3` |
+| `record` | `exchange` or `connection` |
+| `session` | the session that authorized this line |
+| `policy_revision` | the configuration revision applied before release |
+| `route` | the compiled `pipeline`, `sink` and route `kind` |
+| `connection` | connection metadata in the record contract below |
+| `exchange_id` | exchange lines only: a positive decimal string, unique within the session |
+| `index` | exchange lines only: the zero-based index within the connection |
+| `reconstruction` | exchange lines only: exactly one complete, processed request/response pair; its exchange index equals `index` |
+| `reconstruction_truncation` | retirement lines only, where an incomplete suffix is known |
+| `policy_exclusions` | a present list of fields removed from captured content |
+| `extension_outcomes` | a present list of each extension's outcome for this exchange |
+| `replacement_exclusions` | a present list of fields removed from extension replacement content |
+
+Exchange lines go only on the `exchanges` route. Metadata can be provisional
+before retirement and never asserts an observed close without evidence. One
+connection line is emitted at retirement, only on the `connections` route. It
+carries final metadata, no exchange id, index or reconstruction, and empty
+evidence lists. On an exchange, all three evidence lists refer only to that
+exchange's index; no exclusions means `[]`, not an absent or null list.
+
+A retirement line's truncation has `state: "truncated"`, `suffix: "indeterminate"`
+and one or two `stops`, ordered sent then received without repetition. Each stop
+names `direction`, the decimal `offset` of the first excluded byte, a `reason`,
+and the decimal `evidence_offset` at or after that offset. Reasons are
+`capture_hole`, `positions_unknown`, `incomplete_message`, `malformed_message`,
+`ambiguous_framing`, `processing_limit`, `unsupported_message`, `unpaired_exchange`
+or `unparsed_suffix`. This evidence describes an incomplete suffix, independently
+of the connection's actual ending. Only complete pairs appear in exchange lines.
+
+Ids are issued monotonically before delivery and never reused. The same exchange
+has the same id and connection index on every route and in every extension.
+Indexes continue across releases of an open connection. A dropped line cannot
+renumber later exchanges. With `write_content` false, no exchange line is emitted
+and no exchange id is issued; the retirement line remains. Version 3 has no
+`exchange_ids` range. Historical versions 1 and 2 remain readable under their
+original rules; version 2 carries its connection's contiguous id range.
+
+Only immutable, policy-eligible encoded lines enter the bounded delivery queue.
+Enqueue is authorized in one ordering with invalidation; a line already queued
+may be written after later invalidation. Full queues drop lines. Authorized,
+written, failed, dropped and pending counts are separate. A failed attempt may
+have written a prefix, is never counted as written, and is not retried. The next
+record starts on a new line; a damaged record is malformed on inspection. Reader
+selection over several explicit files filters by session without claiming
+continuity between those files.
+
 ## Encoding
 
 The tests use JSON. That is the encoding the observer already writes; it is not a choice of

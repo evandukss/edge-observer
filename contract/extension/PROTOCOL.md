@@ -61,15 +61,14 @@ attribution of what an extension says, never its truth.
 
 ## Ids
 
-**Every exchange the observer sends has an `id`: a positive decimal string from one sequence for the
-whole session, never reused.** Ids are allocated contiguously to one connection's exchanges, in index
-order, when the connection's batch is dispatched, so the exchange at `index` i of a batch whose range starts
-at `first` has id `first + i`. Every extension sees the same id for the same exchange.
-
-**Each line of the approved output carries its connection's id range** (`exchange_ids`, documented with
-the approved output in `docs/approved-inspection.md`), so every id maps to one connection and one index,
-whether or not that exchange was written. Ids are issued only where content is written:
-with `write_content` false no exchange is sent or written and no id is issued.
+**Every exchange the observer sends has an `id`: a positive decimal string from
+one sequence for the session, never reused.** Every extension sees the same id
+for the same exchange. The approved exchange line carries that `exchange_id`,
+its `session`, its connection metadata and its zero-based connection `index`.
+Indexes and ids survive dropped lines and continue across releases of an open
+connection. The retirement line carries final metadata, without an id range.
+See [the line contract](../record/record.md#approved-line-envelope).
+With `write_content` false no exchange is sent or written and no id is issued.
 
 A result must name an id this generation was sent and has not answered. A derived record's source id is
 valid when it lies in a range issued so far in the session. **That establishes that the exchange existed
@@ -237,8 +236,8 @@ data; that belongs in `remove`**, which applies before any extension and always 
 - `record`: a JSON object, the extension's own payload.
 
 **Derived records go to the extension's own file and never into the observer's records, output or
-account.** The file is `derived-<name>.jsonl` in the session's directory, created exclusively with mode
-0600. Each line the observer writes is:
+account.** The file is `derived-<name>.jsonl` under the configured directory, opened in append mode with mode
+0600 across sessions. Each line the observer writes is:
 
     {"version": "observer.derived/1", "extension": "<name>", "session": "<id>", "generation": "<n>",
      "processing_revision": "sha256:...", "effects": "extension_declared_not_observer_enforced",
@@ -255,14 +254,15 @@ A derived record is refused - counted, never written, and never fatal to the ses
 | `unknown_source` | a source id is outside every range issued so far |
 | `rate` | the extension is over `derived_lines_per_second` |
 | `queue_full` | `derived_queue_bytes` of its records are already waiting to be written |
-| `budget` | writing it would take derived output over half of `output_mib`, or all output over `output_mib` |
 | `stopped` | the session's output has stopped |
 | `write_failed` | the write failed |
 
-**Derived output consumes at most half of `output_mib`.** With M the allowance, C the observer's own
-bytes and D all derived bytes, a derived line of n bytes is written only if D + n <= M / 2 and C + D + n <=
-M; the observer's own line only if C + D + n <= M. **A refused derived line never ends the observer's own
-output.**
+Derived output is best effort, with no cumulative byte budget. Approved and derived
+lines share a bounded sink queue; queued and in-flight bytes count together. A
+full queue drops immediately. Unavailable or failing files cost counted attempts,
+never monitoring or extension activation. Delivery counts keep authorized,
+written, failed, dropped and pending separate. A failed attempt is not retried
+and does not prove the line absent from the file. A later write starts a new line.
 
 **Reading results never waits behind derived output**: a derived record that cannot be queued is refused
 at once. **An extension refused for rate in each of `derived_flood_seconds` consecutive seconds is
@@ -351,8 +351,7 @@ Every constant, in one place. `start` discloses each under the name in the first
 | `derived_sources` | 1024 | source ids one derived record may name |
 | `reason_bytes` | 256 | a `failed` result's `reason`, kept escaped and cut there, in the observer's log |
 
-The derived output budget is not a constant: it is half of the configuration's `output_mib`. `timeout_ms`
-is each entry's own, from 1 to 60000.
+`timeout_ms` is each entry's own, from 1 to 60000. There is no cumulative output budget.
 
 ## Messages
 
