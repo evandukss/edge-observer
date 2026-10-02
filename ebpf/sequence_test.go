@@ -137,9 +137,11 @@ func nestedPeer(t *testing.T) int {
 //	C n r tag     n threads, thread i doing r exchanges on handle i
 //	F i           free handle i, printing its address
 //	N i           a new handle in slot i, printing its address
-//	R i           two threads reading on handle i, the second entering while
-//	              the first waits
-//	S i           shut handle i's socket down and report both reads
+//	R i           a thread reading on handle i, and a second read entered on
+//	              the same handle while the first waits, made to return at once
+//	              (the handle marked as having received a shutdown for that
+//	              moment, so OpenSSL touches no record state); reports the second
+//	S i           shut handle i's socket down and report the first read
 //	Q             free every handle
 const sequenceActorSource = `
 #include <arpa/inet.h>
@@ -248,16 +250,18 @@ int main(int argc, char **argv) {
             int result = open_handle(i);
             printf("N %d %lu\n", result, (unsigned long)ssl_of[i]);
         } else if (line[0] == 'R' && sscanf(line + 1, "%d", &i) == 1) {
-            for (int r = 0; r < 2; r++) {
-                readers[r].index = i; readers[r].result = 0;
-                pthread_create(&reading[r], NULL, read_once, &readers[r]);
-                usleep(300000);
-            }
-            printf("R ready\n");
+            for (int r = 0; r < 2; r++) { readers[r].index = i; readers[r].result = -9; }
+            pthread_create(&reading[0], NULL, read_once, &readers[0]);
+            usleep(300000);
+            SSL_set_shutdown(ssl_of[i], SSL_RECEIVED_SHUTDOWN);
+            pthread_create(&reading[1], NULL, read_once, &readers[1]);
+            pthread_join(reading[1], NULL);
+            SSL_set_shutdown(ssl_of[i], 0);
+            printf("R ready %d\n", readers[1].result);
         } else if (line[0] == 'S' && sscanf(line + 1, "%d", &i) == 1) {
             shutdown(fd_of[i], SHUT_RDWR);
-            for (int r = 0; r < 2; r++) pthread_join(reading[r], NULL);
-            printf("S %d %d\n", readers[0].result, readers[1].result);
+            pthread_join(reading[0], NULL);
+            printf("S %d\n", readers[0].result);
         } else if (line[0] == 'Q') {
             for (i = 0; i < HANDLES; i++) if (ssl_of[i]) { SSL_free(ssl_of[i]); close(fd_of[i]); ssl_of[i] = NULL; }
             printf("Q 0\n");
@@ -622,9 +626,12 @@ func TestRingLossIsLocatedToTheConnectionsThatLostAndCountedThere(t *testing.T) 
 
 // Two calls in one direction on one handle at once, which OpenSSL's supported
 // use forbids: a read waiting on a silent peer, and a second read entered on the
-// same handle from another thread meanwhile. The producer marks the direction
-// at the second entry, so the read that receives the one record the peer then
-// sends carries the mark, and capture refuses the direction.
+// same handle from another thread meanwhile. Two reads genuinely racing on one
+// handle crash the client (measured), so the second is made to return before
+// OpenSSL touches the record layer; its entry is what the producer sees. The
+// producer marks the direction at that entry, so the first read, receiving the
+// one record the peer then sends, carries the mark, and capture refuses the
+// direction.
 func TestOverlappingReadsOnOneHandleAreMarkedAndRefused(t *testing.T) {
 	send := make(chan struct{})
 	port := sequencePeer(t, send)
@@ -632,7 +639,7 @@ func TestOverlappingReadsOnOneHandleAreMarkedAndRefused(t *testing.T) {
 	run := deliverHeld(t, actor, nil, 0)
 
 	command(t, actor, "O 1", "O 0")
-	command(t, actor, "R 0", "R ready")
+	command(t, actor, "R 0", "R ready 0")
 	overlapped := counter(t, run.session.Overlapped)
 	close(send)
 	time.Sleep(500 * time.Millisecond)
