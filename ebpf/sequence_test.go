@@ -868,10 +868,9 @@ func connectionCarrying(t *testing.T, fragments []fragment.Record, text string) 
 
 // The occupancy table full: the program keeps no sequence for a handle it
 // cannot enter, its transfers carry none, and each refused occupancy is a loss
-// placed nowhere. Capture applies the conservative rule: the unsequenced
-// connection establishes nothing, every connection live across the refusal is
-// cut where it stood, and a connection begun after it establishes nothing.
-func TestAFullOccupancyTableFallsBackToTheConservativeRule(t *testing.T) {
+// placed nowhere. The unsequenced connection establishes nothing; an occupancy
+// begun before that loss and one with an observed birth keep their evidence.
+func TestAFullOccupancyTablePreservesProvenOccupancyOrigins(t *testing.T) {
 	port := sequencePeer(t, nil)
 	actor := independentActor(t, sequenceActorSource, port)
 	run := deliverHeld(t, actor, map[string]uint32{"occupancies": 2}, 0)
@@ -933,20 +932,12 @@ func TestAFullOccupancyTableFallsBackToTheConservativeRule(t *testing.T) {
 		t.Errorf("the connection the table refused is %s", placement)
 	}
 	live := connectionCarrying(t, fragments, "/before-0")
-	before := uint64(0)
-	for _, one := range fragments {
-		if one.Connection == live && one.Direction == fragment.Sent && strings.Contains(string(one.Payload), "/before-0") {
-			before = one.End()
-		}
-	}
-	if placement := placementIn(live, fragment.Sent); placement.Positions != connection.PositionsUnknownFrom ||
-		placement.From != before || placement.Because != connection.ObservationLost || placement.Lost.Known {
-		t.Errorf("a connection live across the refusals is %s, want unknown from %d with the count undetermined",
-			placement, before)
+	if placement := placementIn(live, fragment.Sent); placement.Positions != connection.PositionsEstablished {
+		t.Errorf("a connection begun before the refusals lost its evidence: %s", placement)
 	}
 	later := connectionCarrying(t, fragments, "/later-3")
-	if placement := placementIn(later, fragment.Sent); placement.Positions != connection.PositionsUnknownThroughout {
-		t.Errorf("a connection begun after the refusals is %s", placement)
+	if placement := placementIn(later, fragment.Sent); placement.Positions != connection.PositionsEstablished {
+		t.Errorf("an observed birth after the refusals lost its evidence: %s", placement)
 	}
 }
 
