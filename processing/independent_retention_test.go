@@ -311,6 +311,7 @@ func independentExtensionHistory(t *testing.T, sparse bool) {
 }
 
 func TestIndependentDerivedChurnReclaimsQueuedLines(t *testing.T) {
+	const timeout = time.Second
 	clock := &independentClock{now: time.Unix(1900000000, 0), armed: make(chan time.Duration, 128)}
 	ready := make(chan struct{}, 1)
 	entered := make(chan struct{}, 2)
@@ -318,7 +319,7 @@ func TestIndependentDerivedChurnReclaimsQueuedLines(t *testing.T) {
 	quit := make(chan struct{})
 	supervisor := extension.Start(extension.Config{
 		Name: "derived-retained", Command: []string{independentPeer(t), "--mode", "derived-flood", "--count", "2"},
-		Session: "retained", Revision: "retained", TimeoutMS: 1000, WaitingBytes: 64, Clock: clock,
+		Session: "retained", Revision: "retained", TimeoutMS: timeout.Milliseconds(), WaitingBytes: 64, Clock: clock,
 		Issued: func() uint64 { return 1280 },
 		Events: func(e extension.Event) {
 			if e.Kind == extension.Ready {
@@ -382,7 +383,9 @@ func TestIndependentDerivedChurnReclaimsQueuedLines(t *testing.T) {
 		if n := independentStore(t, independentOccupancy(t, supervisor), "extension.derived").Held; n != 0 {
 			t.Errorf("derived queue retains %d at zero live lines", n)
 		}
-		clock.advance(time.Second)
+		// A result can arrive before the stdin writer clears its deadline.
+		// This serial fixture advances at most once per write, below that timeout.
+		clock.advance(timeout / 2)
 	}
 	counts := supervisor.Counts()
 	if counts.DerivedRefused != 0 {
