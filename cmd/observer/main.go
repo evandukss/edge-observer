@@ -649,10 +649,8 @@ func (d *daemon) serveUntilStop(stopping, asking <-chan os.Signal, ticks <-chan 
 
 // daemon is one output session between its activation and its seal.
 type daemon struct {
-	// Retained for older in-package clients; never selected or forwarded.
-	storageExhausted <-chan struct{}
-	policy           policy.Policy
-	session          string
+	policy  policy.Policy
+	session string
 
 	// path is the configuration this session started with, which reload reads
 	// again.
@@ -731,7 +729,7 @@ func begin(read policy.Policy, session string) (*daemon, error) {
 	}
 	removeOutput := func() { _ = output.Close(); _ = os.RemoveAll(directory) }
 
-	prepared, err := protected.Prepare(read, participants, uint64(read.Settings.AdmittedEventLimit), nil)
+	prepared, err := protected.Prepare(read, participants, uint64(read.Settings.AdmittedEventLimit))
 	if err != nil {
 		removeOutput()
 		return nil, err

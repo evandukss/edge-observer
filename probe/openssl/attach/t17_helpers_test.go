@@ -169,12 +169,17 @@ func t17ReadRetained(t *testing.T, directory string, sealed account.Account, pid
 	t.Helper()
 	var out t17Retained
 	requests := 0
-	err := processing.ReadArtifacts(os.DirFS(directory), func(artifact processing.Artifact) error {
+	output := filepath.Dir(filepath.Dir(directory))
+	err := processing.ReadArtifactFiles(os.DirFS(output), []string{processing.ArtifactName}, filepath.Base(directory), func(artifact processing.Artifact) error {
 		if artifact.Connection.Process.PID != pid {
 			return nil
 		}
 		out.ending = artifact.Connection.Ending.How
 		if artifact.Reconstruction == nil {
+			// The retirement record: an incomplete suffix's evidence is on it.
+			if artifact.ReconstructionTruncation != nil {
+				out.truncation = artifact.ReconstructionTruncation
+			}
 			return nil
 		}
 		for _, exchange := range artifact.Reconstruction.Exchanges {
@@ -200,12 +205,13 @@ func t17ReadRetained(t *testing.T, directory string, sealed account.Account, pid
 	return out
 }
 
-// t17DurableBytes is every byte of the session's approved output, for a scan
-// that a leak anywhere - a header value, a body, a diagnostic field - would
-// fail, independently of how any one field was parsed.
+// t17DurableBytes is every byte of the approved output the session wrote to,
+// every session's lines included, for a scan that a leak anywhere - a header
+// value, a body, a diagnostic field - would fail, independently of how any one
+// field was parsed.
 func t17DurableBytes(t *testing.T, directory string) []byte {
 	t.Helper()
-	content, err := os.ReadFile(filepath.Join(directory, processing.ArtifactName))
+	content, err := os.ReadFile(filepath.Join(filepath.Dir(filepath.Dir(directory)), processing.ArtifactName))
 	if err != nil {
 		t.Fatalf("read the approved output: %v", err)
 	}
@@ -319,8 +325,10 @@ func t17AssertRetainedComplete(t *testing.T, s t17Session) {
 func t17PublicInspection(t *testing.T, s t17Session, forbidden ...string) {
 	t.Helper()
 	copyDir := t.TempDir()
+	from := map[string]string{"account.json": filepath.Join(s.dir, "account.json"),
+		processing.ArtifactName: filepath.Join(filepath.Dir(filepath.Dir(s.dir)), processing.ArtifactName)}
 	for _, name := range []string{"account.json", processing.ArtifactName} {
-		data, err := os.ReadFile(filepath.Join(s.dir, name))
+		data, err := os.ReadFile(from[name])
 		if err != nil {
 			t.Fatalf("read %s to copy: %v", name, err)
 		}

@@ -227,7 +227,7 @@ func postureReadDiagnosticChild(t *testing.T, mode string, classify bool) {
 	if state := gate.Snapshot(); state.Charged != 0 || state.Reason != "" {
 		t.Fatalf("verification changed gate state: %+v", state)
 	}
-	prepared, err := Prepare(read, participants, uint64(read.Settings.AdmittedEventLimit), nil)
+	prepared, err := Prepare(read, participants, uint64(read.Settings.AdmittedEventLimit))
 	if prepared != nil {
 		defer prepared.Intake.Close()
 	}

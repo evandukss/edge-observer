@@ -432,10 +432,14 @@ func (s *t20iSession) output(t *testing.T) t20iOutput {
 		t.Fatalf("read the configuration the session ran: %v", err)
 	}
 
-	approved, present := o.sources[filepath.Join(s.directory(), processing.ArtifactName)]
+	_, present := o.sources[filepath.Join(s.c.directory, processing.ArtifactName)]
 	if walked < 3 || !present {
 		t.Fatalf("wiring, not the property: the observer's directory holds %d files and approved output present=%v, "+
 			"so there is nothing to read", walked, present)
+	}
+	approved, err := sessionApproved(s.directory())
+	if err != nil {
+		t.Fatalf("read session %s's approved output: %v", s.session, err)
 	}
 	for _, line := range bytes.Split(approved, []byte{'\n'}) {
 		if len(bytes.TrimSpace(line)) == 0 {

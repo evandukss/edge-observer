@@ -41,10 +41,6 @@ type DeliveryGateOptions struct {
 	// every pending release ineligible. Reservations are never refunded.
 	MaxEvents uint64
 
-	// StorageExhausted is ignored. Sink failures do not invalidate capture.
-	// Deprecated: retained for source compatibility.
-	StorageExhausted <-chan struct{}
-
 	// IntakeExhausted is observed under the ordering lock at Admit, Authorize
 	// and Snapshot. A refused input leaves capture incomplete and invalidates
 	// pending release. Nil means no intake signal is connected.
@@ -203,12 +199,6 @@ func (g *DeliveryGate) Snapshot() GateSnapshot {
 	defer g.mutex.Unlock()
 	g.consumeIntakeExhaustionLocked()
 	return g.snapshotLocked()
-}
-
-// ConsumeStorageExhaustion is a historical alias for Snapshot. Only intake
-// exhaustion invalidates capture; sink outcomes are independent.
-func (g *DeliveryGate) ConsumeStorageExhaustion() GateSnapshot {
-	return g.Snapshot()
 }
 
 // Withdrawal is closed exactly once on capture-wide invalidation, in the same

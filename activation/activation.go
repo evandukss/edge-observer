@@ -112,9 +112,9 @@ type Capture struct {
 // int64. The product bounds accepted raw payload, not process memory. It builds
 // both volatile sinks and the shared gate, then verifies posture before returning
 // anything an attachment can use. It opens no durable file and attaches nothing.
-// The last parameter is retained for source compatibility and ignored. Output
-// failures cannot refuse activation. Intake exhaustion remains a gate source.
-func Prepare(read policy.Policy, participants []process.Process, maxEvents uint64, _ <-chan struct{}) (*Capture, error) {
+// Output failures cannot refuse activation. Intake exhaustion remains a gate
+// source.
+func Prepare(read policy.Policy, participants []process.Process, maxEvents uint64) (*Capture, error) {
 	if read.Processing == nil || read.ProcessingRevision == "" {
 		return nil, &Refusal{Check: ProcessingPlan, PID: os.Getpid(), Detail: "a compiler-produced processing plan and revision are required"}
 	}

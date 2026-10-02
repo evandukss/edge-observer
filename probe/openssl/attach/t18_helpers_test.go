@@ -356,14 +356,52 @@ type t18Artifact struct {
 	} `json:"policy_exclusions"`
 }
 
+// sessionApproved is the approved output of the session whose directory is
+// directory (<output>/sessions/<id>): the lines of the stable approved file
+// under the configured output directory that name that session, in order. A
+// line that does not decode is kept, so a reader of the result fails on it.
+func sessionApproved(directory string) ([]byte, error) {
+	content, err := os.ReadFile(filepath.Join(filepath.Dir(filepath.Dir(directory)), processing.ArtifactName))
+	if err != nil {
+		return nil, err
+	}
+	session := filepath.Base(directory)
+	var kept []byte
+	for _, line := range bytes.SplitAfter(content, []byte{'\n'}) {
+		var one struct {
+			Session string `json:"session"`
+		}
+		if len(line) != 0 && (json.Unmarshal(line, &one) != nil || one.Session == session) {
+			kept = append(kept, line...)
+		}
+	}
+	return kept, nil
+}
+
 // t18Approved is every line of a session's approved output, decoded. A line
 // that is not a whole record fails the case.
 func t18Approved(t *testing.T, directory string) []t18Artifact {
+	t.Helper()
+	content, err := sessionApproved(directory)
+	if err != nil {
+		t.Fatalf("read the approved output: %v", err)
+	}
+	return t18Decoded(t, content)
+}
+
+// t18ApprovedIn is every line of the approved file a writer opened on
+// directory, decoded, for a case that runs the writer in-process.
+func t18ApprovedIn(t *testing.T, directory string) []t18Artifact {
 	t.Helper()
 	content, err := os.ReadFile(filepath.Join(directory, processing.ArtifactName))
 	if err != nil {
 		t.Fatalf("read the approved output: %v", err)
 	}
+	return t18Decoded(t, content)
+}
+
+func t18Decoded(t *testing.T, content []byte) []t18Artifact {
+	t.Helper()
 	var found []t18Artifact
 	if len(content) == 0 {
 		return found
