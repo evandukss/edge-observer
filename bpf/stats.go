@@ -43,6 +43,11 @@ const (
 	StatNestedElsewhere     uint32 = 29
 	StatOverlapped          uint32 = 30
 	StatBorn                uint32 = 31
+
+	// Reclamation's, counting what an execution's end could not take away and
+	// what it folded.
+	StatHolderUnrecorded uint32 = 32
+	StatReadsReclaimed   uint32 = 33
 )
 
 // Stats is every counter this package names, against the define it mirrors.
@@ -81,6 +86,9 @@ var Stats = map[string]uint32{
 	"OBS_STAT_NESTED_ELSEWHERE":     StatNestedElsewhere,
 	"OBS_STAT_OVERLAPPED":           StatOverlapped,
 	"OBS_STAT_BORN":                 StatBorn,
+
+	"OBS_STAT_HOLDER_UNRECORDED": StatHolderUnrecorded,
+	"OBS_STAT_READS_RECLAIMED":   StatReadsReclaimed,
 }
 
 // The function registry, by each code's name in the program (OBS_FUNC_* in

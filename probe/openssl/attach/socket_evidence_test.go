@@ -271,6 +271,14 @@ func (a *socketEvidenceActor) witness(t *testing.T, peer, count int) {
 	}
 }
 
+// sealedRecords keeps every connection record a session hands on.
+type sealedRecords struct{ records []connection.Record }
+
+func (s *sealedRecords) Connection(record connection.Record) error {
+	s.records = append(s.records, record)
+	return nil
+}
+
 // Seal a capture containing the actual transfer, constructing none of its
 // binding fields. Records publishes sealed connections only. Each call's
 // outcome is projected separately, so a previous call's summary cannot
@@ -278,7 +286,8 @@ func (a *socketEvidenceActor) witness(t *testing.T, peer, count int) {
 func (a *socketEvidenceActor) project(t *testing.T, transfer probe.Transfer) connection.Association {
 	t.Helper()
 	fragments := &collected{}
-	session := capture.New(fragments)
+	sealed := &sealedRecords{}
+	session := capture.Recording(fragments, sealed)
 	session.Observing(a.live.Capability())
 	session.Transfer(transfer)
 	// Read the live producer before sealing, the state while the call is open. The
@@ -287,7 +296,7 @@ func (a *socketEvidenceActor) project(t *testing.T, transfer probe.Transfer) con
 		t.Fatalf("one in-flight transfer projected to %d live connections", len(live))
 	}
 	session.Finish(time.Now())
-	records := session.Records()
+	records := sealed.records
 	if len(records) != 1 || len(fragments.taken()) != 1 {
 		t.Fatalf("one real transfer projected to %d connections and %d fragments", len(records), len(fragments.taken()))
 	}

@@ -478,7 +478,8 @@ func scopeParts(source observed.Account) (Scope, error) {
 		scope.Coverage = Coverage{Block: Block{State: NotReached}}
 		return scope, nil
 	}
-	scope.Placement = Placement{Block: Block{State: Carried}, Processes: []Placed{}}
+	scope.Placement = Placement{Block: Block{State: Carried}, Processes: []Placed{},
+		Ended: decimalOf(uint64(source.ProcessesEnded))}
 	for _, one := range source.Processes {
 		// The operational account holds neither the number inside the pid
 		// namespace nor the executable for a placed process.

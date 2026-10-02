@@ -24,7 +24,10 @@ import (
 // carries its own claim; the generic layer above them misses fast paths.
 // rw_verify_area makes a non-socket a positive answer, so "no network hook
 // fired" is not taken as a file. The two raw syscall tracepoints carry the
-// descriptor operand and the result, covering direct syscalls too.
+// descriptor operand and the result, covering direct syscalls too. inet_release
+// ends a socket's discovery when the socket goes, for IPv4 and IPv6 alike;
+// without it every socket a session discovers stays in the table, which fills
+// and leaves later sockets undiscovered.
 //
 // They attach through the performance-event kprobe interface, which needs no
 // tracefs mount. A required member the kernel will not take withdraws its
@@ -44,8 +47,9 @@ const (
 )
 
 // KernelPoint is one member of the socket evidence group. Claim is what its
-// absence costs: the four IPv4 members and two tracepoints carry the group, and
-// the two IPv6 members only IPv6. Without rw_verify_area there is no group.
+// absence costs: the IPv4 members, the two tracepoints and the socket release
+// carry the group, and the two IPv6 members only IPv6. Without rw_verify_area
+// there is no group.
 type KernelPoint struct {
 	// Symbol is the kernel function for a kprobe, or the tracepoint name for a
 	// raw tracepoint.
@@ -67,6 +71,7 @@ const (
 	progVerifyArea   = "obs_rw_verify_area"
 	progSyscallEnter = "obs_sys_enter"
 	progSyscallExit  = "obs_sys_exit"
+	progInetRelease  = "obs_inet_release"
 )
 
 // KernelPoints is every member of the group in a fixed order: the tracepoints,
@@ -78,6 +83,7 @@ func KernelPoints() []KernelPoint {
 		{Symbol: "rw_verify_area", Program: progVerifyArea, Kind: KernelKprobe, Claim: probe.SocketEvidenceClaim},
 		{Symbol: "inet_sendmsg", Program: progInetSendmsg, Kind: KernelKprobe, Claim: probe.SocketEvidenceClaim},
 		{Symbol: "inet_recvmsg", Program: progInetRecvmsg, Kind: KernelKprobe, Claim: probe.SocketEvidenceClaim},
+		{Symbol: "inet_release", Program: progInetRelease, Kind: KernelKprobe, Claim: probe.SocketEvidenceClaim},
 		{Symbol: "inet6_sendmsg", Program: progInet6Sendmsg, Kind: KernelKprobe, Claim: probe.IPv6Claim},
 		{Symbol: "inet6_recvmsg", Program: progInet6Recvmsg, Kind: KernelKprobe, Claim: probe.IPv6Claim},
 	}

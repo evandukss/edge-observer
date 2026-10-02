@@ -368,6 +368,7 @@ type heldDelivery struct {
 	session   *ebpf.Session
 	recording *capture.Session
 	fragments *sequenceFragments
+	records   *sequenceRecords
 
 	mutex    sync.Mutex
 	release  chan struct{}
@@ -378,6 +379,25 @@ type heldDelivery struct {
 type sequenceFragments struct {
 	mutex   sync.Mutex
 	records []fragment.Record
+}
+
+// sequenceRecords keeps every connection record the session hands on.
+type sequenceRecords struct {
+	mutex   sync.Mutex
+	records []connection.Record
+}
+
+func (s *sequenceRecords) Connection(record connection.Record) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	s.records = append(s.records, record)
+	return nil
+}
+
+func (s *sequenceRecords) all() []connection.Record {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	return append([]connection.Record(nil), s.records...)
 }
 
 func (f *sequenceFragments) Write(record fragment.Record) error {
@@ -411,9 +431,9 @@ func deliverHeldWith(t *testing.T, actor *armingProcess, opts ebpf.Options) *hel
 	}
 	t.Cleanup(func() { _ = session.Close() })
 	fragments := &sequenceFragments{}
-	held := &heldDelivery{session: session, fragments: fragments, known: make(map[int32]process.Process),
-		finished: make(chan struct{})}
-	held.recording = capture.Recording(fragments, nil, capture.Settles(session))
+	held := &heldDelivery{session: session, fragments: fragments, records: &sequenceRecords{},
+		known: make(map[int32]process.Process), finished: make(chan struct{})}
+	held.recording = capture.Recording(fragments, held.records, capture.Settles(session))
 	go held.deliver()
 	return held
 }
@@ -478,7 +498,7 @@ func (h *heldDelivery) seal(t *testing.T) []connection.Record {
 		t.Fatalf("the ring did not drain: %+v, %v", drained, err)
 	}
 	h.recording.Finish(time.Now())
-	return h.recording.Records()
+	return h.records.all()
 }
 
 func command(t *testing.T, actor *armingProcess, line, want string) {
@@ -514,11 +534,11 @@ func firstGaps(records []fragment.Record) (map[directionKey]uint64, map[directio
 	last := make(map[directionKey]uint64)
 	for _, one := range records {
 		key := directionKey{one.Connection, one.Direction}
-		if one.Produced != last[key]+1 {
+		if one.Produced != last[key]+1+one.Empties {
 			if _, cut := gaps[key]; !cut {
 				gaps[key] = one.Offset
 			}
-			missing[key] += int64(one.Produced - last[key] - 1)
+			missing[key] += int64(one.Produced - last[key] - 1 - one.Empties)
 		}
 		last[key] = one.Produced
 	}

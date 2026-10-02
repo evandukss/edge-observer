@@ -17,7 +17,7 @@ const (
 // The limits a configuration may omit, as values.
 const (
 	DefaultStateEverySeconds int64 = 30
-	// DefaultAdmittedEventLimit chooses a finite diagnostic population with a
+	// DefaultAdmittedEventLimit bounds the captured events held at once, with a
 	// nominal 64 MiB intake allowance at the decoder's current payload ceiling.
 	// It is not measured headroom or an execution-memory budget, and remains
 	// independent of the encoded output queue bound.

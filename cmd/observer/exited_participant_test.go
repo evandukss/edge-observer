@@ -85,7 +85,7 @@ func TestAParticipantThatExitedBeforeActivationIsCountedAndReportedGone(t *testi
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, observed, err := observe(catalog, resolution, table, recording, gate)
+		_, observed, err := observe(catalog, resolution, table, recording, gate, nil)
 		t.Logf("observe returned %v", err)
 		plan := account.Plan(time.Now(), account.Policy{Generation: 1}, resolution, attach.Built(), nil)
 		plan.Attached(account.Live, "0123456789abcdef", observed, probe.Capability{})

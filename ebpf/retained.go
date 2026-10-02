@@ -13,13 +13,14 @@ import (
 // ring buffer a fixed number of bytes, so neither is listed.
 var kernelStores = []string{
 	"inflight", "allowed_processes", "reads", "sockets", "handles", "occupancies",
-	"operations", "discovered",
+	"operations", "discovered", "holders",
 }
 
 // Retained is what this session holds now, store by store: every kernel table
 // above, counted entry by entry, then what userspace keeps about admissions,
-// placements and the processes it has named. A table the loaded program does
-// not have (reads, in the metadata-only build) is not listed.
+// placements and the processes it has named, and the events decoded and not
+// yet taken, against the staging channel's capacity. A table the loaded
+// program does not have (reads, in the metadata-only build) is not listed.
 func (s *Session) Retained() ([]held.Occupancy, error) {
 	var out []held.Occupancy
 	for _, name := range kernelStores {
@@ -54,6 +55,7 @@ func (s *Session) Retained() ([]held.Occupancy, error) {
 		held.Occupancy{Store: "ebpf.seen", Held: seen},
 		held.Occupancy{Store: "ebpf.placed", Held: len(s.placed)},
 		held.Occupancy{Store: "ebpf.links", Held: len(s.links)},
+		held.Occupancy{Store: "ebpf.events", Held: len(s.events), Bound: cap(s.events)},
 	), nil
 }
 

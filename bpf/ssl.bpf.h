@@ -74,6 +74,19 @@ struct task_struct {
 	struct task_struct *group_leader;
 	struct pid *thread_pid;
 	unsigned long long start_boottime;
+	struct signal_struct *signal;
+};
+
+// signal_struct is what a thread group's threads share. live counts those that
+// have not begun to exit: do_exit decrements it before sched_process_exit is
+// raised, so a thread reading zero there is its group's last. It is an
+// atomic_t in the kernel, a structure around one int.
+struct obs_atomic {
+	int counter;
+};
+
+struct signal_struct {
+	struct obs_atomic live;
 };
 
 // The socket evidence reads these and nothing else, declared field by field for
@@ -247,6 +260,10 @@ struct obs_pt_regs {
 // kind
 #define OBS_TRANSFER 1
 #define OBS_CLOSED 2
+// OBS_ENDED is an execution this program delivered events for that has ended:
+// whatever userspace keeps for it can go. It carries no bytes and no ending of
+// any connection; its connections' endings come before it.
+#define OBS_ENDED 3
 
 // how a call reports the count it moved
 #define OBS_COUNT_RETURNED 1     // the return value is the count
@@ -304,7 +321,9 @@ struct obs_pt_regs {
 #define OBS_STAT_NESTED_ELSEWHERE 29 // a nested call no wrapper explains (another handle or direction), numbered as a loss
 #define OBS_STAT_OVERLAPPED 30      // a call entered while another in its direction was in flight on its handle
 #define OBS_STAT_BORN 31            // an occupancy begun at its handle's observed birth
-#define OBS_STAT_MAX 32
+#define OBS_STAT_HOLDER_UNRECORDED 32 // an execution the reclamation table would not take, whose entries outlive it
+#define OBS_STAT_READS_RECLAIMED 33   // user-memory reads of admissions that ended, folded here as their entries went
+#define OBS_STAT_MAX 34
 
 // what is established about which socket a call's bytes crossed. It is on the
 // event because it is decided inside the call, where the evidence is. Zero is
@@ -548,7 +567,7 @@ struct event {
 	__u8  dir;
 	__u8  early;
 	__u8  measured; // whether length is a real count
-	__u8  kind;     // OBS_TRANSFER or OBS_CLOSED
+	__u8  kind;     // OBS_TRANSFER, OBS_CLOSED or OBS_ENDED
 	__u8  fd_state; // one of OBS_FD_*
 
 	// outcome is what this call's own kernel I/O came to (OBS_OUTCOME_*): why
@@ -604,7 +623,11 @@ struct event {
 	__u8  born;
 	__u8  overlapped;
 	__u8  in_flight;
-	__u8  padding_place[5];
+	// exited says an ending was raised because its execution ended (exit, or an
+	// exec replacing its image) with the handle's occupancy still held, rather than
+	// by a release of the handle.
+	__u8  exited;
+	__u8  padding_place[4];
 	__u64 dropped;
 	__u8  data[OBS_CHUNK];
 };
@@ -1005,6 +1028,31 @@ struct {
 	__type(value, __u64);
 } discoveries SEC(".maps");
 
+// holders is every execution this program keeps something for that must go
+// when it does: an occupancy, a handle's binding or a descriptor's lifetime
+// (entries), and whether it delivered events, for which userspace keeps
+// something too (events). The tables are keyed by the execution and never hear
+// of its end, so its last thread looks itself up here and, only where present,
+// walks them for its entries (obs_reclaim): an exit this program holds nothing
+// for costs one lookup. A refused insertion is counted, and that execution's
+// entries outlive it. Each flag is only ever set to one, so concurrent setters
+// need no atomic.
+struct holding {
+	__u8 entries;
+	__u8 events;
+	__u8 padding[6];
+};
+
+#define OBS_HOLDS_ENTRIES 1
+#define OBS_HOLDS_EVENTS 2
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 16384);
+	__type(key, struct instance_key);
+	__type(value, struct holding);
+} holders SEC(".maps");
+
 static __always_inline void obs_count(__u32 index)
 {
 	__u64 *slot = bpf_map_lookup_elem(&stats, &index);
@@ -1211,6 +1259,29 @@ static __always_inline int obs_capture_live(void)
 	return slot && *slot;
 }
 
+// obs_holds records what the program keeps for the execution who, for its end
+// to take away (holders). The lookup first: almost every call finds the
+// execution already there with the same bits.
+static __always_inline void obs_holds(const struct instance_key *who, __u32 what)
+{
+	struct holding *held = bpf_map_lookup_elem(&holders, who);
+	if (!held) {
+		struct holding fresh = {};
+		if (bpf_map_update_elem(&holders, who, &fresh, BPF_NOEXIST) != 0 &&
+		    !bpf_map_lookup_elem(&holders, who)) {
+			obs_count(OBS_STAT_HOLDER_UNRECORDED);
+			return;
+		}
+		held = bpf_map_lookup_elem(&holders, who);
+		if (!held)
+			return;
+	}
+	if (what == OBS_HOLDS_ENTRIES)
+		held->entries = 1;
+	else
+		held->events = 1;
+}
+
 // obs_handle_key names a handle of the instance who.
 static __always_inline void obs_handle_key(struct handle_key *hk, const struct instance_key *who, __u64 ssl)
 {
@@ -1266,6 +1337,7 @@ static __always_inline struct occupancy *obs_occupy(const struct instance_key *w
 		obs_unlocate();
 		return 0;
 	}
+	obs_holds(who, OBS_HOLDS_ENTRIES);
 	if (born)
 		obs_count(OBS_STAT_BORN);
 	return bpf_map_lookup_elem(&occupancies, &hk);
@@ -1340,6 +1412,7 @@ struct place {
 	__u64 dropped;
 	__u8  born;
 	__u8  overlapped;
+	__u8  exited;
 };
 
 // obs_stamp hands out the next kernel-side admission generation.
@@ -1473,8 +1546,15 @@ static __always_inline void obs_socket_opened(__s32 fd)
 	struct socket_life life = {};
 	life.generation = obs_socket_generation();
 	life.opened = bpf_ktime_get_ns();
-	if (bpf_map_update_elem(&sockets, &key, &life, BPF_ANY) != 0)
+	if (bpf_map_update_elem(&sockets, &key, &life, BPF_ANY) != 0) {
 		obs_count(OBS_STAT_SOCKET_UNRECORDED);
+		return;
+	}
+	struct instance_key who = {};
+	who.ns_dev = key.ns_dev;
+	who.ns_ino = key.ns_ino;
+	who.pid = key.pid;
+	obs_holds(&who, OBS_HOLDS_ENTRIES);
 }
 
 // obs_socket_closed ends an occupancy; a binding made against it then finds no
@@ -1657,6 +1737,8 @@ static __always_inline void obs_associate(const struct instance_key *who, const 
 		made.ends = call->ends;
 		if (bpf_map_update_elem(&handles, &hk, &made, BPF_ANY) != 0)
 			obs_count(OBS_STAT_BINDING_UNRECORDED);
+		else
+			obs_holds(who, OBS_HOLDS_ENTRIES);
 		return;
 	}
 
@@ -1760,6 +1842,7 @@ static __always_inline int obs_emit(const struct instance_key *who, __u64 genera
 	e->born = at->born;
 	e->overlapped = at->overlapped;
 	e->in_flight = in_flight;
+	e->exited = at->exited;
 	e->dropped = at->dropped;
 	__builtin_memset(e->padding_place, 0, sizeof(e->padding_place));
 	__u64 id = bpf_get_current_pid_tgid();
@@ -1819,6 +1902,10 @@ static __always_inline int obs_emit(const struct instance_key *who, __u64 genera
 #endif
 
 	bpf_ringbuf_submit(e, 0);
+	// Userspace keeps something for an execution once it has an event of it,
+	// so the execution's end is reported to it (obs_reclaim).
+	if (kind != OBS_ENDED)
+		obs_holds(who, OBS_HOLDS_EVENTS);
 	return 1;
 }
 
@@ -2031,13 +2118,15 @@ static __always_inline int obs_return(void *ctx, __u32 func)
 	__u64 generation = c->generation;
 	__u64 number = c->number;
 
-	// Whether the call moved bytes, from its return alone: one that moved none
-	// takes no number whatever becomes of it. An out-parameter call's status says
-	// only that some moved (SSL_read_early_data succeeds with 2,
-	// SSL_READ_EARLY_DATA_SUCCESS, the rest with 1); anything else is an error or
-	// an end with no bytes.
+	// Whether the call moved bytes, from its return alone. An out-parameter call's
+	// status is 1 where bytes moved and their count was written. Every other status
+	// moved none: 0 is a failure, including a retry such as SSL_ERROR_WANT_READ on a
+	// non-blocking socket, which reads nothing; SSL_read_early_data's 2,
+	// SSL_READ_EARLY_DATA_FINISH, is the end of early data with a count of zero. A
+	// write that fails part way keeps what it has sent for its retry, whose
+	// success reports every byte of the buffer.
 	__s64 rc = (__s64)(__s32)OBS_RC(ctx);
-	int moved = c->count == OBS_COUNT_RETURNED ? rc > 0 : (rc == 1 || rc == 2);
+	int moved = c->count == OBS_COUNT_RETURNED ? rc > 0 : rc == 1;
 	struct occupancy *occ = obs_held_occupancy(&key, c->ssl, c->occupancy);
 
 	// The read boundary. Approval at entry is not a lease through return: between
@@ -2103,15 +2192,12 @@ static __always_inline int obs_return(void *ctx, __u32 func)
 		at.dropped = c->dir == OBS_SENT ? occ->dropped_sent : occ->dropped_received;
 	}
 	if (!moved) {
-		// The call returned having moved nothing. Its entry number is filled with a
-		// zero-byte resolution, so it is told from a return that never fires (which
-		// leaves the number a gap). A register call measured that it moved nothing, so
-		// it is measured; an out-parameter call whose status is not success is emitted
-		// measured 0, the shape P4.1-T3 repairs (it is the unknown-length path), and
-		// its number is filled all the same.
-		__u8 measured = c->count == OBS_COUNT_RETURNED ? 1 : 0;
+		// The call returned having moved nothing, which its status measures: a known
+		// zero, never an unknown length. Its entry number is filled with this zero-byte
+		// resolution, so it is told from a return that never fires (which leaves the
+		// number a gap).
 		obs_dropped(occ, c->dir,
-			obs_emit(&key, generation, &origin, c->ssl, 0, c->dir, c->early, measured, OBS_TRANSFER, 0,
+			obs_emit(&key, generation, &origin, c->ssl, 0, c->dir, c->early, 1, OBS_TRANSFER, 0,
 				 fd, binding, socket, fd_state, c->outcome, &ends, &at, 0, 0, 0));
 		obs_unhold(occ, c->dir, id);
 		return 0;
@@ -2367,30 +2453,24 @@ int obs_sys_enter(void *ctx)
 	return 0;
 }
 
-// sys_exit consumes the frame with the syscall's result. An error, an EAGAIN
-// and a zero are not transfers, so none makes an association; a message count
-// is not a byte count either. It consumes saved metadata, never a saved
+// obs_completed consumes a live frame with its syscall's result. An error, an
+// EAGAIN and a zero are not transfers, so none makes an association; a message
+// count is not a byte count either. It consumes saved metadata, never a saved
 // pointer.
-SEC("raw_tracepoint/sys_exit")
-int obs_sys_exit(void *ctx)
+static __always_inline void obs_completed(void *ctx, __u64 id, struct operation *op)
 {
 	struct bpf_raw_tracepoint_args *raised = ctx;
-	__u64 id = bpf_get_current_pid_tgid();
-
-	struct operation *op = bpf_map_lookup_elem(&operations, &id);
-	if (!op || !op->live)
-		return 0;
 	op->live = 0;
 
 	struct call *c = bpf_map_lookup_elem(&inflight, &id);
 	if (!c || !c->live)
-		return 0;
+		return;
 	if (op->call != c->ssl || op->entered != c->sequence) {
 		// The frame outlived its call: not this call's evidence, and counted rather
 		// than left as a gap.
 		obs_count(OBS_STAT_OPERATION_UNMATCHED);
 		obs_call_outcome(c, OBS_OUTCOME_BROKEN);
-		return 0;
+		return;
 	}
 
 	// The call performed I/O, whatever the result: recorded before the result is
@@ -2400,7 +2480,7 @@ int obs_sys_exit(void *ctx)
 
 	__s64 result = (__s64)raised->args[1];
 	if (result <= 0)
-		return 0;
+		return;
 
 	// A socket the classifier recognised and no protocol hook named is a route not
 	// followed (unix-domain, or an unclaimed IP family), not an absence of
@@ -2412,6 +2492,20 @@ int obs_sys_exit(void *ctx)
 	obs_call_outcome(c, outcome);
 	if (outcome == OBS_OUTCOME_SOCKET)
 		obs_call_socket(c, op);
+}
+
+SEC("raw_tracepoint/sys_exit")
+int obs_sys_exit(void *ctx)
+{
+	__u64 id = bpf_get_current_pid_tgid();
+	struct operation *op = bpf_map_lookup_elem(&operations, &id);
+	if (!op)
+		return 0;
+	if (op->live)
+		obs_completed(ctx, id, op);
+	// The frame is this operation's evidence and no other's, so it goes once the
+	// operation completes: the table holds only operations under way.
+	bpf_map_delete_elem(&operations, &id);
 	return 0;
 }
 
@@ -2534,6 +2628,31 @@ SEC("kprobe") int obs_inet_recvmsg(void *ctx) { return obs_acquired(ctx, OBS_AF_
 SEC("kprobe") int obs_inet6_sendmsg(void *ctx) { return obs_acquired(ctx, OBS_AF_INET6); }
 SEC("kprobe") int obs_inet6_recvmsg(void *ctx) { return obs_acquired(ctx, OBS_AF_INET6); }
 
+// inet_release is a socket's release, IPv4 and IPv6 alike (inet6_release calls
+// it), once nothing holds it. Its discovery goes with it, keyed as obs_acquired
+// keyed it, so the table holds only sockets that exist, and a later socket at
+// the same kernel address and inode is a new discovery with a new generation.
+SEC("kprobe")
+int obs_inet_release(void *ctx)
+{
+	struct socket *released = (struct socket *)OBS_PARM1(ctx);
+	struct sock *sk = 0;
+	struct file *file = 0;
+	unsigned long ino = 0;
+	if (bpf_core_read(&sk, sizeof(sk), &released->sk) != 0 || !sk)
+		return 0;
+	if (bpf_core_read(&file, sizeof(file), &released->file) == 0 && file) {
+		struct inode *node = 0;
+		if (bpf_core_read(&node, sizeof(node), &file->f_inode) == 0 && node)
+			(void)bpf_core_read(&ino, sizeof(ino), &node->i_ino);
+	}
+	struct socket_ident who = {};
+	who.sock = (__u64)sk;
+	who.ino = (__u64)ino;
+	bpf_map_delete_elem(&discovered, &who);
+	return 0;
+}
+
 // rw_verify_area makes a non-socket a positive answer: without it "no network
 // hook fired" cannot be told from an ordinary file write inside the call.
 // Argument two is the acquired file; S_ISSOCK over its inode mode decides, and
@@ -2628,13 +2747,31 @@ SEC("uprobe") int obs_dup2(void *ctx)
 	return 0;
 }
 
-// SSL_free: a connection ending, so its handle may be reused by another
+// obs_release ends the occupancy of the handle in argument one, at SSL_free or
+// SSL_clear: a connection ending, so the handle may be used by another
 // connection without continuing this one's stream. No bytes, no buffer.
-SEC("uprobe") int obs_free_entry(void *ctx)
+//
+// recycled is SSL_clear, which readies the object for a new connection in
+// place. OpenSSL calls it itself, too: inside SSL_new on some releases, and at
+// the start of every first handshake, including one a first SSL_write or
+// SSL_read starts on its own. None of those has a connection to end, so a
+// recycle ends an occupancy only where it has numbered a transfer and no call
+// of this thread is in flight on it; the occupancy otherwise stands, born as it
+// was.
+static __always_inline int obs_release(void *ctx, int recycled)
 {
 	struct instance_key key = {};
 	if (!obs_locate(&key))
 		return 0;
+
+	if (recycled) {
+		struct handle_key cleared = {};
+		obs_handle_key(&cleared, &key, OBS_PARM1(ctx));
+		struct occupancy *now = bpf_map_lookup_elem(&occupancies, &cleared);
+		__u64 thread = bpf_get_current_pid_tgid();
+		if (!now || (!now->sent && !now->received) || now->busy_sent == thread || now->busy_received == thread)
+			return 0;
+	}
 
 	// The two halves below treat authentication differently, uniquely in this
 	// program. Dropping a binding reads, emits and learns nothing: it removes the
@@ -2649,8 +2786,8 @@ SEC("uprobe") int obs_free_entry(void *ctx)
 	// still-unadmitted deferred call is discarded, a gone grant refused, a
 	// superseded admission refused).
 	//
-	// This uprobe has no pid filter, so it already runs for every process linking
-	// the library; the drop adds one map operation there, unmeasured.
+	// These uprobes have no pid filter, so they already run for every process
+	// linking the library; the drop adds one map operation there, unmeasured.
 
 	// The handle's binding is dropped. SSL_free does not prove the connection
 	// ended (it is reference counted; SSL_dup and SSL_clear exist), but this
@@ -2703,6 +2840,14 @@ SEC("uprobe") int obs_free_entry(void *ctx)
 		 0, 0, 0, OBS_FD_NONE, OBS_OUTCOME_NONE, &none, &at, last_sent, last_received, in_flight);
 	return 0;
 }
+
+// SSL_free: the handle is released.
+SEC("uprobe") int obs_free_entry(void *ctx) { return obs_release(ctx, 0); }
+
+// SSL_clear: the handle is recycled in place for a new connection, with no
+// SSL_free and no SSL_new. Its next transfer begins a fresh occupancy, numbered
+// from one, with no binding inherited from the connection before.
+SEC("uprobe") int obs_clear_entry(void *ctx) { return obs_release(ctx, 1); }
 
 // SSL_sendfile moves plaintext from a file through kTLS without a user buffer,
 // so it is outside the plaintext catalogue and this build cannot read its bytes.
@@ -2936,6 +3081,131 @@ int obs_fork(void *ctx)
 	return 0;
 }
 
+// What an execution's end takes away. The occupancies, handle bindings and
+// descriptor lifetimes are keyed by the execution and nothing else tells them
+// it has ended, so they are walked for its entries when it does (holders says
+// whether there are any). An occupancy still held is the producer's last
+// evidence about a connection the execution never released: it is reported as
+// an ending carrying its last numbers, marked as raised by the execution's end,
+// before its entry goes, exactly as a release reports it.
+// The map a walk's callback is handed; its layout is the kernel's and is never
+// read here.
+struct bpf_map;
+
+struct reclaim {
+	struct instance_key who;
+	struct origin origin; // the grant's, where it is the one the occupancy began under
+	__u64 granted;        // that grant's generation, zero where there is none
+};
+
+static __always_inline int obs_reclaimed(const struct instance_key *who, __u64 ns_dev, __u64 ns_ino, __u32 pid)
+{
+	return ns_dev == who->ns_dev && ns_ino == who->ns_ino && pid == who->pid;
+}
+
+static long obs_reclaim_occupancy(struct bpf_map *map, struct handle_key *key, struct occupancy *occ,
+				  struct reclaim *r)
+{
+	if (!obs_reclaimed(&r->who, key->ns_dev, key->ns_ino, key->pid))
+		return 0;
+	struct place at = {};
+	at.occupancy = occ->id;
+	at.born = occ->born;
+	at.exited = 1;
+	__u8 in_flight = 0;
+	if (occ->busy_sent)
+		in_flight |= OBS_SENT;
+	if (occ->busy_received)
+		in_flight |= OBS_RECEIVED;
+	struct origin origin = {};
+	if (occ->generation == r->granted)
+		origin = r->origin;
+	struct ends none = {};
+	obs_emit(&r->who, occ->generation, &origin, key->ssl, 0, 0, 0, 0, OBS_CLOSED, 0,
+		 0, 0, 0, OBS_FD_NONE, OBS_OUTCOME_NONE, &none, &at, occ->sent, occ->received, in_flight);
+	bpf_map_delete_elem(map, key);
+	return 0;
+}
+
+static long obs_reclaim_binding(struct bpf_map *map, struct handle_key *key, struct binding *held,
+				struct reclaim *r)
+{
+	if (obs_reclaimed(&r->who, key->ns_dev, key->ns_ino, key->pid))
+		bpf_map_delete_elem(map, key);
+	return 0;
+}
+
+static long obs_reclaim_descriptor(struct bpf_map *map, struct socket_key *key, struct socket_life *life,
+				   struct reclaim *r)
+{
+	if (obs_reclaimed(&r->who, key->ns_dev, key->ns_ino, key->pid))
+		bpf_map_delete_elem(map, key);
+	return 0;
+}
+
+// obs_reclaim takes away what the program keeps for the execution who, whose
+// image has ended: at its last thread's exit, with its descriptors too, and at
+// an exec, which keeps its descriptors (a descriptor survives an exec) and ends
+// every handle of the image it replaces. entry is its allowlist entry, if any,
+// whose user-memory reads are folded into one count before their entry goes.
+static __always_inline void obs_reclaim(const struct instance_key *who, const struct admission *entry,
+					int descriptors)
+{
+	struct reclaim r = {};
+	r.who = *who;
+	if (entry && entry->kind != OBS_DENIED) {
+		r.granted = entry->generation;
+		obs_origin(entry, &r.origin);
+#if READ_PAYLOAD
+		__u64 generation = entry->generation;
+		__u64 *taken = bpf_map_lookup_elem(&reads, &generation);
+		if (taken) {
+			// No thread of the execution is left to take a read under this
+			// generation, so the count is final when it is folded.
+			__u32 index = OBS_STAT_READS_RECLAIMED;
+			__u64 *slot = bpf_map_lookup_elem(&stats, &index);
+			if (slot)
+				__sync_fetch_and_add(slot, *taken);
+			bpf_map_delete_elem(&reads, &generation);
+		}
+#endif
+	}
+	struct holding *holding = bpf_map_lookup_elem(&holders, who);
+	if (!holding)
+		return;
+	__u8 delivered = holding->events;
+	bpf_for_each_map_elem(&occupancies, obs_reclaim_occupancy, &r, 0);
+	bpf_for_each_map_elem(&handles, obs_reclaim_binding, &r, 0);
+	if (!descriptors)
+		return;
+	bpf_for_each_map_elem(&sockets, obs_reclaim_descriptor, &r, 0);
+	bpf_map_delete_elem(&holders, who);
+	if (!delivered)
+		return;
+	// The execution's end, after every ending above, so userspace lets go of what
+	// it keeps for the execution only once nothing of it is still to come.
+	struct place at = {};
+	struct origin origin = {};
+	struct ends none = {};
+	obs_emit(who, r.granted, &origin, 0, 0, 0, 0, 0, OBS_ENDED, 0, 0, 0, 0, OBS_FD_NONE, OBS_OUTCOME_NONE,
+		 &none, &at, 0, 0, 0);
+}
+
+// obs_group_dead says the current thread is the last of its group to exit:
+// do_exit decrements signal->live before sched_process_exit is raised. A read
+// that fails says no, which leaves the execution's entries in place rather
+// than ending another's.
+static __always_inline int obs_group_dead(void)
+{
+	struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+	struct signal_struct *shared = 0;
+	int live = 1;
+	if (!task || bpf_core_read(&shared, sizeof(shared), &task->signal) != 0 || !shared ||
+	    bpf_core_read(&live, sizeof(live), &shared->live.counter) != 0)
+		return 0;
+	return live == 0;
+}
+
 // obs_exit removes an exiting process, so a reused number is not observed on
 // its predecessor's approval. It reads only the current task's id, so it needs
 // no BTF. It fires per thread and the entry belongs to the group.
@@ -2944,10 +3214,11 @@ int obs_exit(void *ctx)
 {
 	__u64 id = bpf_get_current_pid_tgid();
 
-	// The saved call of an exiting thread: its thread and group numbers are
-	// reused, so the entry is removed here rather than left for the generation
-	// check to refuse.
+	// The saved call and the operation frame of an exiting thread: its thread and
+	// group numbers are reused, so they are removed here rather than left for the
+	// generation and sequence checks to refuse.
 	bpf_map_delete_elem(&inflight, &id);
+	bpf_map_delete_elem(&operations, &id);
 
 	// Every thread's exit counts: the group is gone when its last thread is, not
 	// its leader (pthread_exit leaves a zombie leader with live workers). Each exit
@@ -2957,6 +3228,8 @@ int obs_exit(void *ctx)
 	if (!obs_locate(&key))
 		return 0;
 	struct admission *entry = bpf_map_lookup_elem(&allowed_processes, &key);
+	if (obs_group_dead())
+		obs_reclaim(&key, entry, 1);
 	if (!entry)
 		return 0;
 
@@ -2992,11 +3265,14 @@ int obs_exec(void *ctx)
 {
 	__u64 id = bpf_get_current_pid_tgid();
 	bpf_map_delete_elem(&inflight, &id);
+	bpf_map_delete_elem(&operations, &id);
 
 	struct instance_key key = {};
 	if (!obs_locate(&key))
 		return 0;
 	struct admission *entry = bpf_map_lookup_elem(&allowed_processes, &key);
+	// The image every handle belonged to is gone, whatever the allowlist says.
+	obs_reclaim(&key, entry, 0);
 	if (!entry)
 		return 0;
 	// A denial survives an exec: same execution, same subtree, and an excluded

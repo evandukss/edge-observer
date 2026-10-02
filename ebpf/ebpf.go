@@ -53,6 +53,10 @@ const (
 	Transfer Kind = 1
 	// Closed is a connection ending.
 	Closed Kind = 2
+	// Exited is an execution the program delivered events for whose last thread
+	// has exited, after every ending of its connections: what is kept for it can
+	// go.
+	Exited Kind = 3
 )
 
 // Point is one place to attach: a symbol at a file offset in a file on disk,
@@ -118,6 +122,10 @@ type Options struct {
 	// placed, reproducing a kernel-refused probe, for a test of the partial-
 	// placement refusal. Production callers leave it empty.
 	FailEntry []string
+
+	// Ended, where set, is told once of every recorded admission this session
+	// establishes as ended, as it lets go of it (probe.Request.Ended).
+	Ended func(probe.Ended)
 }
 
 // MinimumKernel is the oldest kernel this package will attach on, published
@@ -413,12 +421,17 @@ type Session struct {
 	// namedBy is every target that named an instance; the allowlist holds one.
 	namedBy map[instanceKey][]admission.Provenance
 
-	// inventory is every instance this session recorded a grant for, in first
-	// recorded order, and index its position. Both the delivery goroutine and the
-	// caller write it, through recorded.
+	// inventory is every instance this session recorded a grant for and has not
+	// established as ended, and index its position. Both the delivery goroutine
+	// and the caller write it, through recorded and forgetEnded.
 	inventory []admission.Selection
 	index     map[instanceKey]int
 	held      sync.Mutex
+
+	// endedBy counts the admissions let go of because their execution ended, by
+	// target, and endedTo is told of each (Options.Ended). Under held.
+	endedBy map[endedTarget]int
+	endedTo func(probe.Ended)
 
 	// targets is the target behind each identity the allowlist's target field
 	// carries, and identities the reverse (targetIdentity). Written by the caller
@@ -583,6 +596,7 @@ func Attach(options Options) (*Session, error) {
 	}
 
 	session.excluded = options.Deny
+	session.endedTo = options.Ended
 	session.skipReturn = make(map[string]bool, len(options.SkipReturn))
 	for _, symbol := range options.SkipReturn {
 		session.skipReturn[symbol] = true
@@ -1538,11 +1552,11 @@ var ErrRefused = errors.New("the kernel placed none of the probes it was asked f
 // be, without which capture cannot sequence safely, so it is not made live. Two
 // kinds: a byte-moving entry (the catalogued transfer functions and the
 // uncatalogued SSL_sendfile route), whose absence lets bytes move invisibly; and
-// a lifecycle probe (SSL_free's release, SSL_new's birth), whose absence lets a
-// reused handle address join two connections into one stream. It keys on the
-// needed probe being absent, not on confirmation: a byte-moving function whose
-// entry is placed but whose return is not is measurable-only (its calls are gaps,
-// which is sound). A symbol absent from the library is not placed and so is not
+// a lifecycle probe (SSL_free's release, SSL_clear's recycle, SSL_new's birth),
+// whose absence lets a reused or recycled handle join two connections into one
+// stream. It keys on the needed probe being absent, not on confirmation: a
+// byte-moving function whose entry is placed but whose return is not is
+// measurable-only (its calls are gaps, which is sound). A symbol absent from the library is not placed and so is not
 // here (decision 477): only a present route whose probe failed leaves capture not
 // live.
 func (s *Session) unprobedRequired() []string {
@@ -1551,6 +1565,7 @@ func (s *Session) unprobedRequired() []string {
 		switch {
 		case byteMovingEntry(put.point.Entry) && put.entry == nil:
 		case put.point.Entry == progFreeEntry && put.entry == nil:
+		case put.point.Entry == progClearEntry && put.entry == nil:
 		case put.point.Return == progNewReturn && put.back == nil:
 		default:
 			continue
@@ -1889,6 +1904,11 @@ func (s *Session) Denials() ([]admission.Denial, error) {
 func (s *Session) recorded(one admission.Selection) {
 	s.held.Lock()
 	defer s.held.Unlock()
+	s.recordedLocked(one)
+}
+
+// recordedLocked is recorded with s.held already held.
+func (s *Session) recordedLocked(one admission.Selection) {
 	if s.index == nil {
 		s.index = make(map[instanceKey]int)
 	}
@@ -2502,8 +2522,13 @@ func (s *Session) read() {
 			continue
 		}
 		// An instance admitted by the fork hook is recorded here only (Inventory):
-		// nothing in userspace wrote its grant.
-		s.recorded(s.selectionOf(event))
+		// nothing in userspace wrote its grant. An execution's end lets go of what
+		// was recorded for it.
+		if event.Kind == Exited {
+			s.endedAt(event)
+		} else {
+			s.recorded(s.selectionOf(event))
+		}
 		select {
 		case s.events <- event:
 			s.delivered.Add(1)
@@ -2620,6 +2645,7 @@ func finalOf(sample []byte) probe.Final {
 		Known:    true,
 		Sent:     probe.Terminal{Last: order.Uint64(sample[208:216]), InFlight: sample[226]&inFlightSent != 0},
 		Received: probe.Terminal{Last: order.Uint64(sample[216:224]), InFlight: sample[226]&inFlightReceived != 0},
+		Exited:   sample[227] != 0,
 	}
 }
 

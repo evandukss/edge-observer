@@ -153,6 +153,10 @@ type stream struct {
 	// numbered is the last producer number seen in each direction.
 	numbered map[fragment.Direction]uint64
 
+	// empties is the numbered transfers of each direction that moved no bytes
+	// since its last fragment, which that direction's next fragment carries.
+	empties map[fragment.Direction]uint64
+
 	// droppedBelow is the producer's refused-reservation count as of the last
 	// number seen in each direction (carried on that event). settleLocked subtracts
 	// it from the occupancy's final dropped total so the tail counts only the drops
@@ -229,12 +233,12 @@ type Session struct {
 
 	mutex   sync.Mutex
 	streams map[key]*stream
-	// occupancies counts each key's uses, which is the handle generation: an
-	// address reused is a new connection.
-	occupancies map[key]connection.Generation
-	closed      []connection.Record
-	next        fragment.ConnectionID
-	stats       Stats
+	// next numbers connections. A connection's id is also its handle's
+	// generation: unique among every occupancy of every handle this session
+	// follows, so an address reused is a new connection without any record of
+	// the occupancies before it.
+	next  fragment.ConnectionID
+	stats Stats
 
 	// settlers answer, once production has stopped, what each producer still
 	// holds for a connection whose ending never arrived. Several, because one
@@ -265,8 +269,8 @@ func (s *Session) Observing(capability probe.Capability) {
 	s.observing = capability
 }
 
-// New starts a session writing fragments to sink and keeping connection
-// records in memory for Records.
+// New starts a session writing fragments to sink and handing connection
+// records to nobody.
 func New(sink Sink) *Session { return Recording(sink, nil) }
 
 // Option configures a session at construction.
@@ -283,10 +287,9 @@ func Settles(settler probe.Settler) Option {
 // Finish for one still open.
 func Recording(sink Sink, records connection.Sink, options ...Option) *Session {
 	session := &Session{
-		sink:        sink,
-		records:     records,
-		streams:     make(map[key]*stream),
-		occupancies: make(map[key]connection.Generation),
+		sink:    sink,
+		records: records,
+		streams: make(map[key]*stream),
 	}
 	for _, option := range options {
 		option(session)
@@ -339,7 +342,10 @@ func (s *Session) Transfer(t probe.Transfer) {
 	found := s.follow(t)
 	s.number(found, t)
 	if t.Length == 0 {
+		// Numbered and moved nothing: no fragment, and the next one says so, so
+		// its number is not read as following a transfer never delivered.
 		s.stats.Empty++
+		found.empties[t.Direction]++
 		s.mutex.Unlock()
 		return
 	}
@@ -352,9 +358,12 @@ func (s *Session) Transfer(t probe.Transfer) {
 		Offset:     found.offsets[t.Direction],
 		Length:     t.Length,
 		Produced:   t.Sequence.Number,
+		Empties:    found.empties[t.Direction],
 		Payload:    t.Payload,
 		At:         t.At,
+		Slot:       t.Slot,
 	}
+	found.empties[t.Direction] = 0
 	if t.Early {
 		found.early = append(found.early, connection.Early{
 			Direction: t.Direction, Offset: record.Offset, Length: t.Length,
@@ -543,14 +552,13 @@ func (s *Session) follow(t probe.Transfer) *stream {
 	}
 
 	s.next++
-	s.occupancies[place]++
 	found = &stream{
 		lifetime:     !s.told() || s.observing.Lifecycle,
 		id:           s.next,
 		process:      t.Process,
 		instance:     t.Instance,
 		network:      connection.Netns{Device: t.Network.Device, Inode: t.Network.Inode},
-		generation:   s.occupancies[place],
+		generation:   connection.Generation(s.next),
 		endpoint:     t.Endpoint,
 		firstSeen:    t.At,
 		opened:       t.Ends.OpenedAt,
@@ -558,6 +566,7 @@ func (s *Session) follow(t probe.Transfer) *stream {
 		begun:        begun,
 		occupancy:    t.Sequence.Occupancy,
 		numbered:     make(map[fragment.Direction]uint64, 2),
+		empties:      make(map[fragment.Direction]uint64, 2),
 		droppedBelow: make(map[fragment.Direction]uint64, 2),
 		unlocated:    t.Sequence.Unlocated,
 	}
@@ -584,7 +593,6 @@ func (s *Session) retireLocked(place key, found *stream, at time.Time) {
 		"arrived is unknown")
 	record := found.record(connection.EndingUnobserved, at)
 	delete(s.streams, place)
-	s.closed = append(s.closed, record)
 	s.stats.Retired++
 	if s.records == nil {
 		return
@@ -705,10 +713,17 @@ func (s *Session) Closed(c probe.Connection) {
 	s.settleLocked(found, c.Final, true)
 	delete(s.streams, place)
 	s.stats.Closed++
-	record := found.record(connection.HandleReleasedEnding, c.At)
-	s.closed = append(s.closed, record)
+	how := connection.HandleReleasedEnding
+	if c.Final.Exited {
+		// The execution ended holding the handle: the ending is known and was not
+		// observed as a release.
+		how = connection.EndingUnobserved
+	}
+	record := found.record(how, c.At)
 	s.mutex.Unlock()
 
+	// The ending's slot goes with the record it produced, to whatever retains it.
+	record.Slot = c.Slot
 	s.write(record)
 }
 
@@ -727,7 +742,6 @@ func (s *Session) Finish(at time.Time) {
 		delete(s.streams, place)
 	}
 	slices.SortFunc(open, func(x, y connection.Record) int { return int(x.ID) - int(y.ID) })
-	s.closed = append(s.closed, open...)
 	s.mutex.Unlock()
 
 	for _, record := range open {
@@ -1065,9 +1079,8 @@ func (s *Session) Stats() Stats {
 }
 
 // Retained is what this session holds now, store by store: the connections it
-// follows and the early-data ranges kept in them, the handle generations it
-// remembers, the connection records it keeps, and the producers it asks to
-// settle.
+// follows and the early-data ranges kept in them, and the producers it asks to
+// settle. A connection's record leaves with it, to the records sink.
 func (s *Session) Retained() ([]held.Occupancy, error) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -1078,8 +1091,6 @@ func (s *Session) Retained() ([]held.Occupancy, error) {
 	return []held.Occupancy{
 		{Store: "capture.streams", Held: len(s.streams)},
 		{Store: "capture.early", Held: early},
-		{Store: "capture.occupancies", Held: len(s.occupancies)},
-		{Store: "capture.closed", Held: len(s.closed)},
 		{Store: "capture.settlers", Held: len(s.settlers)},
 	}, nil
 }
@@ -1103,15 +1114,6 @@ func (s *Session) Counted() connection.Counters {
 		Fragments:        connection.Counted(held.Records),
 		FragmentsRefused: connection.Counted(held.Rejected),
 	}
-}
-
-// Records is every connection record this session has produced: those written
-// at a connection's end and, after Finish, those the run outlived.
-func (s *Session) Records() []connection.Record {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	return slices.Clone(s.closed)
 }
 
 // Live is a record for every connection still followed, as it stands now,

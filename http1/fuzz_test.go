@@ -60,17 +60,13 @@ func FuzzParseIsBoundedAndAccountsForEveryOffset(f *testing.F) {
 
 	limits := http1.Limits{
 		MaxStartLine: 64, MaxHeaderLine: 64, MaxHeaders: 8, MaxHeaderBytes: 256,
-		MaxBodyBytes: 128, MaxMessages: 4, MaxChunks: 8, MaxTrailers: 2,
+		MaxBodyBytes: 128, MaxChunks: 8, MaxTrailers: 2,
 	}
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		for _, kind := range []http1.Kind{http1.Request, http1.Response} {
 			s := pieces(data, 0)
 			parsed := http1.Parse(s, kind, limits)
-
-			if len(parsed.Messages) > limits.MaxMessages {
-				t.Fatalf("%s: parsed %d messages, bound %d", kind, len(parsed.Messages), limits.MaxMessages)
-			}
 
 			next := s.Start
 			for i, m := range parsed.Messages {

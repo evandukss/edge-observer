@@ -1,6 +1,8 @@
 package capture_test
 
 import (
+	"slices"
+
 	"github.com/evandukss/edge-observer/capture"
 	"github.com/evandukss/edge-observer/connection"
 	"github.com/evandukss/edge-observer/fragment"
@@ -16,6 +18,10 @@ import (
 type producer struct {
 	*capture.Session
 
+	// kept is what the session handed its records sink, where the case gave
+	// none of its own.
+	kept *keptRecords
+
 	occupancies map[probe.Handle]uint64
 	numbers     map[numbered]uint64
 	next        uint64
@@ -26,12 +32,51 @@ type numbered struct {
 	direction fragment.Direction
 }
 
-// produced is a recording session behind a producer that settles it.
+// produced is a recording session behind a producer that settles it. Without
+// a records sink of the case's own, the records are kept for Records.
 func produced(sink capture.Sink, records connection.Sink, options ...capture.Option) *producer {
 	p := &producer{occupancies: make(map[probe.Handle]uint64), numbers: make(map[numbered]uint64)}
+	if records == nil {
+		p.kept = &keptRecords{}
+		records = p.kept
+	}
 	p.Session = capture.Recording(sink, records, append(options, capture.Settles(p))...)
 	return p
 }
+
+// Records is every connection record the session handed on, in order, where
+// the case gave no records sink of its own.
+func (p *producer) Records() []connection.Record { return p.kept.all() }
+
+// keptRecords is a records sink keeping everything it is handed.
+type keptRecords struct{ records []connection.Record }
+
+func (k *keptRecords) Connection(record connection.Record) error {
+	k.records = append(k.records, record)
+	return nil
+}
+
+func (k *keptRecords) all() []connection.Record {
+	if k == nil {
+		return nil
+	}
+	return slices.Clone(k.records)
+}
+
+// keeping is a capture session with no producer in front of it, whose records a
+// case reads back.
+type keeping struct {
+	*capture.Session
+	kept *keptRecords
+}
+
+func recording(sink capture.Sink, options ...capture.Option) *keeping {
+	kept := &keptRecords{}
+	return &keeping{Session: capture.Recording(sink, kept, options...), kept: kept}
+}
+
+// Records is every connection record the session handed on, in order.
+func (k *keeping) Records() []connection.Record { return k.kept.all() }
 
 func handleOf(t probe.Transfer) probe.Handle {
 	return probe.Handle{Instance: t.Instance.Key(), Endpoint: t.Endpoint}

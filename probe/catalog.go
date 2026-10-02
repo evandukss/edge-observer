@@ -41,6 +41,10 @@ type Function struct {
 	// which every transfer of the handle is numbered.
 	Begins bool `json:"begins,omitempty"`
 
+	// Recycles marks a lifecycle function that readies a handle for a new
+	// connection in place: it ends the handle's occupancy as a release does.
+	Recycles bool `json:"recycles,omitempty"`
+
 	// Route marks an uncatalogued byte-moving entry point, observed count-only so
 	// its use shows as a gap rather than as bytes nothing numbered.
 	Route bool `json:"route,omitempty"`
@@ -118,6 +122,9 @@ var OpenSSL = Runtime{
 		// Its birth: a handle's transfers are numbered from here, so the first one
 		// lost is a number missing rather than a later one taken for the first.
 		{Symbol: "SSL_new", Since: "0.9.8", Probed: true, Begins: true},
+		// A handle recycled in place for the next connection, with no SSL_free and no
+		// SSL_new: without it two connections join into one stream.
+		{Symbol: "SSL_clear", Since: "0.9.8", Probed: true, Recycles: true},
 	},
 	Uncatalogued: []Function{
 		// Sends a file through kTLS, no user buffer: its bytes cannot be read, so its

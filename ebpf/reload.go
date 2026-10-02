@@ -105,15 +105,19 @@ func (s *Session) Admit(who []admission.Selection) ([]admission.Selection, []pro
 	}
 
 	granted := make([]admission.Selection, 0, len(ready))
+	// Under the inventory's lock: the delivery goroutine lets go of ended
+	// admissions in these too (forgetEnded).
+	s.held.Lock()
 	for _, one := range ready {
 		s.accepted = append(s.accepted, one.granted)
-		s.recorded(one.granted)
+		s.recordedLocked(one.granted)
 		if s.namedBy == nil {
 			s.namedBy = make(map[instanceKey][]admission.Provenance)
 		}
 		s.namedBy[one.key] = one.granted.NamedBy()
 		granted = append(granted, one.granted)
 	}
+	s.held.Unlock()
 	return granted, skipped, nil
 }
 
@@ -123,6 +127,8 @@ func (s *Session) Admit(who []admission.Selection) ([]admission.Selection, []pro
 func (s *Session) Retract(granted []admission.Selection) {
 	allowed := s.collection.Maps["allowed_processes"]
 	taken := make(map[instanceKey]bool, len(granted))
+	s.held.Lock()
+	defer s.held.Unlock()
 	for _, one := range granted {
 		key := keyOf(one.Instance)
 		taken[key] = true
@@ -139,8 +145,6 @@ func (s *Session) Retract(granted []admission.Selection) {
 	}
 	s.accepted = kept
 
-	s.held.Lock()
-	defer s.held.Unlock()
 	inventory := s.inventory[:0]
 	for _, one := range s.inventory {
 		if !taken[keyOf(one.Instance)] {

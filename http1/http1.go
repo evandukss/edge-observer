@@ -186,15 +186,16 @@ func (m Message) StartLine() string {
 	}
 }
 
-// Limits bounds everything a message can make this package hold or scan. A
+// Limits bounds everything one message can make this package hold or scan. A
 // zero field takes its default, so a caller overrides one and keeps the rest.
+// None counts a stream's messages: what a stream holds is bounded by whoever
+// holds the stream, and a connection never stops being read at a total.
 type Limits struct {
 	MaxStartLine   int
 	MaxHeaderLine  int
 	MaxHeaders     int
 	MaxHeaderBytes int
 	MaxBodyBytes   int
-	MaxMessages    int
 	MaxChunks      int
 	MaxTrailers    int
 }
@@ -207,7 +208,6 @@ func DefaultLimits() Limits {
 		MaxHeaders:     128,
 		MaxHeaderBytes: 64 << 10,
 		MaxBodyBytes:   8 << 20,
-		MaxMessages:    1024,
 		MaxChunks:      16384,
 		MaxTrailers:    32,
 	}
@@ -229,9 +229,6 @@ func (l Limits) orDefaults() Limits {
 	}
 	if l.MaxBodyBytes <= 0 {
 		l.MaxBodyBytes = d.MaxBodyBytes
-	}
-	if l.MaxMessages <= 0 {
-		l.MaxMessages = d.MaxMessages
 	}
 	if l.MaxChunks <= 0 {
 		l.MaxChunks = d.MaxChunks
@@ -268,7 +265,7 @@ func parse(s stream.Stream, kind Kind, limits Limits, bodiless []bool) Parsed {
 	cursor := stream.NewCursor(s)
 	var parsed Parsed
 
-	for !cursor.AtEnd() && len(parsed.Messages) < limits.MaxMessages {
+	for !cursor.AtEnd() {
 		noBody := len(bodiless) > len(parsed.Messages) && bodiless[len(parsed.Messages)]
 
 		message := one(cursor, kind, limits, noBody)

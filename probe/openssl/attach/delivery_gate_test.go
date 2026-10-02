@@ -11,9 +11,14 @@ import (
 	"github.com/evandukss/edge-observer/probe"
 )
 
+// deliveryRecords keeps the fragments it is handed, and so their events' slots,
+// as the intake does.
 type deliveryRecords struct{ records []fragment.Record }
 
 func (s *deliveryRecords) Write(record fragment.Record) error {
+	if record.Slot != nil {
+		record.Slot.Keep()
+	}
 	s.records = append(s.records, record)
 	return nil
 }
@@ -74,8 +79,11 @@ func TestDeliveryGateEntryAdmitsTheProducersOrdinaryClose(t *testing.T) {
 	}
 }
 
+// Of the three controls only the payload leaves input that is kept, so it alone
+// holds a slot, and with an allowance of one the tail arrives while the
+// allowance is held.
 func TestDeliveryGateEntryRefusesTailBeforeIdentityAndCapture(t *testing.T) {
-	g := admissionGate(t, 3)
+	g := admissionGate(t, 1)
 	a, captured, records := deliveryFixture(t, g)
 	empty := decodedDelivery(ebpf.Transfer, 1)
 	empty.Measured = true

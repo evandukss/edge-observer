@@ -88,7 +88,9 @@ type step struct {
 
 // traced sits between the adapter and the capture and keeps both sides. The
 // adapter delivers on one goroutine, so a transfer and its record arrive
-// together.
+// together. closes counts the endings a lifecycle probe reported: the ending
+// the program reports for a handle still held when its execution ends comes
+// from no lifecycle probe, and is a step but not one of them.
 type traced struct {
 	session *capture.Session
 
@@ -108,7 +110,9 @@ func (t *traced) Closed(connection probe.Connection) {
 
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
-	t.closes++
+	if !connection.Final.Exited {
+		t.closes++
+	}
 	t.steps = append(t.steps, step{endpoint: connection.Endpoint, closed: true})
 }
 

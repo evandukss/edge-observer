@@ -153,7 +153,7 @@ func TestALostFirstTransferEstablishesNoOffsetInItsDirection(t *testing.T) {
 func TestALostLastTransferBeforeTheEndingLeavesTheTailIncomplete(t *testing.T) {
 	for name, last := range map[string]uint64{"the last transfer lost": 3, "the control": 2} {
 		t.Run(name, func(t *testing.T) {
-			s := capture.Recording(&collected{}, nil)
+			s := recording(&collected{})
 			s.Transfer(numberedAs(worker, 0x18, fragment.Sent, 10, 7, 1))
 			s.Transfer(numberedAs(worker, 0x18, fragment.Sent, 6, 7, 2))
 			ended := ending(worker, 0x18)
@@ -233,7 +233,7 @@ func TestAConnectionOpenWhenProductionStopsIsSettledByWhatTheProducerHolds(t *te
 			for _, each := range one.settlers {
 				options = append(options, capture.Settles(each))
 			}
-			s := capture.Recording(&collected{}, nil, options...)
+			s := recording(&collected{}, options...)
 			s.Transfer(numberedAs(worker, 0x18, fragment.Sent, 10, 7, 1))
 			s.Transfer(numberedAs(worker, 0x18, fragment.Sent, 6, 7, 2))
 			s.Finish(at)
@@ -296,7 +296,7 @@ func TestAnOpenTailCountsItsDroppedReservationsAndNotItsAbandonedEvents(t *testi
 			from: 16, because: connection.TerminalUnsettled, lost: -1},
 	} {
 		t.Run(name, func(t *testing.T) {
-			s := capture.Recording(&collected{}, nil,
+			s := recording(&collected{},
 				capture.Settles(settler{held: probe.Settlement{Occupancy: 7, Final: one.final}}))
 			lengths := []uint32{10, 6}
 			for i := 0; i < one.deliver; i++ {
@@ -330,7 +330,7 @@ func TestAnOpenTailCountsItsDroppedReservationsAndNotItsAbandonedEvents(t *testi
 // counted a second time when the tail is settled: the tail counts the dropped
 // total less what number() already located for the direction.
 func TestADropLocatedMidStreamIsNotCountedAgainAtTheTail(t *testing.T) {
-	s := capture.Recording(&collected{}, nil, capture.Settles(settler{held: probe.Settlement{Occupancy: 7,
+	s := recording(&collected{}, capture.Settles(settler{held: probe.Settlement{Occupancy: 7,
 		Final: probe.Final{Known: true, Sent: probe.Terminal{Last: 6, Dropped: 3}}}}))
 	// Numbers 1 and 4 arrive; numbers 2 and 3 were refused and are located
 	// mid-stream by number 4, which carries dropped=2 (the drops below it). One more
@@ -354,7 +354,7 @@ func TestADropLocatedMidStreamIsNotCountedAgainAtTheTail(t *testing.T) {
 // its event, not every gap, so the non-drop gap is counted mid-stream and the
 // tail drops are counted in full.
 func TestANonDropGapBelowADroppedTailCountsTheTailExactly(t *testing.T) {
-	s := capture.Recording(&collected{}, nil, capture.Settles(settler{held: probe.Settlement{Occupancy: 7,
+	s := recording(&collected{}, capture.Settles(settler{held: probe.Settlement{Occupancy: 7,
 		Final: probe.Final{Known: true, Sent: probe.Terminal{Last: 5, Dropped: 2}}}}))
 	// Number 2 is a non-drop gap (no event, no reservation refused), located
 	// mid-stream by number 3, which carries dropped=0. Numbers 4 and 5 were refused
@@ -376,7 +376,7 @@ func TestANonDropGapBelowADroppedTailCountsTheTailExactly(t *testing.T) {
 // occupancy whose every transfer was lost does the same.
 func TestAHandleReusedAfterALostEndingRetiresTheOldConnection(t *testing.T) {
 	t.Run("a transfer of the next occupancy", func(t *testing.T) {
-		s := capture.Recording(&collected{}, nil)
+		s := recording(&collected{})
 		s.Transfer(numberedAs(worker, 0x18, fragment.Sent, 10, 7, 1))
 		s.Transfer(numberedAs(worker, 0x18, fragment.Sent, 5, 8, 1))
 
@@ -404,7 +404,7 @@ func TestAHandleReusedAfterALostEndingRetiresTheOldConnection(t *testing.T) {
 		}
 	})
 	t.Run("the ending of the next occupancy", func(t *testing.T) {
-		s := capture.Recording(&collected{}, nil)
+		s := recording(&collected{})
 		s.Transfer(numberedAs(worker, 0x18, fragment.Sent, 10, 7, 1))
 		later := ending(worker, 0x18)
 		later.Sequence = probe.Sequence{Occupancy: 8, Born: true}
@@ -596,7 +596,7 @@ func TestACallInFlightAtTheReleaseLeavesItsDirectionUnsettled(t *testing.T) {
 			// One transfer delivered (number 1); for the in-flight case a second call
 			// took number 2 at entry and had not returned, so the terminal is 2 with
 			// InFlight. That one number is the in-flight call, not a lost transfer.
-			s := capture.Recording(&collected{}, nil)
+			s := recording(&collected{})
 			s.Transfer(numberedAs(worker, 0x18, fragment.Sent, 10, 7, 1))
 			ended := ending(worker, 0x18)
 			ended.Sequence = probe.Sequence{Occupancy: 7, Born: true}

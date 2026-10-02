@@ -142,7 +142,7 @@ func executionThreadCount(t *testing.T, pid int32, want string) {
 	t.Fatal("fixture: Threads is absent")
 }
 
-func TestExecutionRetainedTerminalGroupHasAnActualNonrunningResult(t *testing.T) {
+func TestATerminalGroupsAdmissionIsLetGoOfAtItsLastTasksExit(t *testing.T) {
 	for _, traced := range []bool{false, true} {
 		t.Run(fmt.Sprintf("traced=%t", traced), func(t *testing.T) {
 			port, received := independentPeer(t)
@@ -214,25 +214,9 @@ func TestExecutionRetainedTerminalGroupHasAnActualNonrunningResult(t *testing.T)
 			if held, err := ebpf.IndependentKernelGrantPresent(session, admitted); err != nil || held {
 				t.Fatalf("fixture: absent grant not established: %t %v", held, err)
 			}
-			known := 0
-			for _, one := range session.Inventory() {
-				if one.Instance.Key() == admitted.Key() {
-					known++
-				}
-			}
-			if known != 1 {
-				t.Fatalf("retained admission count %d, want one", known)
-			}
-			got, err := session.Withdrawn()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(got) != 1 || got[0].Selection.Instance.Key() != admitted.Key() {
-				t.Fatalf("terminal retained admission needs exactly one matching result: %+v", got)
-			}
-			if got[0].State != ebpf.ExecutionEnded && got[0].State != ebpf.ExecutionIndeterminate {
-				t.Errorf("terminal group reported running: %+v", got[0])
-			}
+			// The group's last task has exited, so its end is established and the
+			// session lets go of the admission rather than holding it as terminal.
+			independentLetGo(t, session, admitted)
 			if !reflect.DeepEqual(live[0].Reading, retained) || live[0].Reading.Witness.TID != tid || live[0].Reading.Observed.From.IsZero() {
 				t.Error("past observation was lost after witness exit")
 			}

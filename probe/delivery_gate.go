@@ -3,6 +3,7 @@ package probe
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 
 	"github.com/evandukss/edge-observer/held"
 )
@@ -33,9 +34,10 @@ const (
 
 // DeliveryGateOptions are fixed for one capture, shared by every placement.
 type DeliveryGateOptions struct {
-	// MaxEvents must be positive. It counts decoded events, not bytes or heap
-	// usage. Events 1 through N can reserve a slot; N+1 is refused and makes
-	// every pending release ineligible. Reservations are never refunded.
+	// MaxEvents must be positive. It bounds the decoded events held at once,
+	// not bytes or heap usage: each admitted event holds a slot until whatever
+	// retained its input returns it (held.Slot). An event arriving while N slots
+	// are held is refused and makes every pending release ineligible.
 	MaxEvents uint64
 
 	// IntakeExhausted is observed under the ordering lock at Admit, Authorize
@@ -130,10 +132,14 @@ type ReleaseDecision struct {
 // No gate operation performs sink I/O. AuthorizeEnqueue permits one short
 // nonblocking enqueue under the ordering lock; BeforeAuthorize runs outside it. Invalidation is permanent and
 // uses constant work: it revokes all pending candidates without walking them.
+// A refund is ordered with invalidation by the same lock and never clears it.
 type DeliveryGate struct {
 	mutex      sync.Mutex
 	options    DeliveryGateOptions
 	charged    uint64
+	held       uint64
+	refunded   Refunds
+	doubles    uint64
 	reason     GateReason
 	withdrawal chan struct{}
 }
@@ -151,10 +157,11 @@ func NewDeliveryGate(options DeliveryGateOptions) (*DeliveryGate, error) {
 // measured=false invalidates capture-wide, including early or zero-length
 // transfers. A close ignores measured: false is the ordinary close shape.
 // Unknown kinds are charged then invalidate. Observable intake
-// exhaustion is consumed before reserving a slot. Otherwise, at N+1 the input
-// limit takes precedence over the event's kind and measurement, and nothing is
-// dispatched. Once invalidated, no event is charged or admitted, and the first
-// reason survives later faults.
+// exhaustion is consumed before reserving a slot. Otherwise, with N slots held
+// the input limit takes precedence over the event's kind and measurement, and
+// nothing is dispatched. Once invalidated, no event is charged or admitted, and
+// the first reason survives later faults. A charged decision carries its slot,
+// which the caller hands on with the event or returns (held.Slot).
 func (g *DeliveryGate) Admit(kind DeliveryKind, measured bool) AdmissionDecision {
 	if g == nil || g.withdrawal == nil {
 		return AdmissionDecision{State: GateSnapshot{Reason: GateUninitialized}}
@@ -165,11 +172,12 @@ func (g *DeliveryGate) Admit(kind DeliveryKind, measured bool) AdmissionDecision
 	if g.reason != "" {
 		return AdmissionDecision{State: g.snapshotLocked()}
 	}
-	if g.charged == g.options.MaxEvents {
+	if g.held == g.options.MaxEvents {
 		g.invalidateLocked(GateInputLimit)
 		return AdmissionDecision{State: g.snapshotLocked()}
 	}
 	g.charged++
+	g.held++
 	reserved := &slot{gate: g}
 	switch kind {
 	case DeliveryTransfer:
@@ -251,17 +259,45 @@ var uninitializedWithdrawal = func() <-chan struct{} {
 }()
 
 func (g *DeliveryGate) snapshotLocked() GateSnapshot {
-	return GateSnapshot{MaxEvents: g.options.MaxEvents, Charged: g.charged, Held: g.charged, Reason: g.reason}
+	return GateSnapshot{MaxEvents: g.options.MaxEvents, Charged: g.charged, Held: g.held, Refunded: g.refunded,
+		DoubleRefunds: g.doubles, Reason: g.reason}
 }
 
-// slot is one event's reservation.
+// refund returns one slot along path, once. Charged is always Held plus every
+// path's refunds; a path no held.Path names is counted as Discarded.
+func (g *DeliveryGate) refund(one *slot, path held.Path) bool {
+	g.mutex.Lock()
+	defer g.mutex.Unlock()
+	if one.returned {
+		g.doubles++
+		return false
+	}
+	one.returned = true
+	g.held--
+	switch path {
+	case held.Unretained:
+		g.refunded.Unretained++
+	case held.Processed:
+		g.refunded.Processed++
+	case held.Cut:
+		g.refunded.Cut++
+	default:
+		g.refunded.Discarded++
+	}
+	return true
+}
+
+// slot is one event's reservation. returned is guarded by the gate's lock, so a
+// refund is ordered with every other gate decision.
 type slot struct {
-	gate *DeliveryGate
+	gate     *DeliveryGate
+	kept     atomic.Bool
+	returned bool
 }
 
-func (s *slot) Keep()                 {}
-func (s *slot) Kept() bool            { return false }
-func (s *slot) Refund(held.Path) bool { return false }
+func (s *slot) Keep()                      { s.kept.Store(true) }
+func (s *slot) Kept() bool                 { return s.kept.Load() }
+func (s *slot) Refund(path held.Path) bool { return s.gate.refund(s, path) }
 
 func (g *DeliveryGate) consumeIntakeExhaustionLocked() {
 	if g.reason != "" {

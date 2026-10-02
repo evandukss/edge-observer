@@ -74,6 +74,9 @@ type Entry struct {
 	next       *Entry
 	bytes      int64
 	released   bool
+	// slot is the delivery gate's slot for the event the record came from,
+	// returned when the entry is released.
+	slot held.Slot
 }
 
 // New requires a positive limitBytes. It has no filesystem effects.
@@ -103,9 +106,20 @@ func (s *Store) Write(record fragment.Record) error {
 	}
 	record.Payload = copySlice(record.Payload)
 	record.At = record.At.UTC()
-	s.append(&Entry{Fragment: &record}, s.stats.LimitBytes-s.stats.Bytes-budget.left)
+	reserved := record.Slot
+	record.Slot = nil
+	s.append(&Entry{Fragment: &record, slot: kept(reserved)}, s.stats.LimitBytes-s.stats.Bytes-budget.left)
 	s.stats.Fragments++
 	return nil
+}
+
+// kept takes a stored record's slot into its entry, which returns it at
+// Release.
+func kept(reserved held.Slot) held.Slot {
+	if reserved != nil {
+		reserved.Keep()
+	}
+	return reserved
 }
 
 // Connection copies one retirement record, including its nested slices and
@@ -125,8 +139,10 @@ func (s *Store) Connection(record connection.Record) error {
 		s.stats.ConnectionsRefused++
 		return s.full()
 	}
+	reserved := record.Slot
 	record = copyConnection(record)
-	s.append(&Entry{Connection: &record}, s.stats.LimitBytes-s.stats.Bytes-budget.left)
+	record.Slot = nil
+	s.append(&Entry{Connection: &record, slot: kept(reserved)}, s.stats.LimitBytes-s.stats.Bytes-budget.left)
 	s.stats.Connections++
 	return nil
 }
@@ -176,8 +192,8 @@ func (e *Entry) ReleaseAs(path held.Path) {
 	}
 	s := e.owner
 	s.mutex.Lock()
-	defer s.mutex.Unlock()
 	if e.released {
+		s.mutex.Unlock()
 		return
 	}
 	e.released = true
@@ -185,6 +201,13 @@ func (e *Entry) ReleaseAs(path held.Path) {
 	e.Connection = nil
 	s.stats.Bytes -= e.bytes
 	s.stats.Leased--
+	reserved := e.slot
+	e.slot = nil
+	s.mutex.Unlock()
+	// Returned outside the intake's lock: the gate takes its own.
+	if reserved != nil {
+		reserved.Refund(path)
+	}
 }
 
 // Retained is the entries this store holds now: queued for a worker, and

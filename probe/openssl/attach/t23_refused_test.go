@@ -8,20 +8,33 @@ import (
 )
 
 // t23Placing is a sink that takes a refused transfer, as the capture session
-// does.
+// does. Both sinks keep what they are handed, as a store retaining a transfer's
+// input does, so its slot stays held.
 type t23Placing struct {
 	transfers []uint64
 	refused   []uint64
 }
 
-func (p *t23Placing) Transfer(one probe.Transfer) { p.transfers = append(p.transfers, one.Stamp) }
-func (p *t23Placing) Closed(probe.Connection)     {}
-func (p *t23Placing) Refused(one probe.Transfer)  { p.refused = append(p.refused, one.Stamp) }
+func (p *t23Placing) Transfer(one probe.Transfer) {
+	t23Kept(one)
+	p.transfers = append(p.transfers, one.Stamp)
+}
+func (p *t23Placing) Closed(probe.Connection)    {}
+func (p *t23Placing) Refused(one probe.Transfer) { p.refused = append(p.refused, one.Stamp) }
 
 // t23Plain is a sink that cannot take one.
 type t23Plain struct{ transfers int }
 
-func (p *t23Plain) Transfer(probe.Transfer) { p.transfers++ }
+func (p *t23Plain) Transfer(one probe.Transfer) {
+	t23Kept(one)
+	p.transfers++
+}
+
+func t23Kept(one probe.Transfer) {
+	if one.Slot != nil {
+		one.Slot.Keep()
+	}
+}
 func (p *t23Plain) Closed(probe.Connection) {}
 
 // An event the gate refused is counted under the gate's reason, and a refused
