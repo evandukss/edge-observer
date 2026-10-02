@@ -360,7 +360,7 @@ func (a Approval) Resolve(host Host) Resolution {
 		forbidden[one.ObserverPID] = true
 	}
 
-	resolution := Resolution{Denials: denials}
+	resolution := Resolution{Denials: denials, ArgumentsUndetermined: prepared.argumentRefusals(table)}
 	descendants := make([][]Process, len(prepared.Rules))
 	for _, p := range table.processes {
 		if forbidden[p.PID] {
@@ -448,6 +448,14 @@ func (a Approval) Resolve(host Host) Resolution {
 			}
 		}
 		resolution.Exclusions = append(resolution.Exclusions, one)
+	}
+	if err := resolution.Err(); err != nil {
+		// A partial set of grants could pass an undecidable exclusion. Keep the
+		// reading and its reason, but publish no authority from it.
+		resolution.Selections = nil
+		for i := range resolution.Targets {
+			resolution.Targets[i].Unresolved = err.Error()
+		}
 	}
 	return resolution
 }

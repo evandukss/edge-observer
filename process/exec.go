@@ -39,8 +39,6 @@ func ReadExec(root string, pid int32) (Exec, error) {
 		return Exec{}, fmt.Errorf("%s/stat: no process name", directory)
 	}
 	cmdline, err := os.ReadFile(filepath.Join(directory, "cmdline"))
-	if err != nil {
-		return Exec{}, err
-	}
-	return Exec{StartTime: start, Comm: string(stat[open+1 : end]), Cmdline: string(cmdline)}, nil
+	return Exec{StartTime: start, Comm: string(stat[open+1 : end]), Cmdline: string(cmdline),
+		ArgumentEvidence: argumentEvidence(cmdline, err)}, nil
 }

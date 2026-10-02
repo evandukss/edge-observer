@@ -128,6 +128,8 @@ const (
 	// nothing separates it from the next holder of its number. Not a start of zero.
 	StartIndeterminate RefusalReason = "its start identity could not be read"
 
+	ArgumentsIndeterminate RefusalReason = "arguments undetermined"
+
 	// IdentityChanged is a number the kernel handed to another process between the
 	// approval's reading and this attachment.
 	IdentityChanged RefusalReason = "the number now names a different process from the one approved"
@@ -1130,6 +1132,15 @@ func (s *Session) adopt() error {
 				continue
 			}
 			if named[keyOf(child)] || s.denied[keyOf(child)] {
+				continue
+			}
+			if below.ArgumentEvidence != process.ArgumentsKnown {
+				s.refuse(admission.Selection{
+					Instance: child, Kind: admission.ByDescent,
+					Provenance: admission.Provenance{Target: one.Provenance.Target, Number: one.Provenance.Number, Parent: one.Instance.Key()},
+					Mode:       one.Mode, ObserverPID: below.PID,
+				}, ArgumentsIndeterminate, process.ArgumentsRefusal{PID: below.PID, Executable: below.Executable,
+					Detail: "the descendant's command line could not be established"})
 				continue
 			}
 			if !child.Start.Determined {

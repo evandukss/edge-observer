@@ -65,9 +65,16 @@ document at another version is refused as `unknown_version`, naming the version 
 
 **A watch entry's conditions are matched as the observer's admission reads them.** `exe` is an absolute
 path. `args` are the arguments after `argv[0]`; an empty list means a process run with none, and absent
-means any. `cgroup` is an absolute cgroup path. `pid` names one process instance by its pid, start time
-and boot, never a pid number alone. `port` is a listening port, optionally with an `interface`. Every
+means no arguments when `exe` is named. `cgroup` is an absolute cgroup path. `pid` names one process
+instance by its pid, start time and boot, never a pid number alone. `port` is a listening port, optionally with an `interface`. Every
 condition an entry names must hold.
+
+An unreadable or zero-byte command line is **arguments undetermined**, including for an executable-only
+entry. Start, preflight and reload reread affected candidates for up to 50 ms across the whole candidate
+set, at 1 ms intervals, plus an in-flight procfs read. The birth and executable must remain consistent.
+If arguments stay undetermined, the command refuses and names the process; an undecidable `ignore`
+entry also refuses. A known `argv[0]` with no following arguments is a known empty argument list.
+There is no automatic rediscovery after exec; an explicit start or reload resolves again.
 
 **`children` says which descendants of a watched process are watched too:**
 

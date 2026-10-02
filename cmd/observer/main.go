@@ -676,7 +676,11 @@ func (d *daemon) abandon() {
 // only for a port target and the boot id only for a pid target; an unreadable
 // boot refuses those pid targets by name.
 func resolve(approval process.Approval) (process.Resolution, process.Table, error) {
-	table, err := process.Read(procfs)
+	return resolveFrom(procfs, approval)
+}
+
+func resolveFrom(root string, approval process.Approval) (process.Resolution, process.Table, error) {
+	table, err := process.Read(root)
 	if err != nil {
 		return process.Resolution{}, process.Table{}, err
 	}
@@ -684,7 +688,7 @@ func resolve(approval process.Approval) (process.Resolution, process.Table, erro
 		return slices.ContainsFunc(approval.Rules, has) || slices.ContainsFunc(approval.Exclusions, has)
 	}
 	if names(func(rule process.Rule) bool { return rule.Port != 0 }) {
-		listeners, err := process.ReadListeners(procfs)
+		listeners, err := process.ReadListeners(root)
 		if err != nil {
 			return process.Resolution{}, process.Table{}, fmt.Errorf("read the listening sockets a port "+
 				"resolves against: %w", err)
@@ -693,11 +697,11 @@ func resolve(approval process.Approval) (process.Resolution, process.Table, erro
 	}
 	host := process.Host{Table: table}
 	if names(func(rule process.Rule) bool { return rule.PID != nil }) {
-		if boot, err := process.ReadBoot(procfs); err == nil {
+		if boot, err := process.ReadBoot(root); err == nil {
 			host.Boot = boot
 		}
 	}
-	return approval.Resolve(host), table, nil
+	return approval.ResolveArguments(root, host)
 }
 
 // undumpable makes this process non-dumpable, as the payload holder must be
