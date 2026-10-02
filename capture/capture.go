@@ -1065,13 +1065,19 @@ func (s *Session) Stats() Stats {
 }
 
 // Retained is what this session holds now, store by store: the connections it
-// follows, the handle generations it remembers, the connection records it
-// keeps, and the producers it asks to settle.
+// follows and the early-data ranges kept in them, the handle generations it
+// remembers, the connection records it keeps, and the producers it asks to
+// settle.
 func (s *Session) Retained() ([]held.Occupancy, error) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
+	early := 0
+	for _, found := range s.streams {
+		early += len(found.early)
+	}
 	return []held.Occupancy{
 		{Store: "capture.streams", Held: len(s.streams)},
+		{Store: "capture.early", Held: early},
 		{Store: "capture.occupancies", Held: len(s.occupancies)},
 		{Store: "capture.closed", Held: len(s.closed)},
 		{Store: "capture.settlers", Held: len(s.settlers)},

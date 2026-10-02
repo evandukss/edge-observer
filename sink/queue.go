@@ -164,8 +164,9 @@ func (q *Queue) run() {
 }
 
 // Retained is what this queue holds now: the lines queued and the one being
-// written, and its destinations. The lines' bound is in bytes (Stats), not
-// lines.
+// written, the capacity of the slice holding the queued ones (lines its backing
+// array can hold, not lines in it), and its destinations. The lines' bound is
+// in bytes (Stats), not lines.
 func (q *Queue) Retained() ([]held.Occupancy, error) {
 	if q == nil || q.state == nil {
 		return nil, nil
@@ -179,6 +180,7 @@ func (q *Queue) Retained() ([]held.Occupancy, error) {
 	}
 	return []held.Occupancy{
 		{Store: "sink.lines", Held: lines},
+		{Store: "sink.lines_capacity", Held: cap(st.items)},
 		{Store: "sink.destinations", Held: len(st.destinations)},
 	}, nil
 }

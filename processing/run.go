@@ -36,9 +36,11 @@ type Run struct {
 	ended    bool
 	closed   bool
 	// retained is each worker's stores as it last left them, and unrouted the
-	// router's spans as Route last left them (Retained).
+	// router's spans and routing the capacity of the per-worker routing slices
+	// as Route last left them (Retained).
 	retained [][]held.Occupancy
 	unrouted int
+	routing  int
 }
 
 type running struct {
@@ -125,15 +127,22 @@ func (r *Run) Route() {
 			r.pending[i] = items[:0]
 		}
 	}
+	capacity := 0
+	for _, items := range r.pending {
+		capacity += cap(items)
+	}
 	r.mutex.Lock()
 	r.unrouted = len(r.router.gaps)
+	r.routing = capacity
 	r.mutex.Unlock()
 }
 
 // Retained is what this run holds now, store by store, summed over its
 // workers: what each held when it last finished a drain, the entries queued
-// for each, the spans of connection ids not yet routed as Route last left
-// them, and what each extension's supervisor holds.
+// for each and the capacity those queues keep, the spans of connection ids not
+// yet routed and the capacity the routing slices keep as Route last left them,
+// and what each extension's supervisor holds. A capacity is entries a slice's
+// backing array can hold, not entries in it.
 func (r *Run) Retained() ([]held.Occupancy, error) {
 	if r == nil {
 		return nil, nil
@@ -157,14 +166,17 @@ func (r *Run) Retained() ([]held.Occupancy, error) {
 		}
 	}
 	add(held.Occupancy{Store: "processing.router", Held: r.unrouted, Bound: unroutedBound})
+	add(held.Occupancy{Store: "processing.pending_capacity", Held: r.routing})
 	r.mutex.Unlock()
-	queued := 0
+	queued, capacity := 0, 0
 	for _, one := range r.workers {
 		one.queue.mutex.Lock()
 		queued += len(one.queue.items) + len(one.queue.done)
+		capacity += cap(one.queue.items) + cap(one.queue.done)
 		one.queue.mutex.Unlock()
 	}
 	add(held.Occupancy{Store: "processing.queue", Held: queued})
+	add(held.Occupancy{Store: "processing.queue_capacity", Held: capacity})
 	if r.extensions != nil {
 		for _, supervisor := range r.extensions.supervisors {
 			stores, err := supervisor.Retained()

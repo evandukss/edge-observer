@@ -326,20 +326,22 @@ func (w *Worker) Close() error {
 }
 
 // Retained is what this worker holds now, store by store: the connections
-// whose input it holds, the order it examines them in, and the connections
-// waiting on an extension's result. Its owner reads it, never while Drain or
-// Finish runs.
+// whose input it holds, with their entries and the fragments indexed from them,
+// the order it examines them in, and the connections waiting on an extension's
+// result. Its owner reads it, never while Drain or Finish runs.
 func (w *Worker) Retained() ([]held.Occupancy, error) {
 	if w == nil {
 		return nil, nil
 	}
-	entries := 0
+	entries, fragments := 0, 0
 	for _, b := range w.batches {
 		entries += len(b.entries)
+		fragments += len(b.fragments)
 	}
 	return []held.Occupancy{
 		{Store: "processing.batches", Held: len(w.batches)},
 		{Store: "processing.entries", Held: entries},
+		{Store: "processing.fragments", Held: fragments},
 		{Store: "processing.order", Held: len(w.order)},
 		{Store: "processing.waiting", Held: len(w.waiting)},
 	}, nil
