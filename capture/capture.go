@@ -156,6 +156,8 @@ type stream struct {
 	// occupancy is the producer's occupancy of the handle this stream follows;
 	// zero for a stream begun by a transfer the producer numbered nothing for.
 	occupancy uint64
+	born      bool
+	loss      *held.Loss
 
 	// numbered is the last producer number seen in each direction.
 	numbered map[fragment.Direction]uint64
@@ -359,8 +361,13 @@ func (s *Session) Transfer(t probe.Transfer) {
 		s.mutex.Unlock()
 		return
 	}
+	if found.loss.Reason() != "" {
+		s.mutex.Unlock()
+		return
+	}
 	found.sequence++
 	record := fragment.Record{
+		Loss:       found.loss,
 		Process:    t.Process,
 		Connection: found.id,
 		Direction:  t.Direction,
@@ -390,6 +397,9 @@ func (s *Session) Transfer(t probe.Transfer) {
 	s.mutex.Lock()
 	if err != nil {
 		s.stats.Rejected++
+		s.stats.IntakeRefused++
+		found.loss.Stop("intake_exhausted")
+		s.cutLocked(found, t.Direction, record.Offset, connection.ObservationLost, 0, "volatile intake refused a fragment")
 	} else {
 		s.stats.Records++
 	}
@@ -408,10 +418,13 @@ func (s *Session) Refused(t probe.Transfer) {
 	}
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
+	s.stats.GateRefused++
 	found, open := s.streams[key{instance: t.Instance.Key(), endpoint: t.Endpoint}]
 	if !open || found.occupancy != t.Sequence.Occupancy {
 		return
 	}
+	found.loss.Stop("input_limit")
+	s.cutLocked(found, t.Direction, found.offsets[t.Direction], connection.ObservationLost, 0, "the held-event bound refused a transfer")
 	last := found.numbered[t.Direction]
 	if t.Sequence.Number <= last {
 		return
@@ -496,6 +509,9 @@ func (s *Session) unlocatedLocked(found *stream, unlocated uint64) {
 		return
 	}
 	found.unlocated = unlocated
+	if found.born {
+		return
+	}
 	for _, direction := range []fragment.Direction{fragment.Sent, fragment.Received} {
 		s.cutLocked(found, direction, found.offsets[direction], connection.ObservationLost, 0,
 			"the producer lost a transfer it could place in no connection while this one was live")
@@ -550,7 +566,7 @@ func (s *Session) follow(t probe.Transfer) *stream {
 	}
 
 	begun := connection.NoBindingObserved
-	if t.Sequence.Unlocated > 0 {
+	if t.Sequence.Unlocated > 0 && !t.Sequence.Born {
 		// A loss no occupancy could take fell before this stream began, so this
 		// stream's binding evidence, and its first transfers, may be lost: a statement
 		// about losses, not coverage.
@@ -575,12 +591,14 @@ func (s *Session) follow(t probe.Transfer) *stream {
 		offsets:      make(map[fragment.Direction]uint64, 2),
 		begun:        begun,
 		occupancy:    t.Sequence.Occupancy,
+		born:         t.Sequence.Born,
+		loss:         &held.Loss{},
 		numbered:     make(map[fragment.Direction]uint64, 2),
 		empties:      make(map[fragment.Direction]uint64, 2),
 		droppedBelow: make(map[fragment.Direction]uint64, 2),
 		unlocated:    t.Sequence.Unlocated,
 	}
-	if t.Sequence.Unlocated > 0 && t.Sequence.Occupancy != 0 {
+	if t.Sequence.Unlocated > 0 && t.Sequence.Occupancy != 0 && !t.Sequence.Born {
 		// The conservative rule for a stream begun after a loss nothing located:
 		// its first transfers may be the ones lost, so no offset is established. A
 		// stream with no sequence establishes none anyway, for its own reason.
@@ -1045,7 +1063,8 @@ func (t *stream) placed(direction fragment.Direction) connection.Placement {
 // nothing observed.
 func (t *stream) record(how connection.Ending, at time.Time) connection.Record {
 	record := connection.Record{
-		ID: t.id,
+		Loss: t.loss,
+		ID:   t.id,
 		Handle: connection.Handle{
 			Instance:   t.instance.Key(),
 			Address:    t.endpoint,

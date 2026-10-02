@@ -15,3 +15,5 @@ package bpf
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -tags linux -target amd64,arm64 -cc clang -cflags "-O2 -g -Wall -Werror -I/usr/include/aarch64-linux-gnu" full ./sslfull.bpf.c
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -tags linux -target amd64,arm64 -cc clang -cflags "-O2 -g -Wall -Werror -I/usr/include/aarch64-linux-gnu" meta ./sslmeta.bpf.c
+
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -tags linux,attach -target amd64,arm64 -cc clang -cflags "-O2 -g -Wall -Werror -I/usr/include/aarch64-linux-gnu" barrier ./readbarrier.bpf.c

@@ -14,6 +14,7 @@ import (
 	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/contract/record"
 	"github.com/evandukss/edge-observer/fragment"
+	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/http1"
 	"github.com/evandukss/edge-observer/jsonshape"
 	"github.com/evandukss/edge-observer/probe"
@@ -224,7 +225,7 @@ func (w *Worker) write(ctx context.Context, d *dispatch) error {
 			for _, route := range w.routes {
 				if route.Pipeline == line.name {
 					a.Route = route
-					if err := w.emit(ctx, a); err != nil {
+					if err := w.emit(ctx, a, d.b.loss); err != nil {
 						return err
 					}
 				}
@@ -423,7 +424,7 @@ func (w *Worker) countProcessingFailure(pipeline string) {
 	}
 }
 
-func (w *Worker) emit(ctx context.Context, artifact Artifact) error {
+func (w *Worker) emit(ctx context.Context, artifact Artifact, loss *held.Loss) error {
 	line, err := json.Marshal(artifact)
 	if err != nil {
 		// Artifact is built by this binary from serializable contract types.
@@ -434,7 +435,7 @@ func (w *Worker) emit(ctx context.Context, artifact Artifact) error {
 		return errors.New("internal observer defect: cannot serialize its approved artifact")
 	}
 	line = append(line, '\n')
-	return w.release.write(ctx, Approved{line: line}, &w.outcome)
+	return w.release.write(ctx, Approved{line: line}, &w.outcome, loss)
 }
 
 // releaseEvidence is what every release states: processing has settled its
@@ -454,7 +455,7 @@ type release struct {
 }
 
 // write authorizes and writes one line, counting into outcome.
-func (r *release) write(ctx context.Context, line Approved, outcome *Outcome) error {
+func (r *release) write(ctx context.Context, line Approved, outcome *Outcome, loss *held.Loss) error {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	if r.err != nil {
@@ -464,7 +465,12 @@ func (r *release) write(ctx context.Context, line Approved, outcome *Outcome) er
 		return err
 	}
 	var delivery error
-	decision := r.gate.AuthorizeEnqueue(releaseEvidence, func() { delivery = r.output.WriteApproved(ctx, line) })
+	var decision probe.ReleaseDecision
+	if !loss.Authorize(func() {
+		decision = r.gate.AuthorizeEnqueue(releaseEvidence, func() { delivery = r.output.WriteApproved(ctx, line) })
+	}) {
+		return nil
+	}
 	if !decision.Authorized {
 		outcome.GateReason = decision.Reason
 		return nil

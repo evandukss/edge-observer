@@ -123,7 +123,7 @@ func TestStopProducingRefusesTheReturningCallAndSealsItsCount(t *testing.T) {
 				if err != nil || !withdrawal.Complete || withdrawal.Instances != 1 {
 					t.Fatalf("withdrawal did not report the one real grant: %+v, %v", withdrawal, err)
 				}
-				left, err := pending.session.Admissions()
+				left, err := pending.session.Held()
 				if err != nil || len(left) != 0 {
 					t.Fatalf("withdrawal left live admissions: %v, %v", left, err)
 				}
@@ -214,7 +214,7 @@ func TestRestartDoesNotReadThePreviousAdmissionsSavedCall(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer func() { _ = next.Close() }()
-			grants, err := next.Admissions()
+			grants, err := next.Held()
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -32,8 +32,8 @@ var gateReasonClasses = [...]struct {
 	reason             GateReason
 	invalidatesCapture bool
 }{
-	{GateInputLimit, true},
-	{GateIntakeExhausted, true},
+	{GateInputLimit, false},
+	{GateIntakeExhausted, false},
 	{GateUnknownLength, true},
 	{GateUnknownKind, true},
 	{GateUnsettled, false},

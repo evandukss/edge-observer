@@ -102,6 +102,7 @@ func (s *Store) Write(record fragment.Record) error {
 	budget := allowance{left: s.stats.LimitBytes - s.stats.Bytes}
 	if !budget.add(1, unsafe.Sizeof(Entry{})+unsafe.Sizeof(record)) || !budget.add(len(record.Payload), 1) {
 		s.stats.FragmentsRefused++
+		record.Loss.Stop("intake_exhausted")
 		return s.full()
 	}
 	record.Payload = copySlice(record.Payload)
@@ -137,6 +138,7 @@ func (s *Store) Connection(record connection.Record) error {
 	budget := allowance{left: s.stats.LimitBytes - s.stats.Bytes}
 	if !budget.connection(record) {
 		s.stats.ConnectionsRefused++
+		record.Loss.Stop("intake_exhausted")
 		return s.full()
 	}
 	reserved := record.Slot
@@ -275,15 +277,14 @@ func (s *Store) ready() error {
 	if s.stats.Closed {
 		return ErrClosed
 	}
-	if s.stats.Exhausted {
-		return ErrLimit
-	}
 	return nil
 }
 
 func (s *Store) full() error {
-	s.stats.Exhausted = true
-	close(s.exhausted)
+	if !s.stats.Exhausted {
+		s.stats.Exhausted = true
+		close(s.exhausted)
+	}
 	return ErrLimit
 }
 

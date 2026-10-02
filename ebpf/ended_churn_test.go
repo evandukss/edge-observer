@@ -18,7 +18,6 @@ func TestEndedExecutionsAreShedFromTheMapsKeyedByThem(t *testing.T) {
 			Namespace: admission.Namespace{Device: 1, Inode: 2}, PID: int32(1000 + i), Generation: admission.Generation(i + 1)}}
 		key := keyOf(one.Instance)
 		s.recorded(one)
-		s.see(key, admission.Determinate(admission.BootTicks(i)))
 		s.held.Lock()
 		if s.namedBy == nil {
 			s.namedBy = make(map[instanceKey][]admission.Provenance)
@@ -30,11 +29,11 @@ func TestEndedExecutionsAreShedFromTheMapsKeyedByThem(t *testing.T) {
 	if total := s.EndedCounts(); len(total) != 1 || total[0].Count != executions {
 		t.Fatalf("wiring, not the property: %v ended, want %d", total, executions)
 	}
-	if len(s.index) != 0 || len(s.seen) != 0 || len(s.namedBy) != 0 || len(s.inventory) != 0 {
-		t.Errorf("after %d executions ended the session holds index %d, seen %d, named by %d, inventory %d",
-			executions, len(s.index), len(s.seen), len(s.namedBy), len(s.inventory))
+	if len(s.index) != 0 || len(s.namedBy) != 0 || len(s.inventory) != 0 {
+		t.Errorf("after %d executions ended the session holds index %d, named by %d, inventory %d",
+			executions, len(s.index), len(s.namedBy), len(s.inventory))
 	}
-	for name, rebuilds := range map[string]int{"index": s.indexChurn.Rebuilds(), "seen": s.seenChurn.Rebuilds(),
+	for name, rebuilds := range map[string]int{"index": s.indexChurn.Rebuilds(),
 		"named by": s.namedByChurn.Rebuilds()} {
 		if rebuilds == 0 {
 			t.Errorf("%s was never rebuilt after %d executions ended", name, executions)

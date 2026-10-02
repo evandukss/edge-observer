@@ -323,7 +323,8 @@ struct obs_pt_regs {
 #define OBS_STAT_BORN 31            // an occupancy begun at its handle's observed birth
 #define OBS_STAT_HOLDER_UNRECORDED 32 // an execution the reclamation table would not take, whose entries outlive it
 #define OBS_STAT_READS_RECLAIMED 33   // user-memory reads of admissions that ended, folded here as their entries went
-#define OBS_STAT_MAX 34
+#define OBS_STAT_READ_RETRACTED 34   // a read whose grant ended before its bookkeeping settled
+#define OBS_STAT_MAX 35
 
 // what is established about which socket a call's bytes crossed. It is on the
 // event because it is decided inside the call, where the evidence is. Zero is
@@ -1428,7 +1429,7 @@ static __always_inline __u64 obs_stamp(void)
 #if READ_PAYLOAD
 // obs_read_taken records a user-memory read against its admission, at the read
 // rather than at the emit (the reads map).
-static __always_inline void obs_read_taken(__u64 generation)
+static __always_inline void obs_file_read(__u64 generation)
 {
 	__u64 *slot = bpf_map_lookup_elem(&reads, &generation);
 	if (slot) {
@@ -1449,6 +1450,61 @@ static __always_inline void obs_read_taken(__u64 generation)
 	// The map is full, so this read has no entry. It is counted, and userspace
 	// refuses to answer from the map while the count is non-zero.
 	obs_count(OBS_STAT_READ_UNRECORDED);
+}
+#endif
+
+#if READ_PAYLOAD
+#ifdef OBS_TEST_READ_BARRIER
+// Attach-test object only: the loop holds a return after it checked its grant.
+// State 2 is held, 3 released, 4 timed out. Production objects contain neither
+// this map nor the helper, whose kernel floor is higher than theirs.
+struct read_barrier_state { __u64 generation; __u32 state; __u32 padding; };
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct read_barrier_state);
+} read_barrier SEC(".maps");
+
+static long obs_read_wait(__u32 index, void *context)
+{
+	__u32 key = 0;
+	struct read_barrier_state *state = bpf_map_lookup_elem(&read_barrier, &key);
+	return !state || state->state != 2;
+}
+
+static __always_inline void obs_hold_read(__u64 generation)
+{
+	__u32 key = 0;
+	struct read_barrier_state *state = bpf_map_lookup_elem(&read_barrier, &key);
+	if (!state || state->generation != generation || state->state != 1)
+		return;
+	state->state = 2;
+	bpf_loop(1 << 23, obs_read_wait, 0, 0);
+	if (state->state == 2)
+		state->state = 4;
+}
+#else
+static __always_inline void obs_hold_read(__u64 generation) {}
+#endif
+
+static __always_inline void obs_read_taken(const struct instance_key *who, __u64 generation)
+{
+	obs_hold_read(generation);
+	struct admission *grant = bpf_map_lookup_elem(&allowed_processes, who);
+	if (!grant || grant->generation != generation || grant->kind == OBS_DENIED) {
+		obs_count(OBS_STAT_READ_RETRACTED);
+		return;
+	}
+	obs_file_read(generation);
+	// A retraction can fold between the first check and the insertion. The
+	// second check removes any entry recreated in that window. Generations are
+	// unique, so this cannot remove a subsequent admission's counter.
+	grant = bpf_map_lookup_elem(&allowed_processes, who);
+	if (!grant || grant->generation != generation || grant->kind == OBS_DENIED) {
+		bpf_map_delete_elem(&reads, &generation);
+		obs_count(OBS_STAT_READ_RETRACTED);
+	}
 }
 #endif
 
@@ -1894,7 +1950,7 @@ static __always_inline int obs_emit(const struct instance_key *who, __u64 genera
 			kept = OBS_CHUNK;
 		barrier_var(kept);
 		if (kept > 0 && kept <= OBS_CHUNK) {
-			obs_read_taken(generation);
+			obs_read_taken(who, generation);
 			if (bpf_probe_read_user(&e->data, kept, (void *)buf) == 0)
 				e->kept = kept;
 		}
@@ -2226,7 +2282,7 @@ static __always_inline int obs_return(void *ctx, __u32 func)
 	if (c->pcount) {
 		// Reading the count is a read of process memory like any other, recorded at
 		// the read under the same admission (the reads map).
-		obs_read_taken(generation);
+		obs_read_taken(&key, generation);
 		if (bpf_probe_read_user(&count, sizeof(count), (void *)c->pcount) == 0 &&
 		    count > 0 && count <= c->cap) {
 			obs_dropped(occ, c->dir,

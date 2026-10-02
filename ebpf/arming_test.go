@@ -573,7 +573,7 @@ func exerciseArmingWindow(t *testing.T) {
 
 	// What the kernel holds, read back through the session: an entry for a gone
 	// process is an approval waiting for its number to be reused.
-	held, err := session.Admissions()
+	held, err := session.Held()
 	if err != nil {
 		t.Fatalf("read back what the session admitted: %v", err)
 	}
@@ -582,7 +582,7 @@ func exerciseArmingWindow(t *testing.T) {
 	}
 	for _, one := range held {
 		if one.Instance.Namespace == parent.Namespace && one.Instance.PID == children.transient {
-			t.Errorf("a child that exited during arming left %s behind", one)
+			t.Errorf("a child that exited during arming left %+v behind", one)
 		}
 	}
 

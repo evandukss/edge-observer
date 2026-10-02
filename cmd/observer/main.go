@@ -110,7 +110,7 @@ conditions, arguments included, for a view that stays on this host.`
 func main() {
 	if err := run(os.Args[1:], os.Stdout); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, name+": "+err.Error())
-		os.Exit(1)
+		os.Exit(probe.CaptureFailureExitStatus)
 	}
 }
 
@@ -626,14 +626,6 @@ func (d *daemon) serveUntilStop(stopping, asking <-chan os.Signal, ticks <-chan 
 			return
 		case <-stopping:
 			return
-		case <-d.intake.Exhausted():
-			// The intake refused a record, so capture's input is incomplete. The gate
-			// takes intake_exhausted as its reason now, which requests withdrawal and
-			// makes every pending release ineligible, as at the input limit
-			// (probe.DeliveryGateOptions.IntakeExhausted). It is not the
-			// approved-output writer's refusal.
-			d.gate.Snapshot()
-			return
 		case <-d.gate.Withdrawal():
 			return
 		case <-asking:
@@ -1033,7 +1025,10 @@ func (d *daemon) finish(log *logger) error {
 			}
 		}
 	}
-	return nil
+	if reason.InvalidatesCapture() {
+		return fmt.Errorf("capture ended: %s", reason)
+	}
+	return errors.Join(sealErr, processingErr)
 }
 
 // notify tells a supervisor that named a notify socket that the session is up.

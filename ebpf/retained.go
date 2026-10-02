@@ -36,10 +36,10 @@ func (s *Session) Retained() ([]held.Occupancy, error) {
 	}
 
 	s.held.Lock()
-	inventory, index, seen := len(s.inventory), len(s.index), len(s.seen)
+	inventory, index := len(s.inventory), len(s.index)
 	targets, identities := len(s.targets), len(s.identities)
 	namedBy := len(s.namedBy)
-	indexRebuilt, seenRebuilt, namedByRebuilt := s.indexChurn.Rebuilds(), s.seenChurn.Rebuilds(),
+	indexRebuilt, namedByRebuilt := s.indexChurn.Rebuilds(),
 		s.namedByChurn.Rebuilds()
 	s.held.Unlock()
 
@@ -54,8 +54,6 @@ func (s *Session) Retained() ([]held.Occupancy, error) {
 		held.Occupancy{Store: "ebpf.index", Held: index, Rebuilds: indexRebuilt},
 		held.Occupancy{Store: "ebpf.targets", Held: targets},
 		held.Occupancy{Store: "ebpf.identities", Held: identities},
-		held.Occupancy{Store: "ebpf.beyond", Held: len(s.beyond)},
-		held.Occupancy{Store: "ebpf.seen", Held: seen, Rebuilds: seenRebuilt},
 		held.Occupancy{Store: "ebpf.placed", Held: len(s.placed)},
 		held.Occupancy{Store: "ebpf.links", Held: len(s.links)},
 		held.Occupancy{Store: "ebpf.events", Held: len(s.events), Bound: cap(s.events)},

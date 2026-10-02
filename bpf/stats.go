@@ -48,6 +48,7 @@ const (
 	// what it folded.
 	StatHolderUnrecorded uint32 = 32
 	StatReadsReclaimed   uint32 = 33
+	StatReadRetracted    uint32 = 34
 )
 
 // Stats is every counter this package names, against the define it mirrors.
@@ -89,6 +90,7 @@ var Stats = map[string]uint32{
 
 	"OBS_STAT_HOLDER_UNRECORDED": StatHolderUnrecorded,
 	"OBS_STAT_READS_RECLAIMED":   StatReadsReclaimed,
+	"OBS_STAT_READ_RETRACTED":    StatReadRetracted,
 }
 
 // The function registry, by each code's name in the program (OBS_FUNC_* in

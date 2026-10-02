@@ -109,6 +109,7 @@ type Record struct {
 	// Slot is the delivery gate's slot for the event this record came from,
 	// handed to the store that retains the record; nil where there was none.
 	Slot held.Slot
+	Loss *held.Loss
 }
 
 // Stream is the stream this record belongs to.

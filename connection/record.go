@@ -80,7 +80,8 @@ type Record struct {
 
 	// Slot is the delivery gate's slot for the ending this record came from,
 	// handed to the store that retains the record; nil where there was none.
-	Slot held.Slot `json:"-"`
+	Slot held.Slot  `json:"-"`
+	Loss *held.Loss `json:"-"`
 }
 
 // Early is a run of bytes that arrived as TLS 1.3 early data.

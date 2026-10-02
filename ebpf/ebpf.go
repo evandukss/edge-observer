@@ -76,6 +76,10 @@ type Point struct {
 
 // Options is what a session attaches with.
 type Options struct {
+	// BeforeRecord holds a decoded non-exit event before it can enter the
+	// inventory. It runs without the session lock; production leaves it nil.
+	BeforeRecord func(Event)
+
 	// Program is the embedded program to load: full or metadata-only.
 	Program obpf.Program
 
@@ -262,6 +266,12 @@ const (
 	DescriptorSeenInsideACall RefusalReason = "a descriptor was recorded against the call in flight on its thread, which is a binding source doing its work rather than a refusal"
 )
 
+// RetractedEvent counts decoded events whose admission generation is no longer
+// granted when inventory recording runs. They cannot recreate an old admission.
+const ReadRetracted RefusalReason = "a user-memory read outlived its granted generation while its count was filed"
+
+const RetractedEvent RefusalReason = "a decoded event could not record its withdrawn admission generation"
+
 // Declined is one admission the kernel was never given, and why. It is carried
 // back rather than failing the attachment, because the rest of the set is
 // still observed (package attachment).
@@ -363,6 +373,9 @@ type Origin struct {
 
 // Session is a loaded program, its links, and the events they report.
 type Session struct {
+	beforeRecord    func(Event)
+	retractedEvents atomic.Int64
+
 	collection *ebpf.Collection
 	links      []link.Link
 	reader     *ringbuf.Reader
@@ -422,10 +435,9 @@ type Session struct {
 	// namedBy is every target that named an instance; the allowlist holds one.
 	namedBy map[instanceKey][]admission.Provenance
 
-	// indexChurn, seenChurn and namedByChurn shed what the ends of executions
-	// leave in index, seen and namedBy, whose keys never return. Under held.
+	// indexChurn and namedByChurn shed what the ends of executions
+	// leave in index and namedBy, whose keys never return. Under held.
 	indexChurn   held.Churn
-	seenChurn    held.Churn
 	namedByChurn held.Churn
 
 	// inventory is every instance this session recorded a grant for and has not
@@ -445,14 +457,6 @@ type Session struct {
 	// at attach and at a reload, read by the delivery goroutine, under held.
 	targets    map[uint32]admission.Provenance
 	identities map[string]uint32
-
-	// beyond is every descendant of an admitted instance found in an unenumerated
-	// pid namespace, with its start identity, so each is named once.
-	beyond map[instanceKey]admission.Start
-
-	// seen is the start identity first read for each allowlist entry, which later
-	// readings are compared against.
-	seen map[instanceKey]admission.Start
 
 	events chan Event
 	done   chan struct{}
@@ -600,6 +604,7 @@ func Attach(options Options) (*Session, error) {
 		staging = options.Staging
 	}
 	session := &Session{
+		beforeRecord:  options.BeforeRecord,
 		monotonicBase: pairClocks(),
 		collection:    collection,
 		events:        make(chan Event, staging),
@@ -940,7 +945,7 @@ func (s *Session) threadsOf(pid int32) int32 {
 
 // liveThreads is the count the program counts down from. No reading counts as
 // one: the grant then ends at the leader's exit, observing less rather than
-// more. Too high leaves an entry Reconcile withdraws.
+// more. Too high can leave an entry until its execution ends.
 func liveThreads(threads int32) uint32 {
 	if threads < 1 {
 		return 1
@@ -1177,6 +1182,7 @@ func (s *Session) Declined() []Declined { return s.declined }
 // constant: a moved index still reads a valid number, filed under the wrong
 // reason.
 var refusalCounters = map[RefusalReason]uint32{
+	ReadRetracted:           obpf.StatReadRetracted,
 	TransferRefusedAtReturn: obpf.StatRefused,
 	CallNotRecorded:         obpf.StatCallUnrecorded,
 	ReadNotFiled:            obpf.StatReadUnrecorded,
@@ -1207,6 +1213,7 @@ func (s *Session) Refusals() (Refusals, error) {
 		}
 		counted[reason] = value
 	}
+	counted[RetractedEvent] = s.retractedEvents.Load()
 	return Refusals{Named: s.declined, Counted: counted}, nil
 }
 
@@ -1709,77 +1716,6 @@ func ask(placed link.Link, point Point) (string, error) {
 // Events is what the probes reported. It is closed when the session is.
 func (s *Session) Events() <-chan Event { return s.events }
 
-// Admissions is what the kernel holds, read back from the allowlist: it
-// includes fork-hook descendants never offered here and omits instances the
-// exit hook removed. Start identity and executable come from /proc where the
-// instance is reachable, and are indeterminate (not zero) where it is gone.
-func (s *Session) Admissions() ([]admission.Selection, error) {
-	allowed := s.collection.Maps["allowed_processes"]
-	if allowed == nil {
-		return nil, fmt.Errorf("%w: the program has no allowlist map", ErrUnavailable)
-	}
-	// Withdraw what has ceased first, so an entry for a gone process is not
-	// reported as coverage (Reconcile).
-	if _, err := s.Reconcile(); err != nil {
-		return nil, err
-	}
-
-	// One reading of the table, so an instance in a namespace this observer does
-	// not share is found by the numbering on its status line.
-	located := make(map[instanceKey]process.Process)
-	if table, err := process.Read(defaultProcFS); err == nil {
-		for _, p := range table.All() {
-			located[keyOf(p.Instance())] = p
-		}
-	}
-
-	var (
-		key       instanceKey
-		value     admissionValue
-		selection []admission.Selection
-	)
-	entries := allowed.Iterate()
-	for entries.Next(&key, &value) {
-		if value.Kind == denied {
-			continue
-		}
-		provenance := s.provenanceOf(value.Target, value.Rule)
-		provenance.Parent = admission.Key{
-			Namespace:  admission.Namespace{Device: value.ParentNSDevice, Inode: value.ParentNSInode},
-			PID:        int32(value.ParentPID),
-			Generation: admission.Generation(value.ParentGeneration),
-		}
-		one := admission.Selection{
-			Instance: admission.Instance{
-				Namespace:  admission.Namespace{Device: key.NamespaceDevice, Inode: key.NamespaceInode},
-				PID:        int32(key.PID),
-				Generation: admission.Generation(value.Generation),
-			},
-			Kind:        decodeKind(value.Kind),
-			Provenance:  provenance,
-			Mode:        decodeMode(value.Mode),
-			Propagation: decodePropagation(value.Propagate),
-		}
-		if p, found := located[key]; found {
-			one.Instance.Start = p.Start()
-			one.Instance.Executable = p.Executable
-			one.ObserverPID = p.PID
-		}
-		// The allowlist holds one grant, so one target, per instance; every other
-		// target that named it is kept here, so both reasons are reported.
-		if also := s.namedBy[key]; len(also) > 1 {
-			one.Provenance = also[0]
-			one.AlsoNamedBy = also[1:]
-		}
-		s.recorded(one)
-		selection = append(selection, one)
-	}
-	if err := entries.Err(); err != nil {
-		return nil, fmt.Errorf("%w: read the allowlist back: %v", ErrUnavailable, err)
-	}
-	return selection, nil
-}
-
 // Entry is one row of the kernel's allowlist, decoded. Instance.Start is the
 // birth the grant carries (clock ticks since boot), against which the program
 // authenticates the number's occupant. It is indeterminate on a denial, which
@@ -1804,9 +1740,7 @@ type Entry struct {
 
 // Held is the allowlist exactly as the kernel holds it, grants and denials
 // alike, with no reconciliation, no /proc reading and nothing withdrawn.
-// Admissions reconciles first, so asking it whether an entry was left behind
-// asks the cleanup whether the cleanup ran; a check that no entry survives
-// asserts on this.
+// A check that no entry survives asserts on this inventory without cleanup.
 func (s *Session) Held() ([]Entry, error) {
 	allowed := s.collection.Maps["allowed_processes"]
 	if allowed == nil {
@@ -1922,6 +1856,15 @@ func (s *Session) recorded(one admission.Selection) {
 
 // recordedLocked is recorded with s.held already held.
 func (s *Session) recordedLocked(one admission.Selection) {
+	if s.collection != nil {
+		var grant admissionValue
+		allowed := s.collection.Maps["allowed_processes"]
+		if allowed == nil || allowed.Lookup(keyOf(one.Instance), &grant) != nil ||
+			grant.Generation != uint64(one.Instance.Generation) || grant.Kind == denied {
+			s.retractedEvents.Add(1)
+			return
+		}
+	}
 	if s.index == nil {
 		s.index = make(map[instanceKey]int)
 	}
@@ -2021,41 +1964,15 @@ func (s *Session) inspect(one admission.Selection) process.Execution {
 
 // expected is the identity recorded for one instance, compared against /proc.
 // The birth comes from the admission record first (never deleted) and from
-// Reconcile's baseline second (deleted with its entry); a fork-hook descendant
+// a fork-hook descendant
 // has no birth in its record. With neither, the identity is unestablished.
 func (s *Session) expected(one admission.Selection) process.Group {
 	start := one.Instance.Start
-	if !start.Determined {
-		start = s.seenOf(keyOf(one.Instance))
-	}
 	return process.Group{
 		Namespace:    one.Instance.Namespace,
 		NamespacePID: one.Instance.PID,
 		Start:        start,
 	}
-}
-
-// seenOf, see and forget are the only way into s.seen, and each holds s.held:
-// Reconcile writes the map and expected, reachable through Grants, reads it.
-func (s *Session) seenOf(key instanceKey) admission.Start {
-	s.held.Lock()
-	defer s.held.Unlock()
-	return s.seen[key]
-}
-
-func (s *Session) see(key instanceKey, start admission.Start) {
-	s.held.Lock()
-	defer s.held.Unlock()
-	if s.seen == nil {
-		s.seen = make(map[instanceKey]admission.Start)
-	}
-	s.seen[key] = start
-}
-
-func (s *Session) forget(key instanceKey) {
-	s.held.Lock()
-	defer s.held.Unlock()
-	s.seen = held.Deleted(s.seen, key, &s.seenChurn)
 }
 
 // WhatBecameOf decides which of the three states one recorded instance is in,
@@ -2083,161 +2000,6 @@ func WhatBecameOf(one admission.Selection, reading process.Execution) Withdrawal
 		return became(ExecutionIndeterminate,
 			fmt.Sprintf("pid %d: %s", one.ObserverPID, reading.Evidence()))
 	}
-}
-
-// Reconcile withdraws every allowlist entry that no longer names the instance
-// it was written for, and says what it withdrew. An entry can outlive its
-// process: a descendant found in the process table can exit before its entry
-// is written, and exits this session did not see leave entries too. Such an
-// entry confers no authority (the program authenticates every read against its
-// birth, obs_grant), so this is cleanup and accounting.
-//
-// The first reading records the start identity at each key; later readings
-// compare against it. An entry with no live process, a different start
-// identity, or an unreadable one is withdrawn. Entries for dead processes stand
-// until the next run of this.
-//
-// Two kinds of refusal come back, told apart by Reason: withdrawn entries, and
-// descendants of surviving entries in pid namespaces this session did not
-// enumerate (beyondEnumeration).
-//
-// Admissions calls it, and only this package's tests call Admissions; the
-// observer command reaches neither. Withdrawing deletes the entry's baseline in
-// s.seen, so a fork-hook descendant (whose record has no birth) reads as
-// established before and indeterminate after.
-func (s *Session) Reconcile() ([]Declined, error) {
-	allowed := s.collection.Maps["allowed_processes"]
-	if allowed == nil {
-		return nil, fmt.Errorf("%w: the program has no allowlist map", ErrUnavailable)
-	}
-	table, err := process.Read(defaultProcFS)
-	if err != nil {
-		return nil, fmt.Errorf("%w: read the process table: %v", ErrUnavailable, err)
-	}
-	living := make(map[instanceKey]process.Process, len(table.All()))
-	for _, p := range table.All() {
-		living[keyOf(p.Instance())] = p
-	}
-	var (
-		key       instanceKey
-		value     admissionValue
-		withdrawn []Declined
-		inForce   []admission.Selection
-	)
-	entries := allowed.Iterate()
-	for entries.Next(&key, &value) {
-		// A denial's field holds its exclusion's number, not a target identity.
-		provenance := admission.Provenance{Number: int(value.Target), Rule: int(value.Rule)}
-		if value.Kind != denied {
-			provenance = s.provenanceOf(value.Target, value.Rule)
-		}
-		one := admission.Selection{
-			Instance: admission.Instance{
-				Namespace:  admission.Namespace{Device: key.NamespaceDevice, Inode: key.NamespaceInode},
-				PID:        int32(key.PID),
-				Generation: admission.Generation(value.Generation),
-			},
-			Kind:       decodeKind(value.Kind),
-			Provenance: provenance,
-			Mode:       decodeMode(value.Mode),
-		}
-
-		live, alive := living[key]
-		baseline := s.seenOf(key)
-		switch {
-		case !alive:
-			withdrawn = append(withdrawn, Declined{Selection: one, Reason: InstanceGone, Err: fmt.Errorf(
-				"%w: pid %d in %s is in the allowlist and no process holds that number",
-				ErrNotAuthorised, one.Instance.PID, one.Instance.Namespace)})
-		case !live.Start().Determined:
-			withdrawn = append(withdrawn, Declined{Selection: one, Reason: StartIndeterminate, Err: fmt.Errorf(
-				"%w: pid %d in %s is in the allowlist and its start identity could not be read",
-				ErrNotAuthorised, one.Instance.PID, one.Instance.Namespace)})
-		case baseline.Determined && baseline != live.Start():
-			withdrawn = append(withdrawn, Declined{Selection: one, Reason: IdentityChanged, Err: fmt.Errorf(
-				"%w: pid %d in %s was admitted when it %s and now %s",
-				ErrNotAuthorised, one.Instance.PID, one.Instance.Namespace, baseline, live.Start())})
-		default:
-			s.see(key, live.Start())
-			if value.Kind != denied {
-				one.ObserverPID = live.PID
-				inForce = append(inForce, one)
-			}
-			continue
-		}
-	}
-	if err := entries.Err(); err != nil {
-		return nil, fmt.Errorf("%w: read the allowlist back: %v", ErrUnavailable, err)
-	}
-
-	ended := make([]uint64, 0, len(withdrawn))
-	for _, one := range withdrawn {
-		gone := keyOf(one.Selection.Instance)
-		if err := allowed.Delete(gone); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			s.reclaimReads(ended)
-			return nil, fmt.Errorf("%w: withdraw pid %d: %v",
-				ErrUnavailable, one.Selection.Instance.PID, err)
-		}
-		ended = append(ended, uint64(one.Selection.Instance.Generation))
-		s.forget(gone)
-	}
-	s.reclaimReads(ended)
-	beyond := s.beyondEnumeration(table, inForce)
-	s.declined = append(s.declined, withdrawn...)
-	s.declined = append(s.declined, beyond...)
-	return append(withdrawn, beyond...), nil
-}
-
-// beyondEnumeration names the descendants of still-admitted instances that the
-// program could not have admitted, because their pid namespace was not passed
-// to it. No kernel counter can do this: every unapproved process on the host
-// resolves in no enumerated namespace, so it would count the host's traffic.
-// The set is a floor: exited children cannot be named, and one whose namespace
-// cannot be read is left out. Only modes covering descendants created after
-// resolution are walked; under the others the policy already accounts for the
-// absence.
-func (s *Session) beyondEnumeration(table process.Table, inForce []admission.Selection) []Declined {
-	if s.beyond == nil {
-		s.beyond = make(map[instanceKey]admission.Start)
-	}
-
-	var named []Declined
-	for _, one := range inForce {
-		if !one.Mode.Answers().Future || one.ObserverPID == 0 {
-			continue
-		}
-		for _, below := range table.Descendants(one.ObserverPID) {
-			child := below.Instance()
-			if !child.Namespace.Known() || s.resolvable(child.Namespace) {
-				continue
-			}
-			// Named once per instance, not per reconciliation; a number reused by another
-			// process in that namespace is a different instance and is named again.
-			key := keyOf(child)
-			if start, already := s.beyond[key]; already && start == below.Start() {
-				continue
-			}
-			s.beyond[key] = below.Start()
-			named = append(named, Declined{
-				Selection: admission.Selection{
-					Instance: child,
-					Kind:     admission.ByDescent,
-					Provenance: admission.Provenance{
-						Target: one.Provenance.Target,
-						Number: one.Provenance.Number,
-						Rule:   one.Provenance.Rule,
-						Parent: one.Instance.Key(),
-					},
-					Mode:        one.Mode,
-					ObserverPID: below.PID,
-				},
-				Reason: NamespaceUnenumerated,
-				Err: fmt.Errorf("%w: pid %d below pid %d is in %s, which this session did not enumerate",
-					ErrNotAuthorised, below.PID, one.ObserverPID, child.Namespace),
-			})
-		}
-	}
-	return named
 }
 
 // ErrNoPayloadReads is what Reads answers for a program that reads no user
@@ -2592,6 +2354,9 @@ func (s *Session) read() {
 		if event.Kind == Exited {
 			s.endedAt(event)
 		} else {
+			if s.beforeRecord != nil {
+				s.beforeRecord(event)
+			}
 			s.recorded(s.selectionOf(event))
 		}
 		select {
