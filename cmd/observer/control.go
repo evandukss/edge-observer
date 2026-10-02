@@ -58,12 +58,12 @@ var (
 	errNotRunning     = errors.New("no observer is running for this configuration")
 )
 
-// errNeverSealed is a session directory holding a spool and no sealed account:
-// a capture nothing accounts for. errNotASession is a directory holding
-// neither.
+// errNeverSealed identifies session state without a sealed account. Historical
+// approved output and spool files also identify a session. errNotASession means
+// neither an account nor session state was found.
 var (
-	errNeverSealed = errors.New("this session never sealed: its spool is here and no account was written beside it")
-	errNotASession = errors.New("this directory holds no sealed account and no spool, so it is no session's directory")
+	errNeverSealed = errors.New("this session never sealed: session state is here but no sealed account was written")
+	errNotASession = errors.New("this directory holds no sealed account or session state, so it is no session's directory")
 )
 
 // lock is the pid file a session holds for its whole life, as an advisory

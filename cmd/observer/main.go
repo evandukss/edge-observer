@@ -410,6 +410,13 @@ func inspectSelected(session fs.FS, stdout io.Writer, files []string, sessionFil
 func inspectFinished(session fs.FS, text bool, stdout io.Writer) error {
 	content, err := fs.ReadFile(session, sealedName)
 	if errors.Is(err, fs.ErrNotExist) {
+		if state, statErr := fs.Stat(session, controlName); statErr == nil {
+			if state.IsDir() {
+				return errNeverSealed
+			}
+		} else if !errors.Is(statErr, fs.ErrNotExist) {
+			return fmt.Errorf("read session control state: %w", statErr)
+		}
 		for _, name := range []string{processing.ArtifactName, spool.Name, spool.ConnectionsName} {
 			if _, statErr := fs.Stat(session, name); statErr == nil {
 				return errNeverSealed
@@ -712,14 +719,17 @@ func begin(read policy.Policy, session string) (*daemon, error) {
 		participants = append(participants, participant)
 	}
 	directory := filepath.Join(read.Settings.Directory, sessionsName, session)
-	if err := os.MkdirAll(directory, 0700); err != nil {
+	// Leave control state before capture starts, including when no command
+	// ever asks this session for an account before it dies.
+	if err := os.MkdirAll(filepath.Join(directory, controlName), 0700); err != nil {
 		return nil, err
 	}
 	output, err := processing.OpenWriter(processing.WriterOptions{Directory: read.Settings.Directory})
 	if err != nil {
+		_ = os.RemoveAll(directory)
 		return nil, err
 	}
-	removeOutput := func() { _ = output.Close(); _ = os.Remove(directory) }
+	removeOutput := func() { _ = output.Close(); _ = os.RemoveAll(directory) }
 
 	prepared, err := protected.Prepare(read, participants, uint64(read.Settings.AdmittedEventLimit), nil)
 	if err != nil {
