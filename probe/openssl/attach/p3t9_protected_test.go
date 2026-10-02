@@ -182,7 +182,7 @@ func (s *p3t9IntakeCallbacks) Connection(r connection.Record) error {
 	return err
 }
 
-func p3t9ProtectedWithIntakeLimit(t *testing.T, maxEvents uint64, intakeBytes int64, hook func()) *p3t9ProtectedCapture {
+func p3t9ProtectedWithIntakeLimit(t *testing.T, maxEvents uint64, intakeBytes int64, hook func(), connectionBound ...int) *p3t9ProtectedCapture {
 	t.Helper()
 	plan := p3t9ProtectedPlan(t)
 	s, err := intake.New(intakeBytes)
@@ -201,7 +201,9 @@ func p3t9ProtectedWithIntakeLimit(t *testing.T, maxEvents uint64, intakeBytes in
 	}
 	t.Cleanup(func() { _ = w.Close() })
 	b := &p3t9ApprovedBoundary{writer: w}
-	worker, err := processing.New(processing.Options{Plan: plan, PolicyRevision: "p3t9-policy", Session: "p3t9-session", Intake: s, Gate: g, Output: b})
+	bound := 0
+	if len(connectionBound) != 0 { bound = connectionBound[0] }
+	worker, err := processing.New(processing.Options{ConnectionInput: bound, Plan: plan, PolicyRevision: "p3t9-policy", Session: "p3t9-session", Intake: s, Gate: g, Output: b})
 	if err != nil {
 		t.Fatalf("real worker unavailable; protected property NOT reached: %v", err)
 	}
@@ -465,23 +467,27 @@ func TestP3T9ProtectedWitnessAndMeasuredOutput(t *testing.T) {
 func TestP3T9ProtectedDrainedLimitAndPendingFinish(t *testing.T) {
 	for _, count := range []int{3, 4, 5} {
 		t.Run([]string{"N_minus_1", "N", "N_plus_1"}[count-3], func(t *testing.T) {
-			f := p3t9Protected(t, 4, nil)
-			f.exchange(9, "/limit", false)
-			if o := f.drain(); o.Pending != 1 || f.t20iPersisted(config.ExchangesPipeline) != 0 {
-				t.Fatalf("complete-but-live batch was not pending: exchanges records persisted %d, %+v", f.t20iPersisted(config.ExchangesPipeline), o)
+			// Isolate the shared reservation bound from the independent
+			// per-connection cut. All admitted fragments remain with the worker.
+			f := p3t9ProtectedWithIntakeLimit(t, 4, 1<<20, nil, 8)
+			parts := []string{"GET /limit HTTP/1.1\r\nHost: test\r\n", "X-public: benign\r\n", "Authorization: " + p3t9ProtectedMarker + "\r\n\r\n"}
+			if count == 3 { parts = []string{parts[0] + parts[1], parts[2]} }
+			for _, part := range parts { f.send(9, fragment.Sent, part, true, false) }
+			f.send(9, fragment.Received, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK", true, false)
+			if o := f.drain(); o.Pending != 1 || o.ConnectionsCut != 0 || f.t20iPersisted(config.ExchangesPipeline) != 0 {
+				t.Fatalf("complete-but-live batch was not pending without a cut: %+v", o)
+			}
+			if f.gate.Snapshot().Held != uint64(min(count, 4)) {
+				t.Fatalf("wiring, not the property: worker did not retain the input reservations: %+v", f.gate.Snapshot())
 			}
 			f.artifacts(0)
-			// Every callback is acknowledged before the next: no queued pressure.
-			// Only measured empty input / ordinary unmatched close supplies load.
-			for i := 3; i <= count; i++ {
-				f.send(99, fragment.Sent, "", i != 4, i == 4)
-			}
+			if count == 5 { f.send(99, fragment.Sent, "tail", true, false) }
 			reason, charged := probe.GateReason(""), uint64(count)
 			if count == 5 {
 				reason, charged = probe.GateInputLimit, 4
 			}
 			p3t9Reason(t, f.gate, charged, reason)
-			if f.capture.Stats().Records != 2 || f.capture.Stats().Closed != 0 {
+			if f.capture.Stats().Records != int64(min(count, 4)) || f.capture.Stats().Closed != 0 {
 				t.Fatal("limit fixture changed the complete live exchange population")
 			}
 			if count == 5 {
@@ -524,9 +530,9 @@ func TestP3T9ProtectedWorkerHeldAuthorizationKeepsPriorResult(t *testing.T) {
 					unblock := func() { once.Do(func() { close(release) }) }
 					limit, intakeBytes := uint64(32), int64(1<<20)
 					if fault == probe.GateInputLimit {
-						limit = 7
+						limit = 4
 						if inject {
-							limit = 6
+							limit = 3
 						}
 					}
 					if fault == probe.GateIntakeExhausted {
@@ -542,7 +548,7 @@ func TestP3T9ProtectedWorkerHeldAuthorizationKeepsPriorResult(t *testing.T) {
 							close(entered)
 							<-release
 						}
-					})
+					}, 8)
 					// Release before worker.Close even if a test assertion fails.
 					t.Cleanup(unblock)
 					f.exchange(9, "/prior", true)
@@ -577,6 +583,9 @@ func TestP3T9ProtectedWorkerHeldAuthorizationKeepsPriorResult(t *testing.T) {
 						t.Fatal("worker reached authorization without charged batch leases")
 					}
 					f.artifacts(1)
+					if fault == probe.GateInputLimit && f.gate.Snapshot().Held != 3 {
+						t.Fatalf("candidate did not retain three slots: %+v", f.gate.Snapshot())
+					}
 					// One fixed delivery population per fault/neighbor pair. The
 					// storage pair uses real maximum-sized fragments, not a signal
 					// manufactured by the test or a loop bounded by subject counts.
@@ -587,6 +596,8 @@ func TestP3T9ProtectedWorkerHeldAuthorizationKeepsPriorResult(t *testing.T) {
 							for i := 0; i < 2; i++ {
 								f.send(99, fragment.Sent, strings.Repeat("S", 4096), true, false)
 							}
+						} else if fault == probe.GateInputLimit {
+							f.send(99, fragment.Sent, "pending", true, false)
 						} else {
 							f.send(99, fragment.Sent, "", !inject || fault != probe.GateUnknownLength, false)
 						}

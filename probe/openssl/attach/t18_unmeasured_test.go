@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/evandukss/edge-observer/account"
-	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/process"
 )
 
@@ -58,77 +57,33 @@ func (r t18Reader) say(t *testing.T, command string) string {
 	return strings.TrimSuffix(line, "\n")
 }
 
-// Row 17's unknown-length reason on the running program. A client that reads
-// with SSL_read_ex makes one call that fails while nothing is pending: the
-// library writes no count, so the probe reports a transfer it could not
-// measure. The session ends by itself with that reason in its account - not
-// the input limit, not the storage reason, not a missing-stamp count - and the
-// exchange still open on the connection is not written. The control is the
-// same client and exchange with no such call, which runs until stopped and
-// writes it.
-func TestT18AnUnmeasuredTransferRetiresTheSessionUnderItsOwnReason(t *testing.T) {
+// A failed nonblocking read moved no bytes. It must leave the live session
+// able to capture and approve the exchanges on both sides of that call.
+func TestIndependentWouldBlockReadKeepsLaterExchange(t *testing.T) {
 	binary := built(t)
-	for _, unmeasured := range []bool{true, false} {
-		name := map[bool]string{true: "one read the probe cannot measure", false: "measured reads only"}[unmeasured]
-		t.Run(name, func(t *testing.T) {
+	for _, wouldBlock := range []bool{false, true} {
+		t.Run(map[bool]string{false: "ordinary_reads", true: "would_block"}[wouldBlock], func(t *testing.T) {
 			reader := t18Reading(t, t18Serving(t))
 			c := configuring(t, target("reader", reader.process))
 			t18Edit(t, c, t18Removing)
 			s := t18Started(t, binary, c)
-
-			if answer := reader.say(t, "G /?asked=t18-before"); answer != "done 200" {
-				t.Fatalf("wiring, not the property: the reader's exchange answered %q", answer)
-			}
-			t18Until(t, binary, c, 10*time.Second, "wiring, not the property: the reader's exchange was never captured",
+			if answer := reader.say(t, "G /?asked=t18-before"); answer != "done 200" { t.Fatalf("first exchange: %q", answer) }
+			t18Until(t, binary, c, 10*time.Second, "wiring, not the property: first exchange absent",
 				func(a account.Account) bool { return a.Seen != nil && a.Seen.Records >= 2 })
-
-			var sealed account.Account
-			if unmeasured {
-				// SSL_ERROR_WANT_READ is 2: the call failed for want of input, and
-				// nothing else about it is in doubt.
-				if answer := reader.say(t, "W"); answer != "would-block 0 2" {
-					t.Fatalf("wiring, not the property: the out-parameter read answered %q, not a failure for want of input", answer)
-				}
-				s.awaited(t, 30*time.Second)
-				if s.signaled || s.err != nil {
-					t.Fatalf("the session did not end by itself cleanly: signalled %v, %v:\n%s", s.signaled, s.err, s.transcript())
-				}
-				sealed = t18Sealed(t, s.directory(c), s.session)
-			} else {
-				if answer := reader.say(t, "G /?asked=t18-after"); answer != "done 200" {
-					t.Fatalf("the reader's second exchange answered %q", answer)
-				}
-				sealed = s.stop(t, c)
+			if wouldBlock {
+				if answer := reader.say(t, "W"); answer != "would-block 0 2" { t.Fatalf("wiring, not the property: expected WANT_READ, got %q", answer) }
 			}
-			t.Logf("processing %+v; seen %+v; stopped record %v", sealed.Processing, sealed.Seen, s.records("stopped"))
-
+			if answer := reader.say(t, "G /?asked=t18-after"); answer != "done 200" { t.Fatalf("second exchange: %q", answer) }
+			if s.ended() { t.Fatalf("session ended before explicit stop: %s", s.transcript()) }
+			sealed := s.stop(t, c)
+			if sealed.Processing == nil || sealed.Processing.GateReason != "" || sealed.Processing.ProcessingFailures != 0 { t.Errorf("read invalidated processing: %+v", sealed.Processing) }
+			if sealed.Seen == nil || sealed.Seen.Unmeasured != 0 || sealed.Seen.Lost != 0 { t.Errorf("read became unknown length or lost input: %+v", sealed.Seen) }
+			if sealed.Loss == nil || !sealed.Loss.Known || sealed.Loss.Dropped != 0 { t.Errorf("kernel loss: %+v", sealed.Loss) }
 			targets := t18Targets(t18Approved(t, s.directory(c)))
-			// The refused transfer supplies its producer evidence without
-			// retaining payload. Nothing is missing, so no per-direction gap
-			// may be counted as loss.
-			if sealed.Seen.Lost != 0 || sealed.Loss.Dropped != 0 {
-				t.Errorf("the account counts %d missing per-direction observations where the ring dropped %d: the refused transfer is reported as capture loss",
-					sealed.Seen.Lost, sealed.Loss.Dropped)
+			for _, path := range []string{"/?asked=t18-before", "/?asked=t18-after"} {
+				if !slices.Contains(targets, path) { t.Errorf("missing useful exchange %s in %v", path, targets) }
 			}
-			if !unmeasured {
-				if sealed.Processing == nil || sealed.Processing.GateReason != "" || !slices.Contains(targets, "/?asked=t18-before") {
-					t.Fatalf("the control says %+v and wrote %v, so the fault's absence of output measures nothing",
-						sealed.Processing, targets)
-				}
-				return
-			}
-			if sealed.Processing == nil || sealed.Processing.GateReason != probe.GateUnknownLength {
-				t.Errorf("the account gives %+v as the reason, want %s", sealed.Processing, probe.GateUnknownLength)
-			}
-			if slices.Contains(targets, "/?asked=t18-before") {
-				t.Errorf("the exchange still open when the length became unknown was written: %v", targets)
-			}
-			// Nothing was approved, and --text refuses a session with no approved
-			// record, so the reason is read from the account the command prints.
-			stdout, stderr, err := t18Command(t, 30*time.Second, binary, "inspect", s.directory(c))
-			if err != nil || !strings.Contains(stdout, `"gate_reason": "`+string(probe.GateUnknownLength)+`"`) {
-				t.Errorf("the public command does not state the reason (%v):\n%s%s", err, stdout, stderr)
-			}
+			t.Logf("PRECONDITIONS would_block=%v real_exchanges=2 processing=%+v seen=%+v", wouldBlock, sealed.Processing, sealed.Seen)
 		})
 	}
 }

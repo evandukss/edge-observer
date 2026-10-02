@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/process"
 )
 
@@ -16,6 +17,8 @@ import (
 func TestIndependentReloadChurnReclaimsDeadAccountProcesses(t *testing.T) {
 	first, stop := catRunning(t)
 	d, attached, request := reloading(t, int32(first.Process.Pid))
+	ends := &endings{}
+	ends.serve(d)
 	for i := 0; i < 40; i++ {
 		if i > 0 {
 			child, end := catRunning(t)
@@ -77,6 +80,16 @@ func TestIndependentReloadChurnReclaimsDeadAccountProcesses(t *testing.T) {
 		stop()
 		if _, err := process.ReadExec(procfs, request.Processes[0].PID); !os.IsNotExist(err) {
 			t.Fatalf("wiring, not the property: churn participant not reaped: %v", err)
+		}
+		// This stand-in delivers the attachment boundary only after the real
+		// process has been reaped. Producer forwarding is tested separately.
+		admitted := attached.admitted[i]
+		if len(admitted) != 1 {
+			t.Fatal("wiring, not the property: end has no unique admission")
+		}
+		ends.told(probe.Ended{Selection: admitted[0], Evidence: "fixture process reaped", At: time.Now()})
+		if len(d.plan.Processes) != 0 || d.plan.ProcessesEnded != i+1 {
+			t.Fatalf("end retained account identity or lost its count: live=%d ended=%d", len(d.plan.Processes), d.plan.ProcessesEnded)
 		}
 	}
 	t.Log("PRECONDITIONS reloads=40 actual_processes=40 peak_live_participants=1 all_reaped=40 attachment_boundary=stand-in")

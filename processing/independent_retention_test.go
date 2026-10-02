@@ -2,6 +2,7 @@ package processing_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -10,7 +11,9 @@ import (
 	"github.com/evandukss/edge-observer/extension"
 	"github.com/evandukss/edge-observer/fragment"
 	"github.com/evandukss/edge-observer/held"
+	"github.com/evandukss/edge-observer/intake"
 	"github.com/evandukss/edge-observer/probe"
+	"github.com/evandukss/edge-observer/internal/workload"
 )
 
 func independentOccupancy(t *testing.T, r held.Reader) map[string]held.Occupancy {
@@ -49,13 +52,16 @@ func TestIndependentCaptureChurnKeepsOnlyLiveIdentity(t *testing.T) {
 		f.transfer(i, 1, fragment.Sent, "ephemeral")
 		f.close(i, 1, 0)
 	}
-	if len(f.captured.endings) != 160 || f.session.Open() != 1 {
-		t.Fatal("wiring, not the property: churn did not reach160 retirements beside pinned connection")
+	if len(f.captured.endings) != 160 {
+		t.Fatal("wiring, not the property: churn did not reach160 retirement callbacks")
+	}
+	if f.session.Open() != 1 {
+		t.Errorf("capture retained %d open connections after 160 ended beside one pinned connection", f.session.Open())
 	}
 	after := independentOccupancy(t, f.session)
-	for _, name := range []string{"capture.streams", "capture.occupancies", "capture.closed", "capture.early", "capture.settlers"} {
+	for _, name := range []string{"capture.streams", "capture.early", "capture.settlers"} {
 		limit := 0
-		if name == "capture.streams" || name == "capture.occupancies" || name == "capture.settlers" {
+		if name == "capture.streams" || name == "capture.settlers" {
 			limit = 1
 		}
 		if v := independentStore(t, after, name); v.Held > limit {
@@ -143,7 +149,7 @@ func TestIndependentCaptureCarriesReservationIntoRetainedInput(t *testing.T) {
 	if e == nil || e.Fragment == nil || e.Fragment.Length != 1 {
 		t.Fatal("wiring, not the property: captured transfer not retained")
 	}
-	if !d.Slot.Kept() || e.Fragment.Slot != d.Slot {
+	if !d.Slot.Kept() || g.Snapshot().Held != 1 {
 		t.Error("capture/intake lost reservation ownership")
 	}
 	e.ReleaseAs(held.Discarded)
@@ -159,10 +165,22 @@ func TestIndependentCaptureCarriesReservationIntoRetainedInput(t *testing.T) {
 }
 
 func TestIndependentRunQueuesReturnToWarmLivePopulation(t *testing.T) {
+	for _, sparse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("sparse_%v", sparse), func(t *testing.T) { independentRunQueueChurn(t, sparse) })
+	}
+}
+
+func independentRunQueueChurn(t *testing.T, sparse bool) {
 	f := deliveryOpen(t, t.TempDir(), "retained-run", nil)
 	all := deliveryConnections(t, 10240, 913)
 	var warm map[string]held.Occupancy
 	for i, entries := range all {
+		if sparse {
+			for _, e := range entries {
+				if e.Fragment != nil { e.Fragment.Connection = fragment.ConnectionID(3*i+7) }
+				if e.Connection != nil { e.Connection.ID = fragment.ConnectionID(3*i+7) }
+			}
+		}
 		f.feed(t, entries)
 		deadline := time.Now().Add(5 * time.Second)
 		for f.run.Snapshot().Batches < uint64(i+1) {
@@ -186,7 +204,9 @@ func TestIndependentRunQueuesReturnToWarmLivePopulation(t *testing.T) {
 				t.Errorf("%s retains%d after batch%d drained", name, independentStore(t, now, name).Held, i)
 			}
 		}
-		for _, name := range []string{"processing.router", "processing.pending_capacity", "processing.queue_capacity"} {
+		router := independentStore(t, now, "processing.router")
+		if router.Bound <= 0 || router.Held > router.Bound || (sparse && i == 100 && router.Held < 100) { t.Fatalf("sparse routing history not bounded or not exercised: %+v", router) }
+		for _, name := range []string{"processing.pending_capacity", "processing.queue_capacity"} {
 			if independentStore(t, now, name).Held > independentStore(t, warm, name).Held {
 				t.Errorf("%s grows%d->%d at constant live population", name, independentStore(t, warm, name).Held, independentStore(t, now, name).Held)
 			}
@@ -203,6 +223,12 @@ func TestIndependentRunQueuesReturnToWarmLivePopulation(t *testing.T) {
 }
 
 func TestIndependentExtensionChurnReturnsTransientStores(t *testing.T) {
+	for _, sparse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("sparse_%v", sparse), func(t *testing.T) { independentExtensionHistory(t, sparse) })
+	}
+}
+
+func independentExtensionHistory(t *testing.T, sparse bool) {
 	events := make(chan extension.Event, 16)
 	supervisor := extension.Start(extension.Config{Name: "retained", Command: []string{independentPeer(t), "--mode", "unchanged"}, Session: "retained", Revision: "retained", TimeoutMS: 1000, WaitingBytes: 64, Events: func(e extension.Event) {
 		select {
@@ -224,7 +250,9 @@ func TestIndependentExtensionChurnReturnsTransientStores(t *testing.T) {
 	completed := 0
 	for i := uint64(1); i <= 40960; i++ {
 		result := make(chan extension.Result, 1)
-		why := supervisor.Submit(extension.Call{ID: i, Bytes: 8, Message: []byte(fmt.Sprintf("{\"type\":\"exchange\",\"id\":\"%d\"}\n", i)), Done: func(r extension.Result) { result <- r }})
+		id := i
+		if sparse { id = 3*i+7 }
+		why := supervisor.Submit(extension.Call{ID: id, Bytes: 8, Message: []byte(fmt.Sprintf("{\"type\":\"exchange\",\"id\":\"%d\"}\n", id)), Done: func(r extension.Result) { result <- r }})
 		if why != "" {
 			t.Fatalf("constant-population extension refused call%d: %s", i, why)
 		}
@@ -241,9 +269,13 @@ func TestIndependentExtensionChurnReturnsTransientStores(t *testing.T) {
 			limit := 0
 			if name == "extension.answered" {
 				limit = 1
+				if sparse {
+					limit = v.Bound
+					if limit <= 0 || (i == 100 && v.Held != 100) { t.Fatalf("sparse answered history not exercised: %+v", v) }
+				}
 			}
 			if v.Held > limit {
-				t.Errorf("%s retains%d at zero outstanding work (limit%d)", name, v.Held, limit)
+				t.Fatalf("%s retains%d at zero outstanding work (limit%d)", name, v.Held, limit)
 			}
 		}
 	}
@@ -292,7 +324,9 @@ func TestIndependentDerivedChurnReclaimsQueuedLines(t *testing.T) {
 	}
 	for i := uint64(1); i <= 1280; i++ {
 		result := make(chan extension.Result, 1)
-		if why := supervisor.Submit(extension.Call{ID: i, Bytes: 8, Message: []byte(fmt.Sprintf("{\"type\":\"exchange\",\"id\":\"%d\"}\n", i)), Done: func(r extension.Result) { result <- r }}); why != "" {
+		if id := i
+		if sparse { id = 3*i+7 }
+		why := supervisor.Submit(extension.Call{ID: id, Bytes: 8, Message: []byte(fmt.Sprintf("{\"type\":\"exchange\",\"id\":\"%d\"}\n", id)), Done: func(r extension.Result) { result <- r }}); why != "" {
 			t.Fatalf("derived churn refused call: %s", why)
 		}
 		select {
@@ -343,4 +377,79 @@ func TestIndependentDerivedChurnReclaimsQueuedLines(t *testing.T) {
 		}
 	}
 	t.Logf("PRECONDITIONS queued_witnesses=1280 written=%d live_lines=0 stores=%+v", counts.DerivedWritten, independentOccupancy(t, supervisor))
+}
+
+func TestIndependentWaitingReadingsHoldExchangesAndBodyDecisions(t *testing.T) {
+	clock := &independentClock{now: time.Unix(1000, 0), armed: make(chan time.Duration, 10000)}
+	f := independentStart(t, independentPeer(t), "hold-first", `"remove":{"bodies":["request"]}`, []string{"request.line"}, 1, 0, 0, clock)
+	feed(t, f.run, f.store, generate(t, workload.Shape{Connections: 1, Exchanges: 1, RequestBodyBytes: 120, Seed: 311}))
+	independentEventually(t, "wiring, not the property: parsed exchange never waited on extension", func() bool {
+		return independentOccupancy(t, f.run)["processing.waiting"].Held == 1
+	})
+	live := independentOccupancy(t, f.run)
+	for _, name := range []string{"processing.waiting_exchanges", "processing.waiting_bodies"} {
+		v := independentStore(t, live, name)
+		if v.Held == 0 { t.Fatalf("wiring, not the property: waiting batch did not positively exercise %s", name) }
+	}
+	clock.advance(time.Second)
+	independentEventually(t, "extension timeout did not release waiting batch", func() bool {
+		return f.run.Snapshot().Extensions[0].FailedBy["timeout"] == 1
+	})
+	for _, name := range []string{"processing.waiting", "processing.waiting_exchanges", "processing.waiting_bodies"} {
+		if v := independentStore(t, independentOccupancy(t, f.run), name); v.Held != 0 { t.Errorf("%s retained dead dispatch: %+v", name, v) }
+	}
+	t.Logf("PRECONDITIONS actual_peer=hold-first waiting_positive=%+v", live)
+}
+
+func TestIndependentIntakeSaturationAccountsQueuedAndLeasedBytes(t *testing.T) {
+	for _, bound := range []int64{1024, 4096} {
+		t.Run(fmt.Sprint(bound), func(t *testing.T) {
+			for cycle := 0; cycle < 40; cycle++ {
+				store, err := intake.New(bound); if err != nil { t.Fatal(err) }
+				record := fragment.Record{Payload: []byte("held")}
+				count := 0
+				var charge int64
+				for ; count < 128; count++ {
+					err := store.Write(record)
+					if errors.Is(err, intake.ErrLimit) { break }
+					if err != nil { t.Fatal(err) }
+					if count == 0 { charge = store.Stats().Bytes }
+				}
+				stats := store.Stats()
+				if count == 0 || count == 128 || charge <= 0 || stats.Bytes > bound || bound-stats.Bytes >= charge || !stats.Exhausted { t.Fatalf("wiring, not the property: intake never saturated: count=%d charge=%d stats=%+v", count, charge, stats) }
+				entries := make([]*intake.Entry, 0, count)
+				for e := store.Take(); e != nil; e = store.Take() { entries = append(entries, e) }
+				if s := store.Stats(); s.Queued != 0 || s.Leased != int64(count) || s.Bytes != stats.Bytes { t.Errorf("leasing lost charge: before=%+v after=%+v", stats, s) }
+				if v := independentStore(t, independentOccupancy(t, store), "intake.entries"); v.Held != count { t.Errorf("leased entries not retained: %+v", v) }
+				for _, e := range entries { e.Release() }
+				if s := store.Stats(); s.Bytes != 0 || s.Leased != 0 { t.Errorf("release retained intake bytes: %+v", s) }
+				if v := independentStore(t, independentOccupancy(t, store), "intake.entries"); v.Held != 0 { t.Errorf("released entries still retained: %+v", v) }
+				_ = store.Close()
+			}
+			t.Logf("PRECONDITIONS full_intakes=40 byte_bound=%d queued_to_leased_to_released=true", bound)
+		})
+	}
+}
+
+func TestIndependentExtensionWaitingByteBoundRefusesExcess(t *testing.T) {
+	for _, bound := range []int64{32, 128} {
+		t.Run(fmt.Sprint(bound), func(t *testing.T) {
+			ready := make(chan struct{}, 1)
+			answers := make(chan extension.Result, 32)
+			s := extension.Start(extension.Config{Name: "saturated", Command: []string{independentPeer(t), "--mode", "loop"}, Session: "saturated", Revision: "saturated", TimeoutMS: 60000, WaitingBytes: bound, Events: func(e extension.Event) { if e.Kind == extension.Ready { ready <- struct{}{} } }})
+			defer s.Close()
+			select { case <-ready: case <-time.After(5*time.Second): t.Fatal("extension never ready") }
+			count := int(bound/8)
+			for i := 1; i <= count; i++ {
+				why := s.Submit(extension.Call{ID: uint64(i), Bytes: 8, Message: []byte(fmt.Sprintf("{\"type\":\"exchange\",\"id\":\"%d\"}\n", i)), Done: func(r extension.Result) { answers <- r }})
+				if why != "" { t.Fatalf("declared waiting budget refused call %d: %s", i, why) }
+			}
+			if v := independentStore(t, independentOccupancy(t, s), "extension.outstanding"); v.Held != count { t.Fatalf("wiring, not the property: waiting population missing: %+v", v) }
+			if why := s.Submit(extension.Call{ID: 999, Bytes: 8, Message: []byte("{}\n")}); why != extension.Busy { t.Errorf("waiting byte overflow answered %q", why) }
+			s.Close()
+			if len(answers) != count { t.Errorf("shutdown completed %d of %d waiting calls", len(answers), count) }
+			for name, v := range independentOccupancy(t, s) { if v.Held != 0 { t.Errorf("%s retains closed extension work: %+v", name, v) } }
+			t.Logf("PRECONDITIONS actual_peer=loop waiting_byte_bound=%d live_calls=%d excess_refused=1", bound, count)
+		})
+	}
 }

@@ -22,11 +22,13 @@ type p3t9Collected struct {
 }
 
 func (c *p3t9Collected) Write(r fragment.Record) error {
+	if r.Slot != nil { r.Slot.Keep() }
 	c.fragments = append(c.fragments, r)
 	return nil
 }
 
 func (c *p3t9Collected) Connection(r connection.Record) error {
+	if r.Slot != nil { r.Slot.Keep() }
 	c.connections = append(c.connections, r)
 	return nil
 }
@@ -160,12 +162,23 @@ func TestP3T9DrainedAdmissionBoundaryAndPendingRetirement(t *testing.T) {
 				}
 			}()
 			defer close(input)
-			events := []ebpf.Event{p3t9Event(1, "GET / HTTP/1.1\r\n\r\n"), p3t9Event(2, ""), p3t9Close(3), p3t9Event(4, "GET /pending HTTP/1.1\r\n\r\n"), p3t9Event(5, "tail")}
-			// Event 3 is an unmatched ordinary close; it must still be charged.
-			events[2].SSL = 123
-			events[2].Sequence, events[2].Final = probe.Sequence{}, probe.Final{}
-			events[3].Sequence.Number = 2
-			// A novel identity/handle makes downstream growth observable at N+1.
+			// Empty input and an unmatched close return their reservations.
+			input <- p3t9Event(1, "")
+			<-ack
+			unmatched := p3t9Close(2)
+			unmatched.SSL = 123
+			unmatched.Sequence, unmatched.Final = probe.Sequence{}, probe.Final{}
+			input <- unmatched
+			<-ack
+			if g.Snapshot().Held != 0 {
+				t.Fatal("non-retained controls held reservations")
+			}
+			events := make([]ebpf.Event, 5)
+			for i := range events {
+				events[i] = p3t9Event(uint64(i+3), "retained")
+				events[i].Sequence.Number = uint64(i+1)
+			}
+			// A novel identity makes downstream growth observable at N+1.
 			events[4].PID, events[4].NamespacePID, events[4].SSL = 69172, 69172, 456
 			events[4].Sequence = probe.Sequence{Occupancy: 2, Number: 1, Born: true}
 			var atN capture.Stats
@@ -176,9 +189,9 @@ func TestP3T9DrainedAdmissionBoundaryAndPendingRetirement(t *testing.T) {
 					atN = c.Stats()
 				}
 			}
-			reason, charged := probe.GateReason(""), uint64(count)
+			reason, charged := probe.GateReason(""), uint64(count+2)
 			if count == 5 {
-				reason, charged = probe.GateInputLimit, 4
+				reason, charged = probe.GateInputLimit, 6
 			}
 			p3t9Reason(t, g, charged, reason)
 			if c.Stats().Empty != 1 || c.Stats().EndingsUnmatched != 1 || len(a.known) != 1 {
@@ -187,9 +200,9 @@ func TestP3T9DrainedAdmissionBoundaryAndPendingRetirement(t *testing.T) {
 			if after := c.Stats(); count == 5 && (after.Transfers != atN.Transfers || after.Records != atN.Records || after.Connections != atN.Connections) {
 				t.Fatalf("N+1 changed capture state: before %+v after %+v", atN, c.Stats())
 			}
-			wantRecords := 1
-			if count >= 4 {
-				wantRecords = 2
+			wantRecords := min(count, 4)
+			if g.Snapshot().Held != uint64(wantRecords) {
+				t.Fatalf("retained population not charged: %+v", g.Snapshot())
 			}
 			if len(collected.fragments) != wantRecords || len(collected.connections) != 0 {
 				t.Fatal("pending input population differs from the declared fixture")

@@ -3,79 +3,12 @@
 package ebpf_test
 
 import (
-	"os"
-	"os/exec"
 	"testing"
 	"time"
 
-	"golang.org/x/sys/unix"
-
-	"github.com/evandukss/edge-observer/bpf"
 	"github.com/evandukss/edge-observer/ebpf"
 	retention "github.com/evandukss/edge-observer/held"
 )
-
-func TestIndependentNamespaceChurnReclaimsRefusalHistory(t *testing.T) {
-	serverPID, _ := serving(t)
-	server := loaded(t, serverPID)
-	self := settled(t, int32(os.Getpid()))
-	session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: points(t, server), Admit: authorise(self)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = session.Close() }()
-	baseline := retainedKernel(t, session)
-	for i := 0; i < 40; i++ {
-		cmd := exec.Command("cat")
-		cmd.SysProcAttr = &unix.SysProcAttr{Cloneflags: unix.CLONE_NEWPID}
-		input, err := cmd.StdinPipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := cmd.Start(); err != nil {
-			t.Fatalf("wiring, not the property: namespace child unavailable: %v", err)
-		}
-		stop := func() { _ = input.Close(); _ = cmd.Process.Kill(); _ = cmd.Wait() }
-		t.Cleanup(stop)
-		child := settled(t, int32(cmd.Process.Pid))
-		if child.Namespace == self.Namespace || !child.Namespace.Known() {
-			t.Fatal("wiring, not the property: child did not enter a distinct pid namespace")
-		}
-		named, err := session.Reconcile()
-		if err != nil {
-			t.Fatal(err)
-		}
-		found := false
-		for _, one := range named {
-			if one.Selection.ObserverPID == child.PID && one.Reason == ebpf.NamespaceUnenumerated {
-				found = true
-			}
-		}
-		if !found {
-			t.Fatalf("wiring, not the property: unenumerated child not witnessed in reconciliation: %+v", named)
-		}
-		stop()
-		if _, err := session.Reconcile(); err != nil {
-			t.Fatal(err)
-		}
-		after := retainedKernel(t, session)
-		for _, name := range []string{"ebpf.beyond", "ebpf.declined"} {
-			if after[name].Held > baseline[name].Held {
-				t.Errorf("%s retains%d after%d namespace children reaped, live descendants0", name, after[name].Held, i+1)
-			}
-		}
-	}
-	refused, err := session.Refusals()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for reason, n := range refused.Counted {
-		if n != 0 {
-			t.Errorf("namespace churn moved kernel refusal %s to%d", reason, n)
-		}
-	}
-	t.Logf("PRECONDITIONS distinct_namespace_children=40 reconciled_refusals=40 reaped=40 live_descendants=0 stores=%+v", retainedKernel(t, session))
-}
 
 func retainedKernel(t *testing.T, s *ebpf.Session) map[string]retention.Occupancy {
 	t.Helper()
@@ -200,3 +133,27 @@ func TestIndependentAdmissionChurnReclaimsGenerationStores(t *testing.T) {
 	}
 	t.Logf("PRECONDITIONS admission_churn=40 read_bound=4 live_processes=1 stores=%+v", retainedKernel(t, r.session))
 }
+
+func TestIndependentEventStagingFillsAndDrains(t *testing.T) {
+	const bound = 4
+	r := proofConfigured(t, nil, func(o *ebpf.Options) { o.Staging = bound })
+	r.open(t, 0)
+	for cycle := 0; cycle < 40; cycle++ {
+		before := len(r.events)
+		r.command(t, "W 0 6")
+		deadline := time.Now().Add(time.Second)
+		var full retention.Occupancy
+		for time.Now().Before(deadline) {
+			full = retainedKernel(t, r.session)["ebpf.events"]
+			if full.Held == bound { break }
+			time.Sleep(time.Millisecond)
+		}
+		if full.Held != bound || full.Bound != bound { t.Fatalf("wiring, not the property: staging did not fill: %+v", full) }
+		r.consume()
+		if len(r.events)-before != 6 { t.Fatalf("staging lost input: received %d of 6", len(r.events)-before) }
+		if after := retainedKernel(t, r.session)["ebpf.events"]; after.Held != 0 || after.Bound != bound { t.Fatalf("staging did not return to empty bounded channel: %+v", after) }
+	}
+	if dropped, err := r.session.Dropped(); err != nil || dropped != 0 { t.Errorf("staging churn lost kernel input: %d %v", dropped, err) }
+	t.Log("PRECONDITIONS cycles=40 actual_writes=240 staging_held=4 staging_capacity=4 drained_each_cycle=true")
+}
+

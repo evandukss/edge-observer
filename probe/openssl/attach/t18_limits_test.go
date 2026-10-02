@@ -46,10 +46,10 @@ func t18Rendered(t *testing.T, binary, directory string) string {
 
 // Rows 4, 10 and 17, the event allowance, on the running program with real
 // traffic. With limits.events N, one connection is exchanged, closed,
-// processed and written - released from volatile intake - and a second is
-// kept open and exchanged on until the session ends by itself. The account
-// must name the limit as the reason and nothing else, admit exactly N events
-// counted across both connections, leave the undecided connection's payload
+// processed and written, refunding its input, and four connections are kept
+// open and exchanged on in turn. Each stays below the per-connection cut.
+// The account must name the shared input limit, admit at least N further
+// events, and leave the undecided connections' payload
 // nowhere, and show the channel drained freely, so the limit cannot be
 // saturation under another name.
 //
@@ -67,7 +67,7 @@ func TestT18TheAdmissionLimitEndsTheSessionUnderItsReasonAndKeepsOnlyWhatWasDeci
 		t.Run(name, func(t *testing.T) {
 			port := t18Serving(t)
 			decided := speaking(t, port)
-			undecided := speaking(t, port)
+			undecided := t18OpenConnections(t, port, 4)
 			c := configuring(t, target("clients", decided.process))
 			t18Edit(t, c, t18Removing)
 			if limited {
@@ -87,7 +87,7 @@ func TestT18TheAdmissionLimitEndsTheSessionUnderItsReasonAndKeepsOnlyWhatWasDeci
 
 			asked := 0
 			for ; asked < exchanges && (!limited || !s.ended()); asked++ {
-				t18Ask(t, undecided, fmt.Sprintf("/?asked=t18-undecided-%d", asked), "Authorization: "+secret)
+				t18Ask(t, undecided[asked%len(undecided)], fmt.Sprintf("/?asked=t18-undecided-%d", asked), "Authorization: "+secret)
 			}
 			var sealed account.Account
 			if limited {
@@ -136,14 +136,17 @@ func TestT18TheAdmissionLimitEndsTheSessionUnderItsReasonAndKeepsOnlyWhatWasDeci
 				return
 			}
 
+			if sealed.Processing == nil || sealed.Processing.ConnectionsCut != 0 {
+				t.Fatalf("wiring, not the property: a per-connection cut confounded the shared bound: %+v", sealed.Processing)
+			}
 			if s.signaled {
 				t.Fatal("wiring: the limited session was signalled")
 			}
 			if sealed.Processing == nil || sealed.Processing.GateReason != probe.GateInputLimit {
 				t.Errorf("the account gives %+v as the reason, want %s", sealed.Processing, probe.GateInputLimit)
 			}
-			if admitted := t18Admitted(sealed); admitted != limit {
-				t.Errorf("%d events were admitted, want exactly the allowance %d: seen %+v", admitted, limit, sealed.Seen)
+			if admitted := t18Admitted(sealed) - t18Admitted(before); admitted < limit {
+				t.Errorf("%d further events were admitted, fewer than the held allowance %d: seen %+v", admitted, limit, sealed.Seen)
 			}
 			if slices.ContainsFunc(targets, func(one string) bool { return strings.HasPrefix(one, "/?asked=t18-undecided-") }) {
 				t.Errorf("exchanges undecided when the limit was reached were written: %s", targets)
@@ -165,9 +168,9 @@ func TestT18TheAdmissionLimitEndsTheSessionUnderItsReasonAndKeepsOnlyWhatWasDeci
 
 // Rows 4 and 17, the other exhaustion. The volatile intake is charged each
 // record's metadata as well as its payload, so with events carrying a full
-// payload it fills before the event allowance does. One connection is kept
+// payload it fills before the event allowance does. Four connections are kept
 // open and read in calls larger than an event carries, so nothing is
-// released, until the session ends by itself. What must be reached is the
+// released and no individual connection reaches its cut. What must be reached is the
 // intake's refusal - records refused while fewer events than the allowance
 // were admitted, with nothing refused by the kernel - and the account must say
 // why the session ended: a gate reason, or a seal that is not complete and
@@ -175,16 +178,16 @@ func TestT18TheAdmissionLimitEndsTheSessionUnderItsReasonAndKeepsOnlyWhatWasDeci
 func TestT18AFullVolatileIntakeEndsTheSessionUnderAStatedReason(t *testing.T) {
 	binary := built(t)
 	const allowance = 8192
-	client := speaking(t, t18Serving(t))
-	c := configuring(t, target("client", client.process))
+	open := t18OpenConnections(t, t18Serving(t), 4)
+	c := configuring(t, target("client", open[0].process))
 	t18Edit(t, c, t18Removing, t18Setting("events", allowance))
 	s := t18Started(t, binary, c)
-	t18Ask(t, client, "/?asked=t18-intake-first", "Authorization: Bearer t18-intake-secret")
+	t18Ask(t, open[0], "/?asked=t18-intake-first", "Authorization: Bearer t18-intake-secret")
 	t18Until(t, binary, c, 10*time.Second, "wiring, not the property: nothing was captured before the load",
 		func(a account.Account) bool { return a.Seen != nil && a.Seen.Records >= 2 })
 	asked := 0
 	for ; asked < 400 && !s.ended(); asked++ {
-		t18Ask(t, client, fmt.Sprintf("/mega?asked=t18-intake-%d", asked))
+		t18Ask(t, open[asked%len(open)], fmt.Sprintf("/mega?asked=t18-intake-%d", asked))
 	}
 	s.awaited(t, 30*time.Second)
 	if s.signaled || s.err != nil {
@@ -194,6 +197,9 @@ func TestT18AFullVolatileIntakeEndsTheSessionUnderAStatedReason(t *testing.T) {
 	t.Logf("%d answers of a mebibyte; %d events admitted; seen %+v; processing %+v; seal %+v; stopped record %v",
 		asked, t18Admitted(sealed), sealed.Seen, sealed.Processing, sealed.Seal, s.records("stopped"))
 
+	if sealed.Processing == nil || sealed.Processing.ConnectionsCut != 0 {
+		t.Fatalf("wiring, not the property: connection cutting confounded intake exhaustion: %+v", sealed.Processing)
+	}
 	if sealed.Seen.Rejected == 0 || t18Admitted(sealed) >= allowance {
 		t.Fatalf("wiring, not the property: %d records refused by the intake with %d of %d events admitted, so the "+
 			"exhaustion reached is not the intake's", sealed.Seen.Rejected, t18Admitted(sealed), allowance)

@@ -17,7 +17,7 @@ import (
 )
 
 // t18Reason is how one capture-invalidating reason is witnessed: a live
-// session that ends under it, or a declared reason it cannot be produced live
+// session that ends under it, or a declared live coverage gap
 // and the test in this package that covers it instead.
 type t18Reason struct {
 	scenario  func(t *testing.T, binary string) account.Account
@@ -29,10 +29,15 @@ type t18Reason struct {
 // can exist for a reason this tree does not declare yet.
 var t18Reasons = map[string]t18Reason{
 	"input_limit":      {scenario: t18InputLimit},
-	"unknown_length":   {scenario: t18UnknownLength},
+	"unknown_length": {
+		exception: "the normal SSL_read_ex would-block fixture now produces measured zero bytes; " +
+			"it cannot witness the unreadable or invalid count after a successful out-parameter call. " +
+			"Live producer coverage of that branch is NOT established; controlled decoded delivery retains the reason check",
+		covers: "TestDeliveryGateEntryClassifiesUncertaintyBeforeEitherSink",
+	},
 	"intake_exhausted": {scenario: t18IntakeExhausted},
 	"unknown_kind": {
-		exception: "the program emits only kind 1, a transfer, and kind 2, a close (bpf/ssl.bpf.h obs_emit), and " +
+		exception: "the program emits transfer, close and execution-end kinds, the last consumed before the gate; " +
 			"decoding keeps the kind byte as the program wrote it (ebpf/ebpf.go decode), so only a modified " +
 			"program object produces another kind",
 		covers: "TestDeliveryGateEntryClassifiesUncertaintyBeforeEitherSink",
@@ -53,40 +58,35 @@ func t18EndedByItself(t *testing.T, binary string, c configured, drive func(s *t
 }
 
 func t18InputLimit(t *testing.T, binary string) account.Account {
-	client := speaking(t, t18Serving(t))
-	c := configuring(t, target("client", client.process))
+	open := t18OpenConnections(t, t18Serving(t), 4)
+	c := configuring(t, target("client", open[0].process))
 	t18Edit(t, c, t18Removing, t18Setting("events", 30))
 	return t18EndedByItself(t, binary, c, func(s *t18Session) {
 		for i := 0; i < 40 && !s.ended(); i++ {
-			t18Ask(t, client, fmt.Sprintf("/?asked=t18-reason-limit-%d", i))
+			t18Ask(t, open[i%len(open)], fmt.Sprintf("/?asked=t18-reason-limit-%d", i))
 		}
 	})
 }
 
-func t18UnknownLength(t *testing.T, binary string) account.Account {
-	reader := t18Reading(t, t18Serving(t))
-	c := configuring(t, target("reader", reader.process))
-	t18Edit(t, c, t18Removing)
-	return t18EndedByItself(t, binary, c, func(s *t18Session) {
-		if answer := reader.say(t, "G /?asked=t18-reason-length"); answer != "done 200" {
-			t.Fatalf("wiring, not the property: the reader's exchange answered %q", answer)
-		}
-		if answer := reader.say(t, "W"); answer != "would-block 0 2" {
-			t.Fatalf("wiring, not the property: the out-parameter read answered %q", answer)
-		}
-	})
+// Several connections share the event allowance without any one reaching
+// its smaller per-connection cut first.
+func t18OpenConnections(t *testing.T, port, count int) []conversation {
+	t.Helper()
+	open := make([]conversation, count)
+	for i := range open { open[i] = speaking(t, port) }
+	return open
 }
 
-// t18IntakeExhausted keeps one connection open and reads answers larger than
+// t18IntakeExhausted keeps four connections open and reads answers larger than
 // an event carries, so every event holds a full payload in the volatile intake
 // until it fills before the event allowance does.
 func t18IntakeExhausted(t *testing.T, binary string) account.Account {
-	client := speaking(t, t18Serving(t))
-	c := configuring(t, target("client", client.process))
+	open := t18OpenConnections(t, t18Serving(t), 4)
+	c := configuring(t, target("client", open[0].process))
 	t18Edit(t, c, t18Removing, t18Setting("events", 8192))
 	return t18EndedByItself(t, binary, c, func(s *t18Session) {
 		for i := 0; i < 400 && !s.ended(); i++ {
-			t18Ask(t, client, fmt.Sprintf("/mega?asked=t18-reason-intake-%d", i))
+			t18Ask(t, open[i%len(open)], fmt.Sprintf("/mega?asked=t18-reason-intake-%d", i))
 		}
 	})
 }
@@ -112,8 +112,8 @@ func t18Declared(t *testing.T, name string) int {
 
 // Row 17, over the population the type declares. Every gate reason the type
 // classifies as invalidating capture is either produced in a live session,
-// whose sealed account must give exactly that reason, or declared as not
-// producible live with why and the test covering it, which must exist. A
+// whose sealed account must give exactly that reason, or an explicit live
+// coverage gap and a surviving boundary test, which must exist. A
 // reason with neither fails. The population comes from the type, so a reason
 // added later joins it without anybody remembering to add it here.
 func TestT18EveryCaptureInvalidatingReasonIsWitnessedInALiveAccount(t *testing.T) {
@@ -148,6 +148,9 @@ func TestT18EveryCaptureInvalidatingReasonIsWitnessedInALiveAccount(t *testing.T
 				t.Logf("%s is not produced live: %s. Covered by %s", reason, entry.exception, entry.covers)
 			default:
 				sealed := entry.scenario(t, binary)
+				if sealed.Processing == nil || sealed.Processing.ConnectionsCut != 0 {
+					t.Fatalf("wiring, not the property: per-connection cut confounds exhaustion: %+v", sealed.Processing)
+				}
 				if sealed.Processing == nil || string(sealed.Processing.GateReason) != reason {
 					t.Errorf("the session ended with its account giving %+v, want the reason %s", sealed.Processing, reason)
 				}
