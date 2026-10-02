@@ -157,15 +157,12 @@ func NewDeliveryGate(options DeliveryGateOptions) (*DeliveryGate, error) {
 	return &DeliveryGate{options: options, withdrawal: make(chan struct{})}, nil
 }
 
-// Admit reserves a slot before classifying the event. A transfer with
-// measured=false invalidates capture-wide, including early or zero-length
-// transfers. A close ignores measured: false is the ordinary close shape.
-// Unknown kinds are charged then invalidate. Observable intake
-// exhaustion is consumed before reserving a slot. Otherwise, with N slots held
-// the input limit takes precedence over the event's kind and measurement, and
-// nothing is dispatched. Once invalidated, no event is charged or admitted, and
-// the first reason survives later faults. A charged decision carries its slot,
-// which the caller hands on with the event or returns (held.Slot).
+// Admit reserves a slot before identity lookup. Unknown kinds and unmeasured
+// transfers invalidate the capture, even at capacity. At capacity, measured
+// transfers are refused under input_limit; closes pass without a slot so their
+// control state can retire input. Intake separately bounds their bytes. A
+// charged decision carries its slot for the caller to hand on or return.
+// Once invalidated, no event is charged or admitted, and the first reason stays.
 func (g *DeliveryGate) Admit(kind DeliveryKind, measured bool) AdmissionDecision {
 	if g == nil || g.withdrawal == nil {
 		return AdmissionDecision{State: GateSnapshot{Reason: GateUninitialized}}

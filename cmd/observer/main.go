@@ -108,7 +108,11 @@ conditions, arguments included, for a view that stays on this host.`
 }
 
 func main() {
-	if err := run(os.Args[1:], os.Stdout); err != nil {
+	exitOnError(run(os.Args[1:], os.Stdout))
+}
+
+func exitOnError(err error) {
+	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, name+": "+err.Error())
 		os.Exit(probe.CaptureFailureExitStatus)
 	}

@@ -267,8 +267,8 @@ output fails text inspection, even if the account was printed. A legacy raw spoo
 fallback. See [approved inspection](docs/approved-inspection.md) for the reader contract.
 
 **New capture sessions do not create raw spool files.** Both capture callbacks copy records into a
-bounded volatile intake. Reaching its limit refuses the next record whole and signals exhaustion;
-releasing held records does not reopen an exhausted intake. Intake records are not approved output.
+bounded volatile intake. Reaching its limit refuses the next record whole and cuts its connection;
+releasing held records makes capacity available again. Intake records are not approved output.
 The processing worker writes authorized, processed route records to `approved.jsonl`; it does not
 write raw fragments or connection records to the legacy spool. The sealed account remains in the session directory.
 

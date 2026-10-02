@@ -465,14 +465,15 @@ func (r *release) write(ctx context.Context, line Approved, outcome *Outcome, lo
 		return err
 	}
 	var delivery error
-	var decision probe.ReleaseDecision
-	if !loss.Authorize(func() {
-		decision = r.gate.AuthorizeEnqueue(releaseEvidence, func() { delivery = r.output.WriteApproved(ctx, line) })
-	}) {
-		return nil
-	}
+	accepted := false
+	decision := r.gate.AuthorizeEnqueue(releaseEvidence, func() {
+		accepted = loss.Authorize(func() { delivery = r.output.WriteApproved(ctx, line) })
+	})
 	if !decision.Authorized {
 		outcome.GateReason = decision.Reason
+		return nil
+	}
+	if !accepted {
 		return nil
 	}
 	outcome.Authorized++

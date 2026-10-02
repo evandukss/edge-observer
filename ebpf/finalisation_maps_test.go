@@ -24,7 +24,7 @@ func IndependentFailRingReader(session *Session) error {
 }
 
 // IndependentKernelGrantPresent observes the actual map without the
-// reconciliation now performed by Session.Admissions changing its contents.
+// a diagnostic changing the contents of the kernel table.
 func IndependentKernelGrantPresent(session *Session, instance admission.Instance) (bool, error) {
 	var value admissionValue
 	err := session.collection.Maps["allowed_processes"].Lookup(keyOf(instance), &value)

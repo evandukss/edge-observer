@@ -2,8 +2,15 @@ package processing_test
 
 import (
 	"context"
+	"encoding/json"
+	"github.com/evandukss/edge-observer/extension"
+	"github.com/evandukss/edge-observer/held"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/evandukss/edge-observer/capture"
 	"github.com/evandukss/edge-observer/fragment"
@@ -169,5 +176,118 @@ func TestRecoveryDoesNotManufactureACompletePrefix(t *testing.T) {
 				t.Fatalf("wrong eligibility after %s: %s", scenario, lines)
 			}
 		})
+	}
+}
+
+// lossTap observes the control token retained alongside real capture input.
+type lossTap struct {
+	store *intake.Store
+	loss  *held.Loss
+}
+
+func (s *lossTap) Write(r fragment.Record) error { s.loss = r.Loss; return s.store.Write(r) }
+
+func TestAConnectionCutOrdersAgainstHeldOutputAuthorization(t *testing.T) {
+	arrived, resume := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	defer once.Do(func() { close(resume) })
+	out := &outputLog{}
+	p := newPipeline(t, 100, 100, out)
+	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 100, BeforeAuthorize: func() { close(arrived); <-resume }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := processing.New(processing.Options{Session: "ordered", Plan: rulesPlan(t, ""), PolicyRevision: "p", Intake: p.store, Gate: gate, Output: out})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = w.Close() }()
+	p.gate, p.worker = gate, w
+	tap := &lossTap{store: p.store}
+	p.capture = capture.Recording(tap, p.store)
+	p.exchange(1, "/cut")
+	p.closed(1)
+	done := make(chan error, 1)
+	go func() { _, err := w.Drain(context.Background()); done <- err }()
+	select {
+	case <-arrived:
+	case <-time.After(2 * time.Second):
+		t.Fatal("wiring: output was not held")
+	}
+	cut := make(chan struct{})
+	go func() { tap.loss.Stop("intake_exhausted"); close(cut) }()
+	select {
+	case <-cut:
+	case <-time.After(2 * time.Second):
+		once.Do(func() { close(resume) })
+		<-done
+		t.Fatal("cut blocked behind pending authorization")
+	}
+	once.Do(func() { close(resume) })
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if len(out.lines) != 0 {
+		t.Fatalf("cut input escaped authorization: %s", stringJoin(out.lines))
+	}
+}
+
+func TestAConnectionCutOrdersAgainstPendingExtensionSubmission(t *testing.T) {
+	bin := independentPeer(t)
+	dir := t.TempDir()
+	audit := filepath.Join(dir, "received.jsonl")
+	entries, err := json.Marshal([]any{map[string]any{"name": "worker", "command": []string{bin, "--mode", "unchanged", "--record", audit}, "fields": []string{"request.line"}, "timeout_ms": 1000}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := &outputLog{}
+	p := newPipeline(t, 100, 100, out)
+	writer, err := processing.Open(dir, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = writer.Close() }()
+	arrived, resume, ready := make(chan struct{}), make(chan struct{}), make(chan struct{}, 1)
+	var once sync.Once
+	defer once.Do(func() { close(resume) })
+	run, err := processing.Start(processing.Options{Session: "ordered", PolicyRevision: "p", Plan: rulesPlan(t, `"extensions":`+string(entries)),
+		Intake: p.store, Gate: p.gate, Output: out, Derived: writer, Workers: 1,
+		BeforeParse: func(context.Context) error { close(arrived); <-resume; return nil },
+		Supervision: func(e extension.Event) {
+			if e.Kind == extension.Ready {
+				ready <- struct{}{}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = run.Close() }()
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("wiring: extension not ready")
+	}
+	tap := &lossTap{store: p.store}
+	p.capture = capture.Recording(tap, p.store)
+	p.exchange(1, "/cut")
+	p.closed(1)
+	run.Route()
+	select {
+	case <-arrived:
+	case <-time.After(2 * time.Second):
+		t.Fatal("wiring: parse not held")
+	}
+	tap.loss.Stop("intake_exhausted")
+	once.Do(func() { close(resume) })
+	if _, err := run.Finish(context.Background(), processing.Finalization{Withdrawn: true, Drained: true}); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(content), `"type":"exchange"`) || len(out.lines) != 0 {
+		t.Fatalf("cut input reached extension or output: audit=%s output=%s", content, stringJoin(out.lines))
 	}
 }

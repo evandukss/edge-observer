@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,7 +16,7 @@ import (
 
 func TestTerminalCaptureFaultsSealAndReturnFailure(t *testing.T) {
 	for _, kind := range []probe.DeliveryKind{probe.DeliveryTransfer, 255} {
-		t.Run(string(rune('a'+kind)), func(t *testing.T) {
+		t.Run(map[probe.DeliveryKind]string{probe.DeliveryTransfer: "unknown length", 255: "unknown kind"}[kind], func(t *testing.T) {
 			f := processingController(t)
 			f.liveControl(t)
 			decision := f.d.gate.Admit(kind, false)
@@ -52,5 +53,28 @@ func TestRestartNamesAGapOnlyWhileItsSealedAccountIsReadable(t *testing.T) {
 	}
 	if got := f.d.follows(time.Now()); got != nil {
 		t.Fatalf("unreadable account claimed a gap: %+v", got)
+	}
+}
+
+func TestTerminalCaptureFaultsExitNonzero(t *testing.T) {
+	if arg := os.Args[len(os.Args)-1]; strings.HasPrefix(arg, "terminal-case=") {
+		f := processingController(t)
+		f.liveControl(t)
+		kind := probe.DeliveryTransfer
+		if strings.HasSuffix(arg, "unknown_kind") {
+			kind = 255
+		}
+		f.d.gate.Admit(kind, false)
+		f.halt(t)
+		exitOnError(f.finish(&logger{}))
+		return
+	}
+	for _, reason := range []string{"unknown_length", "unknown_kind"} {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestTerminalCaptureFaultsExitNonzero$", "--", "terminal-case="+reason)
+		output, err := cmd.CombinedOutput()
+		status, ok := err.(*exec.ExitError)
+		if !ok || status.ExitCode() != probe.CaptureFailureExitStatus || !strings.Contains(string(output), "capture ended: "+reason) {
+			t.Fatalf("terminal %s: status %v, output %s", reason, err, output)
+		}
 	}
 }
