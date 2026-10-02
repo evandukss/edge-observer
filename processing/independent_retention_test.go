@@ -1,7 +1,9 @@
 package processing_test
 
 import (
+	"context"
 	"fmt"
+	"github.com/evandukss/edge-observer/extension"
 	"testing"
 	"time"
 
@@ -85,19 +87,13 @@ func TestIndependentCaptureEarlyHistoryEndsWithItsConnection(t *testing.T) {
 
 func TestIndependentIntakeAndWorkerChurnReclaimsEachBatch(t *testing.T) {
 	w, store, out, taken := independentSequenceWorker(t)
+	f := independentSequenceNew(nil)
 	for i := uint64(1); i <= 160; i++ {
-		f := independentSequenceNew(nil)
+		f.captured.fragments = nil
+		f.captured.endings = nil
 		f.transfer(i, 1, fragment.Sent, fmt.Sprintf("GET /%d HTTP/1.1\r\nHost: x\r\n\r\n", i))
 		f.transfer(i, 1, fragment.Received, independentSequenceResponse)
 		f.close(i, 1, 1)
-		// Capture ids are session-local: this fixture's separate captures each began
-		// at one, so give their records the unique identity of this worker's input.
-		for j := range f.captured.fragments {
-			f.captured.fragments[j].Connection = fragment.ConnectionID(i)
-		}
-		for j := range f.captured.endings {
-			f.captured.endings[j].ID = fragment.ConnectionID(i)
-		}
 		independentSequenceEnqueue(t, store, f.captured.fragments, f.captured.endings)
 		before := independentOccupancy(t, store)
 		if before["intake.entries"].Held != 3 {
@@ -151,4 +147,105 @@ func TestIndependentCaptureCarriesReservationIntoRetainedInput(t *testing.T) {
 	for e := store.Take(); e != nil; e = store.Take() {
 		e.Release()
 	}
+}
+
+func TestIndependentRunQueuesReturnToWarmLivePopulation(t *testing.T) {
+	f := deliveryOpen(t, t.TempDir(), "retained-run", nil)
+	all := deliveryConnections(t, 160, 913)
+	var warm map[string]held.Occupancy
+	for i, entries := range all {
+		f.feed(t, entries)
+		deadline := time.Now().Add(5 * time.Second)
+		for f.run.Snapshot().Batches < uint64(i+1) {
+			if time.Now().After(deadline) {
+				t.Fatal("wiring, not the property: routed batch never completed")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		err := f.writer.Drain(ctx)
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+		now := independentOccupancy(t, f.run)
+		if i == 0 {
+			warm = now
+		}
+		for _, name := range []string{"processing.batches", "processing.entries", "processing.fragments", "processing.order", "processing.waiting", "processing.queue"} {
+			if now[name].Held != 0 {
+				t.Errorf("%s retains%d after batch%d drained", name, now[name].Held, i)
+			}
+		}
+		for _, name := range []string{"processing.router", "processing.pending_capacity", "processing.queue_capacity"} {
+			if now[name].Held > warm[name].Held {
+				t.Errorf("%s grows%d->%d at constant live population", name, warm[name].Held, now[name].Held)
+			}
+		}
+	}
+	stats := f.writer.DeliveryStats()
+	if stats.Written != 160*deliveryLines || stats.Pending != 0 {
+		t.Fatalf("wiring, not the property: completed workload output %+v", stats)
+	}
+	if stats.Failed != 0 || stats.Dropped != 0 || f.store.Stats().FragmentsRefused != 0 || f.store.Stats().ConnectionsRefused != 0 {
+		t.Errorf("constant-population run refused work: %+v intake%+v", stats, f.store.Stats())
+	}
+	t.Logf("PRECONDITIONS connections=160 live_batches=0 written=%d retained=%+v", stats.Written, independentOccupancy(t, f.run))
+}
+
+func TestIndependentExtensionChurnReturnsTransientStores(t *testing.T) {
+	events := make(chan extension.Event, 16)
+	supervisor := extension.Start(extension.Config{Name: "retained", Command: []string{independentPeer(t), "--mode", "unchanged"}, Session: "retained", Revision: "retained", TimeoutMS: 1000, WaitingBytes: 64, Events: func(e extension.Event) {
+		select {
+		case events <- e:
+		default:
+		}
+	}})
+	defer supervisor.Close()
+	deadline := time.After(5 * time.Second)
+	ready := false
+	for !ready {
+		select {
+		case e := <-events:
+			ready = e.Kind == extension.Ready
+		case <-deadline:
+			t.Fatal("wiring, not the property: extension never became ready")
+		}
+	}
+	completed := 0
+	for i := uint64(1); i <= 160; i++ {
+		result := make(chan extension.Result, 1)
+		why := supervisor.Submit(extension.Call{ID: i, Bytes: 8, Message: []byte(fmt.Sprintf("{\"type\":\"exchange\",\"id\":\"%d\"}\n", i)), Done: func(r extension.Result) { result <- r }})
+		if why != "" {
+			t.Fatalf("constant-population extension refused call%d: %s", i, why)
+		}
+		select {
+		case r := <-result:
+			if r.Outcome != "unchanged" {
+				t.Fatalf("wiring, not the property: extension answered%+v", r)
+			}
+			completed++
+		case <-time.After(time.Second):
+			t.Fatal("wiring, not the property: extension did not answer")
+		}
+		for name, v := range independentOccupancy(t, supervisor) {
+			limit := 0
+			if name == "extension.answered" {
+				limit = 1
+			}
+			if v.Held > limit {
+				t.Errorf("%s retains%d at zero outstanding work (limit%d)", name, v.Held, limit)
+			}
+		}
+	}
+	counts := supervisor.Counts()
+	for reason, n := range counts.RetiredBy {
+		if n != 0 {
+			t.Errorf("healthy churn retired extension: %s=%d", reason, n)
+		}
+	}
+	if counts.DerivedRefused != 0 {
+		t.Errorf("healthy churn refused derived output: %+v", counts)
+	}
+	t.Logf("PRECONDITIONS calls=%d live_outstanding=0 waiting_bytes_bound=64 per_call_bytes=8 stores=%+v", completed, independentOccupancy(t, supervisor))
 }

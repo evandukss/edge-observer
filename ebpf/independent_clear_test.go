@@ -5,6 +5,7 @@ package ebpf_test
 import (
 	"bytes"
 	"debug/elf"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -108,13 +109,14 @@ func TestIndependentAbsentClearDoesNotDisableCapture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	old, next := []byte("SSL_clear\x00"), []byte("ZZZ_clear\x00")
+	old := []byte("SSL_clear\x00")
+	renamed, changed := independentRenameClear(t, data)
 	if bytes.Count(data, old) == 0 {
 		t.Fatal("wiring, not the property: original clear symbol absent")
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "libssl.so.3")
-	if err := os.WriteFile(path, bytes.ReplaceAll(data, old, next), 0600); err != nil {
+	if err := os.WriteFile(path, changed, 0600); err != nil {
 		t.Fatal(err)
 	}
 	f, err := elf.Open(path)
@@ -131,7 +133,7 @@ func TestIndependentAbsentClearDoesNotDisableCapture(t *testing.T) {
 		if s.Name == "SSL_clear" {
 			t.Fatal("wiring, not the property: clear symbol still present")
 		}
-		if s.Name == "ZZZ_clear" {
+		if s.Name == renamed {
 			replacement++
 		}
 	}
@@ -167,4 +169,70 @@ func TestIndependentAbsentClearDoesNotDisableCapture(t *testing.T) {
 		t.Errorf("absent clear blocks capture: born%d unprobed%v", born, r.session.Unprobed())
 	}
 	t.Logf("PRECONDITIONS absent_clear=1 replacement_exports=%d actual_writes=%d", replacement, writes)
+}
+
+// Internal libssl calls also resolve this export through the dynamic linker.
+// Keep the renamed function in its original GNU-hash bucket, updating its hash
+// and bloom bits, so the private library remains executable without SSL_clear.
+func independentRenameClear(t *testing.T, data []byte) (string, []byte) {
+	t.Helper()
+	f, err := elf.NewFile(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if f.Class != elf.ELFCLASS64 || f.Data != elf.ELFDATA2LSB || f.Section(".hash") != nil {
+		t.Fatal("wiring, not the property: unsupported private ELF hash layout")
+	}
+	section := f.Section(".gnu.hash")
+	if section == nil {
+		t.Fatal("wiring, not the property: GNU hash absent")
+	}
+	symbols, err := f.DynamicSymbols()
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := uint32(0)
+	for i, s := range symbols {
+		if s.Name == "SSL_clear" {
+			index = uint32(i + 1)
+		}
+	}
+	at := section.Offset
+	order := binary.LittleEndian
+	buckets := order.Uint32(data[at:])
+	first := order.Uint32(data[at+4:])
+	words := order.Uint32(data[at+8:])
+	shift := order.Uint32(data[at+12:])
+	if index < first || buckets == 0 || words == 0 {
+		t.Fatal("wiring, not the property: clear export lacks a GNU hash chain")
+	}
+	hash := func(s string) uint32 {
+		h := uint32(5381)
+		for i := range len(s) {
+			h = h*33 + uint32(s[i])
+		}
+		return h
+	}
+	var name string
+	var h uint32
+	for i := 0; i < 1000000; i++ {
+		name = fmt.Sprintf("Z%08x", i)
+		h = hash(name)
+		if h%buckets == hash("SSL_clear")%buckets {
+			break
+		}
+		name = ""
+	}
+	if name == "" {
+		t.Fatal("wiring, not the property: no same-bucket export name")
+	}
+	changed := bytes.ReplaceAll(data, []byte("SSL_clear\x00"), append([]byte(name), 0))
+	chain := at + 16 + uint64(words)*8 + uint64(buckets)*4 + uint64(index-first)*4
+	terminal := order.Uint32(changed[chain:]) & 1
+	order.PutUint32(changed[chain:], h&^uint32(1)|terminal)
+	bloom := at + 16 + uint64((h/64)%words)*8
+	mask := uint64(1)<<(h%64) | uint64(1)<<((h>>shift)%64)
+	order.PutUint64(changed[bloom:], order.Uint64(changed[bloom:])|mask)
+	return name, changed
 }
