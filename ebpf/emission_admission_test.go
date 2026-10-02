@@ -71,7 +71,7 @@ func emissionRefusals(t *testing.T, s *ebpf.Session) map[ebpf.RefusalReason]int6
 
 func releasedAdmission(t *testing.T, s *ebpf.Session, event ebpf.Event, untilExit bool) {
 	t.Helper()
-	transfers := 0
+	transfers, closures := 0, 0
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
 	for {
@@ -89,9 +89,18 @@ func releasedAdmission(t *testing.T, s *ebpf.Session, event ebpf.Event, untilExi
 					return
 				}
 			}
+			if e.Kind == ebpf.Closed {
+				closures++
+				if e.Generation != event.Generation || e.Start != event.Start {
+					t.Errorf("delivered closure changed its emission identity: generation %d birth %v", e.Generation, e.Start)
+				}
+			}
 			if e.Kind == ebpf.Exited && untilExit {
 				if transfers != 1 {
 					t.Errorf("exit delivered with %d preceding held transfers, want one", transfers)
+				}
+				if closures != 1 {
+					t.Errorf("exit delivered with %d preceding closures, want one", closures)
 				}
 				return
 			}
