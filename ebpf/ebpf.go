@@ -467,6 +467,12 @@ type Session struct {
 	// ABI does not look like a quiet host.
 	undecodable atomic.Int64
 
+	// readsReclaimed is the user-memory reads this session folded where an
+	// admission ended while its process ran on, and readsUnreclaimed the read
+	// counters it could not remove (reclaimReads).
+	readsReclaimed   atomic.Uint64
+	readsUnreclaimed atomic.Int64
+
 	// failure is why the ring reader stopped, where it was not the session
 	// closing, so the account can say it could not find out what was lost.
 	failed  atomic.Bool
@@ -2157,14 +2163,18 @@ func (s *Session) Reconcile() ([]Declined, error) {
 		return nil, fmt.Errorf("%w: read the allowlist back: %v", ErrUnavailable, err)
 	}
 
+	ended := make([]uint64, 0, len(withdrawn))
 	for _, one := range withdrawn {
 		gone := keyOf(one.Selection.Instance)
 		if err := allowed.Delete(gone); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			s.reclaimReads(ended)
 			return nil, fmt.Errorf("%w: withdraw pid %d: %v",
 				ErrUnavailable, one.Selection.Instance.PID, err)
 		}
+		ended = append(ended, uint64(one.Selection.Instance.Generation))
 		s.forget(gone)
 	}
+	s.reclaimReads(ended)
 	beyond := s.beyondEnumeration(table, inForce)
 	s.declined = append(s.declined, withdrawn...)
 	s.declined = append(s.declined, beyond...)
@@ -2235,11 +2245,16 @@ var ErrReadsIncomplete = errors.New("a user-memory read could not be filed again
 	"so a generation missing from this map is not evidence that no read was taken under it")
 
 // Reads is how many user-memory reads the program took, by admission
-// generation. It is counted at the read, so a read whose output is discarded
-// still counts. A generation with no entry took no read, while the error is
-// nil. The map holds 65536 generations with no eviction, since the evidence
-// must outlive its admission; once full, new first reads are counted as
-// unfiled and this refuses to answer.
+// generation, for every admission that has not ended. It is counted at the
+// read, so a read whose output is discarded still counts. A generation's entry
+// goes when its admission ends - its execution exits or execs (the program
+// folds it into OBS_STAT_READS_RECLAIMED), or this session takes the grant back
+// while the process runs on (reclaimReads) - and its count moves to
+// ReadsReclaimed. A grant withdrawn as the session stops producing keeps its
+// entry, as the evidence that nothing was read after it. A live generation
+// with no entry took no read, while the error is nil. The map holds 65536
+// generations; once full, new first reads are counted as unfiled and this
+// refuses to answer.
 func (s *Session) Reads() (map[admission.Generation]uint64, error) {
 	counters := s.collection.Maps["reads"]
 	if counters == nil {
@@ -2267,6 +2282,49 @@ func (s *Session) Reads() (map[admission.Generation]uint64, error) {
 		return found, fmt.Errorf("%w: %d of them", ErrReadsIncomplete, unfiled)
 	}
 	return found, nil
+}
+
+// ReadsReclaimed is how many user-memory reads were taken under admissions
+// that have ended and whose entries went from Reads: folded by the program at
+// an execution's exit or exec, and by this session where it took a grant back
+// while the process ran on. It refuses to answer while any of this session's
+// removals failed, since those reads are then in neither place.
+func (s *Session) ReadsReclaimed() (uint64, error) {
+	kernel, err := s.stat(obpf.StatReadsReclaimed)
+	if err != nil {
+		return 0, err
+	}
+	total := uint64(kernel) + s.readsReclaimed.Load()
+	if failed := s.readsUnreclaimed.Load(); failed > 0 {
+		return total, fmt.Errorf("%w: %d read counters of ended admissions could not be removed", ErrUnavailable, failed)
+	}
+	return total, nil
+}
+
+// reclaimReads folds the read counters of admissions that ended while their
+// processes run on, and removes them, as the program does at an execution's
+// exit (obs_reclaim): the exit finds the generation through the allowlist
+// entry, which is gone by then, so nothing else would ever remove them. Each
+// lookup and delete is one operation, so no read filed before it is lost. A
+// generation never returns, so nothing more is filed under it, except by a
+// return already past its grant check when the grant went: that read recreates
+// the entry, and it stays.
+func (s *Session) reclaimReads(generations []uint64) {
+	counters := s.collection.Maps["reads"]
+	if counters == nil {
+		return
+	}
+	for _, generation := range generations {
+		var taken uint64
+		switch err := counters.LookupAndDelete(&generation, &taken); {
+		case err == nil:
+			s.readsReclaimed.Add(taken)
+		case errors.Is(err, ebpf.ErrKeyNotExist):
+			// The admission took no read.
+		default:
+			s.readsUnreclaimed.Add(1)
+		}
+	}
 }
 
 // Dropped is how many ring-buffer reservations the kernel refused because the

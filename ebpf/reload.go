@@ -95,9 +95,12 @@ func (s *Session) Admit(who []admission.Selection) ([]admission.Selection, []pro
 		// NoExist, so a grant the fork hook wrote meanwhile is not overwritten; the
 		// instance is then already this session's and the reload is taken back.
 		if err := allowed.Update(one.key, one.value, ebpf.UpdateNoExist); err != nil {
-			for _, back := range written {
+			taken := make([]uint64, 0, len(written))
+			for i, back := range written {
 				_ = allowed.Delete(back)
+				taken = append(taken, ready[i].value.Generation)
 			}
+			s.reclaimReads(taken)
 			return nil, skipped, fmt.Errorf("%w: admit pid %d: %v; nothing this reload wrote is in force",
 				ErrUnavailable, one.granted.ObserverPID, err)
 		}
@@ -123,20 +126,30 @@ func (s *Session) Admit(who []admission.Selection) ([]admission.Selection, []pro
 
 // Retract takes back grants Admit wrote when a later part of the same reload
 // is refused. They were never in force as policy, so the inventory keeps no
-// trace of them (a gone grant there would read as ended coverage).
+// trace of them (a gone grant there would read as ended coverage). The process
+// runs on, so its exit will not find the grant: the reads counted under it are
+// reclaimed here, by the generation the entry held.
 func (s *Session) Retract(granted []admission.Selection) {
 	allowed := s.collection.Maps["allowed_processes"]
 	taken := make(map[instanceKey]bool, len(granted))
+	ended := make([]uint64, 0, len(granted))
 	s.held.Lock()
 	defer s.held.Unlock()
 	for _, one := range granted {
 		key := keyOf(one.Instance)
 		taken[key] = true
 		if allowed != nil {
-			_ = allowed.Delete(key)
+			// The generation is taken only where this delete removed the entry: an
+			// exit or exec that removed it first has folded its reads already.
+			var value admissionValue
+			read := allowed.Lookup(key, &value) == nil
+			if allowed.Delete(key) == nil && read && value.Kind != denied {
+				ended = append(ended, value.Generation)
+			}
 		}
 		delete(s.namedBy, key)
 	}
+	s.reclaimReads(ended)
 	kept := s.accepted[:0]
 	for _, one := range s.accepted {
 		if !taken[keyOf(one.Instance)] {
