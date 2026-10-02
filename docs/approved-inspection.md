@@ -134,7 +134,8 @@ separate authorized, written, failed, dropped and pending lines. Failed means a
 failed attempt, possibly after a partial write, never proven absence. It is not
 retried; the next record starts on a new line and damaged records are malformed.
 Unavailable destinations do not prevent monitoring and can recover by reopen.
-Shutdown is bounded and counts remaining pending lines as discarded.
+Shutdown is bounded and counts remaining pending lines as discarded. An in-flight
+write may still complete later; discard does not prove absence from the file.
 
 The Go `sink.Sink` boundary supplies `Write`, `Reopen` and `Close`.
 `sink.Queue.Enqueue` transfers the line's retained-byte charge before input
@@ -157,8 +158,7 @@ extensions ran:
     "extension_outcomes": [
       {"exchange": 0, "extension": "classify", "outcome": "changed",
        "changed": ["response.headers"], "overwritten": []},
-      {"exchange": 0, "extension": "inventory", "outcome": "unchanged"},
-      {"exchange": 1, "extension": "classify", "outcome": "failed", "reason": "timeout"}
+      {"exchange": 0, "extension": "inventory", "outcome": "unchanged"}
     ]
 
 | member | value |
@@ -217,7 +217,7 @@ Both reading and rendering validate these structural requirements:
   `indeterminate`, and one or two stops ordered sent then received, without
   repetition. Offsets are unsigned decimal integers; evidence cannot precede
   the exclusion boundary. Reasons are the codes declared in `TruncationStop`.
-  Unplaced must be undetermined bytes, without a numeric value, with reason
+  On historical reconstruction lines, unplaced must be undetermined bytes, without a numeric value, with reason
   `reconstruction_truncated`. That reason also requires truncation evidence.
 - Each exclusion is a unique entry referring to an existing retained exchange
   and to request or response. Metadata-only records carry no populated

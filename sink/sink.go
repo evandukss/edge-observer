@@ -27,7 +27,8 @@ type Factory func(path string) Sink
 // Stats counts attempts and outcomes, never an inventory of destination data.
 // Authorized = Written + Failed + Dropped + Pending. Discarded is the subset
 // of Dropped discarded at shutdown. PendingBytes includes queued AND in-flight
-// encoded bytes, including LF; HighWaterBytes is its maximum.
+// encoded bytes, including LF; HighWaterBytes is its maximum. A discarded
+// in-flight line retains its charge until the blocked write actually returns.
 type Stats struct {
 	Authorized     uint64 `json:"authorized"`
 	Written        uint64 `json:"written"`
@@ -46,19 +47,19 @@ type Stats struct {
 // its caller must not mutate or retain it. A nil error transfers its byte charge
 // to the queue before the caller refunds input reservations. A full queue drops
 // immediately. No method doing I/O holds the enqueue lock.
-type Queue struct{}
+type Queue struct{ state *queueState }
 
-func NewQueue(limitBytes int64) (*Queue, error)               { return nil, ErrNotImplemented }
-func (q *Queue) Register(name string, destination Sink) error { return ErrNotImplemented }
-func (q *Queue) Enqueue(name string, line []byte) error       { return ErrNotImplemented }
-func (q *Queue) Stats() Stats                                 { return Stats{} }
-func (q *Queue) DestinationStats(name string) Stats           { return Stats{} }
+func NewQueue(limitBytes int64) (*Queue, error)               { return newQueue(limitBytes) }
+func (q *Queue) Register(name string, destination Sink) error { return q.register(name, destination) }
+func (q *Queue) Enqueue(name string, line []byte) error       { return q.enqueue(name, line) }
+func (q *Queue) Stats() Stats                                 { return q.stats("") }
+func (q *Queue) DestinationStats(name string) Stats           { return q.stats(name) }
 
 // Drain waits for current pending work, bounded by ctx; it leaves admission open.
-func (q *Queue) Drain(ctx context.Context) error { return ErrNotImplemented }
+func (q *Queue) Drain(ctx context.Context) error { return q.drain(ctx) }
 
 // Shutdown closes admission, drains up to ctx's bound, then counts all remaining
 // pending lines as discarded. A late write completion cannot change that count.
-func (q *Queue) Shutdown(ctx context.Context) error { return ErrNotImplemented }
-func (q *Queue) Reopen(ctx context.Context) error   { return ErrNotImplemented }
-func NewFile(path string) Sink                      { return nil }
+func (q *Queue) Shutdown(ctx context.Context) error { return q.shutdown(ctx) }
+func (q *Queue) Reopen(ctx context.Context) error   { return q.reopen(ctx) }
+func NewFile(path string) Sink                      { return newFile(path) }

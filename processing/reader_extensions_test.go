@@ -12,7 +12,14 @@ import (
 // checks an entry against the written message only where its author owns the
 // written component.
 func TestTheReaderChecksIDRangesExtensionOutcomesAndReplacementRemovals(t *testing.T) {
-	line, _ := readableArtifact(t)
+	_, artifact := readableArtifact(t)
+	artifact.Version = processing.ArtifactVersion2
+	artifact.ExchangeIDs = &processing.IDRange{First: "1", Last: "1", Count: "1"}
+	line, err := json.Marshal(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line = append(line, '\n')
 	var base map[string]any
 	if err := json.Unmarshal(line, &base); err != nil {
 		t.Fatal(err)

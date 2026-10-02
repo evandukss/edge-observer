@@ -91,27 +91,20 @@ run outside it.
 
 **`processing`** publishes the worker and approved-output interfaces. Its worker consumes the
 compiled `contract/config.ProcessingPlan` and leased intake entries. `processing.Artifact` defines
-the versioned `approved.jsonl` representation for the public reader; every durable route shares one
-encoded-byte allowance in that file. The interface declarations state input validation, completion
-evidence, authorization ordering and output refusal. Processing runs on `limits.workers` workers.
-One owner takes the intake's entries and routes each by its connection (process and connection id) to
-the worker that owns that connection, so one worker processes a connection's entries in order. A
-worker's queue holds leased entries, so the intake's one allowance bounds every queue together and
-routing never waits on a worker. An entry arriving for a connection already processed is released at
-once and counted. Each worker keeps intake leases through processing and output, executes the
-compiled slots on separate pipeline copies, and authorizes each encoded route result through the
-shared delivery gate immediately before writing, at one release point every worker shares, so writes
-are serialised. The writer refuses a line that would exceed the remaining allowance without writing
-any of it; a failure stops output by every worker. Connection routes carry metadata only.
-Still-open batches require explicit withdrawal and callback-drain evidence at finalization, which
-never substitutes for a transport close.
-An approved prefix is not a whole stream. `reconstruction_truncation` explicitly marks its suffix
-indeterminate and records the affected directions, the first excluded offsets, the structural reasons,
-and the evidence offsets (which can lie inside a withheld message). In the same artifact,
-`reconstruction.unplaced` is undetermined with no numeric value and the reason
-`reconstruction_truncated`; it must not assert a measured zero for that suffix. Unknown placement
-at the observed boundary is reported even when no later fragment arrived. Connection routes omit
-the reconstruction and its truncation, and the actual connection ending remains independent.
+the versioned `approved.jsonl` representation for the public reader. Each exchange is one line,
+with its session, connection, index and session-wide exchange id. One metadata line is emitted on
+the connections route at retirement. Processing runs on `limits.workers` workers. One owner routes
+leased intake entries by connection to its worker, preserving each connection's order. Entries stay
+charged until processing transfers immutable, fully encoded output to the shared bounded sink queue.
+The delivery gate orders authorization and enqueue against invalidation in one short step. A full
+queue drops the line immediately; sink I/O runs outside the gate and release locks. Already enqueued
+lines may be written after a later invalidation. Sink failures do not invalidate capture.
+
+An approved prefix is not a whole stream. The retirement line's `reconstruction_truncation` marks
+an incomplete suffix indeterminate and records its directions, excluded offsets, reasons and evidence
+offsets. The exchange lines contain complete pairs only; the connection ending remains independent.
+Still-open batches require withdrawal and callback-drain evidence at finalization, which never
+substitutes for an observed transport close.
 
 `policy_exclusions` records actual removals by policy in that pipeline's retained messages: the
 exchange index, request or response, the field removed and a disposition (`removed`,
@@ -120,20 +113,22 @@ never its value. Each entry appears once; array order has no meaning. Configured
 replacement and truncation add no entry. Every new artifact carries an array, including `[]` for no
 removals and for metadata routes. An older artifact with the member absent (or null) has unavailable
 evidence, not known-empty evidence. Empty evidence says nothing about an unpublished or
-indeterminate suffix. These encoded bytes share the approved-output allowance with the rest of the
-artifact.
+indeterminate suffix. These encoded bytes are included in the queue charge with the rest of the line.
 
-The command routes on one goroutine, separate from the controller that selects stop, gate
-withdrawal and writer exhaustion, and each worker runs on its own. Routing takes queued intake on a
-10 ms cadence; elapsed time never establishes batch completeness. Live accounts carry only session
-aggregates: processing failures, output failures, authorized and written route records,
-stopped-pipeline identities, and one gate reason. The counts are the workers' last returned outcomes,
-summed, and the gate is read later; these are not an atomic reading and do not wait for a write to
-finish. At stop the producer withdraws and drains, capture publishes its final records, and every
-worker receives the actual withdrawal and drain results. Both must be complete to release a
-still-open batch. The workers release all remaining leases and approved output is closed before the
-final account is written. This integration does not impose a whole-session finalization deadline;
-the producer drain bound does not bound a held worker or writer.
+The command routes on one goroutine, separate from the controller that selects stop and gate
+withdrawal. Routing takes queued intake on a 10 ms cadence; elapsed time never establishes batch
+completeness. Accounts distinguish authorized, written, failed, dropped and pending output. A failed
+write may have written a prefix and is never counted as written or retried. A later record begins on
+a new line; inspection reports a damaged record as malformed. Snapshot counters can advance while
+an account is rendered. At stop, producers withdraw and drain, workers release their remaining leases,
+and sink shutdown waits only for its bounded deadline. Remaining pending lines are counted as
+discarded. This deadline bounds sink shutdown, not every producer or extension's finalization.
+
+**`sink`** owns the byte-bounded queue and per-file write/reopen boundaries. Queued and in-flight
+lines both retain their charge. Stable files append across sessions; an unavailable file does not
+prevent monitoring. `observer reopen` switches approved, derived and log files after external rotation.
+A blocked old write prevents a successful reopen acknowledgement. Operators choose retention and
+rotation; the account reports delivery outcomes rather than a retained-file inventory.
 
 **`spool`** implements the legacy raw disk format. Production capture does not wire it into either
 sink, and starting a new session does not open it. Legacy readers still recognize its filenames.
@@ -153,8 +148,10 @@ account carries no process's command-line arguments, because they can hold secre
     <observer.directory>/
       observer.pid                    the running session's pid file
       last-sealed.json                the most recent session to seal
+      approved.jsonl                  authorized exchange and retirement lines
+      derived-<extension>.jsonl        extension records carrying their session
       sessions/<session>/
-        approved.jsonl                only authorized, processed route records
+        control/                      requests and acknowledgements
         account.json                  the account, sealed when the session ended
         contract-account.json         the same account in the published account contract
 
@@ -170,7 +167,8 @@ reassembles one direction of one connection and records every hole rather than c
 **`http1`** reads HTTP/1.1 messages out of it, strictly, refusing a message two endpoints could read
 differently; **`jsonshape`** records a JSON body's shape - names, nesting and kinds - and none of its
 values. The public `inspect --text` command prints the sealed account, then reads approved
-records through `processing.ReadArtifacts` and `processing.RenderArtifact`. It retains their
+records through `processing.ReadArtifactFiles` and `processing.RenderArtifact`. Explicit files can
+include rotated files, and a session filter selects their records. It retains their
 capture-time provenance and exclusion/truncation evidence and displays permitted values. Missing
 or empty approved output fails. It does not reconstruct a raw spool or execute current policy.
 

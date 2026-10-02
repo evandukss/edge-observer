@@ -43,8 +43,8 @@ func largest(form bool) string {
 		`, "mask": {"headers": ` + keyed("x-m", config.MaxMaskedHeaders, value) +
 		`, "json": {"request": ` + keyed("/m", config.MaxRulePointers, value) + `, "response": ` + keyed("/m", config.MaxRulePointers, value) + `}}` +
 		`, "truncate": {"headers": ` + keyed("x-t", config.MaxTruncatedHeaders, func(i int) string { return fmt.Sprint(i + 1) }) + `}` +
-		fmt.Sprintf(`, "limits": {"output_mib": %d, "events": %d, "state_every_seconds": %d, "workers": %d}`,
-			config.MaxOutputMiB, config.MaxEvents, config.MaxStateEverySeconds, config.MaxWorkers)
+		fmt.Sprintf(`, "limits": {"events": %d, "state_every_seconds": %d, "workers": %d}`,
+			config.MaxEvents, config.MaxStateEverySeconds, config.MaxWorkers)
 }
 
 // The largest configuration a user can write compiles, the internal layer
@@ -72,8 +72,7 @@ func TestTheLargestConfigurationCompilesAndWrites(t *testing.T) {
 			if len(slots) > config.MaxCompiledSlots {
 				t.Errorf("the rules compiled to %d operations, above the internal bound %d", len(slots), config.MaxCompiledSlots)
 			}
-			if observer := compiled.Plan.Observer(); observer.ApprovedOutputBoundMiB != config.MaxOutputMiB ||
-				observer.AdmittedEventLimit != config.MaxEvents || observer.StateEverySeconds != config.MaxStateEverySeconds ||
+			if observer := compiled.Plan.Observer(); observer.AdmittedEventLimit != config.MaxEvents || observer.StateEverySeconds != config.MaxStateEverySeconds ||
 				observer.Workers != config.MaxWorkers {
 				t.Errorf("the limits resolved to %+v", observer)
 			}

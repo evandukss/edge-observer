@@ -55,7 +55,7 @@ func largestRules(form bool) map[string]any {
 				"response": largestValues("/m", config.MaxRulePointers, value)}},
 		"truncate": map[string]any{"headers": largestValues("x-t", config.MaxTruncatedHeaders,
 			func(i int) any { return i + 1 })},
-		"limits": map[string]any{"output_mib": config.MaxOutputMiB, "events": config.MaxEvents,
+		"limits": map[string]any{"events": config.MaxEvents,
 			"state_every_seconds": config.MaxStateEverySeconds, "workers": config.MaxWorkers},
 	}
 }
@@ -124,7 +124,7 @@ func TestTheLargestConfigurationStartsAndWrites(t *testing.T) {
 			ended(t, observer, c)
 
 			found := 0
-			err = processing.ReadArtifacts(os.DirFS(observer.directory(c)), func(a processing.Artifact) error {
+			err = processing.ReadArtifacts(os.DirFS(c.directory), func(a processing.Artifact) error {
 				if a.Reconstruction == nil || a.Connection.Process.PID != client.process.PID {
 					return nil
 				}

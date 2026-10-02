@@ -73,7 +73,7 @@ func TestARequestIsAnsweredByTheRunningSessionWithoutAnythingListening(t *testin
 		body []byte
 	}
 	answered := make(chan asked, 1)
-	serving := &controller{directory: directory, answer: func(kind string, body []byte) ([]byte, error) {
+	serving := &controller{directory: filepath.Join(directory, sessionsName, "feedfacefeedface"), answer: func(kind string, body []byte) ([]byte, error) {
 		answered <- asked{kind, body}
 		return []byte(`{"kind":"live","session":"feedfacefeedface"}`), nil
 	}}
@@ -114,7 +114,7 @@ func TestARequestIsAnsweredByTheRunningSessionWithoutAnythingListening(t *testin
 	close(signals)
 	<-done
 
-	leftover, err := os.ReadDir(filepath.Join(directory, "control"))
+	leftover, err := os.ReadDir(filepath.Join(directory, sessionsName, "feedfacefeedface", controlName))
 	if err != nil {
 		t.Fatalf("read the control directory: %v", err)
 	}

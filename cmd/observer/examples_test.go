@@ -137,12 +137,12 @@ func TestEveryCommandRefusesWhatTheProgramDoesNotDo(t *testing.T) {
 	if !slices.ContainsFunc(commands, func(command []string) bool { return command[1] == "stop" }) {
 		t.Fatal("wiring, not the property: the usage text names no stop command, so its exception asserts nothing")
 	}
-	if !strings.Contains(usage(), "  observer inspect <configuration | session directory> [--text]") ||
+	if !strings.Contains(usage(), "  observer inspect <configuration | session directory> [--text ") ||
 		slices.ContainsFunc(commands, func(command []string) bool { return command[1] == "inspect" }) {
 		t.Fatal("wiring, not the property: inspect's usage line changed, so adding it by name may cover it twice or not at all")
 	}
 	commands = append(commands, []string{"", "inspect", " --text", "--text"})
-	readOnlyWhereTheSessionIs := map[string]bool{"stop": true, "inspect": true}
+	readOnlyWhereTheSessionIs := map[string]bool{"stop": true, "inspect": true, "reopen": true}
 
 	written := contractConfiguration(t, func(document map[string]any) {
 		document["output"] = t.TempDir()

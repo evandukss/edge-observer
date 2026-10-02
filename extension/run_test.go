@@ -132,7 +132,7 @@ func (e *events) snapshot() []extension.Event {
 	return append([]extension.Event(nil), e.all...)
 }
 
-// started runs plan with outputBytes of approved output allowance, two
+// started runs plan with outputBytes of retained queue capacity, two
 // workers and clock (nil for the host's).
 func started(t *testing.T, plan *config.ProcessingPlan, outputBytes int64, clock extension.Clock) *session {
 	t.Helper()
@@ -205,11 +205,14 @@ func (s *session) finish(t *testing.T) processing.Outcome {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	o, err := s.run.Finish(ctx, processing.Finalization{Withdrawn: true, Drained: true})
+	_, err := s.run.Finish(ctx, processing.Finalization{Withdrawn: true, Drained: true})
 	if err != nil {
 		t.Fatalf("the run did not finish: %v", err)
 	}
-	return o
+	if err := s.writer.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return s.run.Snapshot()
 }
 
 // lines is the approved output's lines of one pipeline, read back by the
@@ -301,101 +304,6 @@ func body(content string) json.RawMessage {
 	return json.RawMessage(fmt.Sprintf(`{"kept": %q}`, base64.StdEncoding.EncodeToString([]byte(content))))
 }
 
-// A derived line that fits half the allowance but not what the observer's own
-// output has left is refused for the budget, counted, and the observer's own
-// lines go on being written: the refusal never exhausts the approved output.
-func TestADerivedLineOverWhatTheOutputHasLeftIsRefusedForBudgetAndTheOutputGoesOn(t *testing.T) {
-	const allowance = 400_000
-	sizes := filepath.Join(t.TempDir(), "derived-size")
-	plan := planOf(t, "", entry{name: "emitter", fields: []string{config.FieldResponseLine},
-		does: extensiontest.Config{DerivedSizeFile: sizes}})
-	s := started(t, plan, allowance, nil).ready(t, plan)
-	// One workload, fed a connection at a time: connection ids are unique
-	// only within one.
-	w := generate(t, workload.Shape{Connections: 200, Exchanges: 1, ResponseBodyBytes: 3000, Seed: 7})
-	connection := 0
-	// next feeds one more connection and waits for both its lines.
-	next := func() processing.Outcome {
-		t.Helper()
-		if connection == len(w.Connections) {
-			t.Fatal("wiring, not the property: the workload has no connection left")
-		}
-		id := w.Connections[connection].ID
-		one := &workload.Workload{}
-		for _, e := range w.Entries {
-			if (e.Fragment != nil && e.Fragment.Connection == id) || (e.Connection != nil && e.Connection.ID == id) {
-				one.Entries = append(one.Entries, e)
-			}
-		}
-		before := s.run.Snapshot().Written
-		s.feed(t, one)
-		connection++
-		return s.waitFor(t, "connection "+fmt.Sprint(connection)+"'s lines", func(o processing.Outcome) bool {
-			return o.Written >= before+2
-		})
-	}
-	size := func(name string) int64 {
-		info, err := os.Stat(filepath.Join(s.directory, name))
-		if err != nil {
-			t.Fatalf("wiring, not the property: %v", err)
-		}
-		return info.Size()
-	}
-
-	// The control: a small derived line, with the whole allowance free, is
-	// written.
-	if err := os.WriteFile(sizes, []byte("1000"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	next()
-	s.waitFor(t, "the control's derived line", func(o processing.Outcome) bool {
-		return len(o.Extensions) == 1 && o.Extensions[0].DerivedWritten == 1
-	})
-	for size(processing.ArtifactName) < allowance*6/10 {
-		next()
-	}
-	core, derived := size(processing.ArtifactName), size("derived-emitter.jsonl")
-	// A payload one byte over what the allowance has left: the stamped line is
-	// longer still, and it is within half the allowance with what derived
-	// output already holds, since the observer's own output holds over half.
-	payload := allowance - core - derived + 1
-	if derived+payload+1024 > allowance/2 {
-		t.Fatalf("wiring, not the property: a %d byte payload beside %d derived bytes is not within half of "+
-			"%d, so a refusal would not separate the two clauses", payload, derived, allowance)
-	}
-	if err := os.WriteFile(sizes, []byte(fmt.Sprint(payload)), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	next()
-	o := s.waitFor(t, "the over-budget derived line's refusal", func(o processing.Outcome) bool {
-		return len(o.Extensions) == 1 && o.Extensions[0].DerivedRefused == 1
-	})
-	if c := counts(t, o, "emitter"); c.DerivedRefusedBy[extension.DerivedBudget] != 1 || c.DerivedWritten != 1 {
-		t.Fatalf("the refusal was not counted under %s, or a line was written: written %d, refused by %v",
-			extension.DerivedBudget, c.DerivedWritten, c.DerivedRefusedBy)
-	}
-	if s.writer.Stats().Exhausted {
-		t.Fatal("a refused derived line exhausted the approved output")
-	}
-	for range 5 {
-		next()
-	}
-	o = s.finish(t)
-	if o.OutputFailures != 0 || o.Written != uint64(2*connection) {
-		t.Fatalf("the observer's own output did not go on after the refusal: written %d of %d, %d output failures",
-			o.Written, 2*connection, o.OutputFailures)
-	}
-	info, err := os.Stat(filepath.Join(s.directory, "derived-emitter.jsonl"))
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("the derived file is not 0600: %v %v", info, err)
-	}
-	content, _ := os.ReadFile(filepath.Join(s.directory, "derived-emitter.jsonl"))
-	if n := strings.Count(string(content), "\n"); n != 1 {
-		t.Fatalf("the derived file holds %d lines, want the control's one", n)
-	}
-	conserved(t, o)
-}
-
 // A change to a body goes through the configuration's rules once, as a new
 // representation: a positional removal takes the first element of the
 // replacement once, not twice and not never. The removal is recorded apart
@@ -483,23 +391,12 @@ func TestAChangeToAnExcludedExchangeIsCountedFailed(t *testing.T) {
 		DefectKinds: []string{workload.DefectUnsupported}, Seed: 5}))
 	o := s.finish(t)
 	lines := s.lines(t, config.ExchangesPipeline)
-	// Every connection's line on the connections route carries its id range,
-	// whether or not any of its exchanges was written.
-	issued := 0
-	for _, a := range s.lines(t, config.ConnectionsPipeline) {
-		if a.ExchangeIDs == nil {
-			t.Fatalf("connection %s's line carries no exchange id range", a.Connection.ID)
-		}
-		var count int
-		if _, err := fmt.Sscan(a.ExchangeIDs.Count, &count); err != nil {
-			t.Fatalf("an id range's count is not a number: %+v", a.ExchangeIDs)
-		}
-		issued += count
+	// The workload supplies sixty exchanges, including the excluded suffixes.
+	issued := 60
+	if o.ExchangeIDs != uint64(issued) {
+		t.Fatalf("issued %d ids for sixty source exchanges", o.ExchangeIDs)
 	}
 	excluded := issued - written(lines)
-	if uint64(issued) != o.ExchangeIDs {
-		t.Fatalf("the lines' id ranges cover %d ids, and the run issued %d", issued, o.ExchangeIDs)
-	}
 	if excluded == 0 {
 		t.Fatal("wiring, not the property: the workload produced no excluded exchange")
 	}

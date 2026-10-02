@@ -59,16 +59,18 @@ type Block struct {
 
 // Account is one session's account.
 type Account struct {
-	Account        string         `json:"account"`
-	Session        string         `json:"session"`
-	Moment         Moment         `json:"moment"`
-	At             record.Instant `json:"at"`
-	Provenance     Provenance     `json:"provenance"`
-	Scope          Scope          `json:"scope"`
-	Capture        Capture        `json:"capture"`
-	Reconstruction Reconstruction `json:"reconstruction"`
-	Processing     Processing     `json:"processing"`
-	Seal           Seal           `json:"seal"`
+	LogDestinations map[string]SinkDelivery `json:"log_destinations,omitempty" account:"optional"`
+	LogDelivery     *SinkDelivery           `json:"log_delivery,omitempty" account:"optional"`
+	Account         string                  `json:"account"`
+	Session         string                  `json:"session"`
+	Moment          Moment                  `json:"moment"`
+	At              record.Instant          `json:"at"`
+	Provenance      Provenance              `json:"provenance"`
+	Scope           Scope                   `json:"scope"`
+	Capture         Capture                 `json:"capture"`
+	Reconstruction  Reconstruction          `json:"reconstruction"`
+	Processing      Processing              `json:"processing"`
+	Seal            Seal                    `json:"seal"`
 }
 
 // Provenance is what produced the account and against what configuration.
@@ -530,6 +532,7 @@ type Processing struct {
 // the sum of FailedBy and DerivedRefused of DerivedRefusedBy. The three maps
 // hold every member of their vocabulary.
 type ExtensionAccount struct {
+	Delivery         *SinkDelivery     `json:"delivery,omitempty" account:"optional"`
 	Effects          string            `json:"effects"`
 	Fields           []string          `json:"fields"`
 	TimeoutMS        string            `json:"timeout_ms" account:"count"`
@@ -563,11 +566,12 @@ type ExtensionAccount struct {
 // failure, policy suppression or a capture-loss count. No whole-session
 // terminal-state claim is made here.
 type ProcessingAggregate struct {
-	GateReason         string `json:"gate_reason"`
-	ProcessingFailures string `json:"processing_failures" account:"count"`
-	OutputFailures     string `json:"output_failures" account:"count"`
-	Authorized         string `json:"authorized" account:"count"`
-	Written            string `json:"written" account:"count"`
+	Delivery           *SinkDelivery `json:"delivery,omitempty" account:"optional"`
+	GateReason         string        `json:"gate_reason"`
+	ProcessingFailures string        `json:"processing_failures" account:"count"`
+	OutputFailures     string        `json:"output_failures" account:"count"`
+	Authorized         string        `json:"authorized" account:"count"`
+	Written            string        `json:"written" account:"count"`
 }
 
 // Processed is one pipeline's dispositions.
@@ -651,4 +655,18 @@ type SealedMember struct {
 	Role    string `json:"role"`
 	SHA256  string `json:"sha256"`
 	Records string `json:"records,omitempty" account:"count"`
+}
+
+// SinkDelivery counts attempts and outcomes, not destination contents.
+type SinkDelivery struct {
+	Authorized     string `json:"authorized" account:"count"`
+	Written        string `json:"written" account:"count"`
+	Failed         string `json:"failed" account:"count"`
+	Dropped        string `json:"dropped" account:"count"`
+	Pending        string `json:"pending" account:"count"`
+	Discarded      string `json:"discarded" account:"count"`
+	Bytes          string `json:"bytes" account:"count"`
+	PendingBytes   string `json:"pending_bytes" account:"count"`
+	HighWaterBytes string `json:"high_water_bytes" account:"count"`
+	LimitBytes     string `json:"limit_bytes" account:"count"`
 }

@@ -5,8 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"sync"
@@ -122,7 +120,7 @@ func startRun(t *testing.T, plan *config.ProcessingPlan, o runOptions) (*process
 	} else if gate, err = probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 1 << 40, IntakeExhausted: store.Exhausted()}); err != nil {
 		t.Fatal(err)
 	}
-	run, err := processing.Start(processing.Options{Plan: plan, PolicyRevision: "workers", Intake: store, Gate: gate,
+	run, err := processing.Start(processing.Options{Session: "fixture-session", Plan: plan, PolicyRevision: "workers", Intake: store, Gate: gate,
 		Output: o.output, Workers: o.workers, Taken: o.taken})
 	if err != nil || run == nil {
 		t.Fatalf("wiring, not the property: the workers did not start: %v", err)
@@ -157,10 +155,12 @@ func withoutIDs(t *testing.T, got [][]byte) [][]byte {
 		if err := json.Unmarshal(line, &members); err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := members["exchange_ids"]; !ok {
-			t.Fatalf("a line carries no exchange id range: %s", line)
+		if string(members["record"]) == `"exchange"` {
+			if _, ok := members["exchange_id"]; !ok {
+				t.Fatal("exchange line missing id")
+			}
 		}
-		delete(members, "exchange_ids")
+		delete(members, "exchange_id")
 		stripped, err := json.Marshal(members)
 		if err != nil {
 			t.Fatal(err)
@@ -373,77 +373,6 @@ func TestTheIntakeLimitIsOneLimitAcrossWorkers(t *testing.T) {
 	}
 }
 
-// The output has one allowance: four workers write up to it and no further,
-// though each one's share of the lines is below it, and the line that would
-// pass it is the only output failure.
-func TestTheOutputLimitIsOneLimitAcrossWorkers(t *testing.T) {
-	plan := rulesPlan(t, "")
-	w := generate(t, workload.Shape{Connections: 200, Exchanges: 2, ResponseBodyBytes: 400, Processes: 4, Concurrency: 8, Seed: 17})
-
-	// The control learns each line's size and the worker that wrote it.
-	k := newTaken()
-	out := &lines{}
-	run, store := startRun(t, plan, runOptions{workers: 4, output: out, taken: k.record})
-	feed(t, run, store, w)
-	if _, err := run.Finish(context.Background(), settled); err != nil {
-		t.Fatal(err)
-	}
-	var total int64
-	share := map[int]int64{}
-	for _, line := range out.all() {
-		var a processing.Artifact
-		if err := json.Unmarshal(line, &a); err != nil {
-			t.Fatal(err)
-		}
-		id, err := strconv.ParseUint(a.Connection.ID, 10, 64)
-		if err != nil {
-			t.Fatal(err)
-		}
-		c := w.Connections[id-1]
-		share[k.worker(t, c.Process, c.ID)] += int64(len(line))
-		total += int64(len(line))
-	}
-	limit := total / 2
-	for worker, bytes := range share {
-		if bytes >= limit {
-			t.Fatalf("wiring, not the property: worker %d wrote %d bytes, not below the limit %d", worker, bytes, limit)
-		}
-	}
-
-	directory := t.TempDir()
-	writer, err := processing.Open(directory, limit)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = writer.Close() })
-	run, store = startRun(t, plan, runOptions{workers: 4, output: writer, gate: func(store *intake.Store) *probe.DeliveryGate {
-		gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 1 << 40, StorageExhausted: writer.Exhausted(), IntakeExhausted: store.Exhausted()})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return gate
-	}})
-	feed(t, run, store, w)
-	o, err := run.Finish(context.Background(), settled)
-	if !errors.Is(err, processing.ErrOutputLimit) {
-		t.Fatalf("finishing past the limit returned %v, want the output limit", err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	content, err := os.ReadFile(filepath.Join(directory, processing.ArtifactName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	stats := writer.Stats()
-	if int64(len(content)) > limit || stats.Bytes != int64(len(content)) || !stats.Exhausted || stats.Written == 0 {
-		t.Errorf("four workers wrote %d bytes against a limit of %d: %+v", len(content), limit, stats)
-	}
-	if o.OutputFailures != 1 || stats.Refused != 1 {
-		t.Errorf("%d output failures and %d refused writes, want one of each", o.OutputFailures, stats.Refused)
-	}
-}
-
 // A worker held on one connection does not stop the others: the connections
 // routed to other workers are written while it is held, routing returns
 // although its queue keeps growing, and when it is let go its own are written
@@ -599,7 +528,7 @@ func standalone(t *testing.T, plan *config.ProcessingPlan, output processing.Out
 	if err != nil {
 		t.Fatal(err)
 	}
-	w, err := processing.New(processing.Options{Plan: plan, PolicyRevision: "workers", Intake: store, Gate: gate, Output: output})
+	w, err := processing.New(processing.Options{Session: "fixture-session", Plan: plan, PolicyRevision: "workers", Intake: store, Gate: gate, Output: output})
 	if err != nil {
 		t.Fatal(err)
 	}

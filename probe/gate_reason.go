@@ -1,6 +1,6 @@
 package probe
 
-// GateReason identifies a gate refusal. GateInputLimit, GateStorageExhausted,
+// GateReason identifies a gate refusal. GateInputLimit,
 // GateIntakeExhausted, GateUnknownLength and GateUnknownKind invalidate the
 // entire capture; the first such reason is retained until session end. GateUnsettled refuses one candidate
 // without invalidating the capture. GateUninitialized refuses work on a nil or
@@ -13,7 +13,8 @@ package probe
 type GateReason string
 
 const (
-	GateInputLimit       GateReason = "input_limit"
+	GateInputLimit GateReason = "input_limit"
+	// GateStorageExhausted is historical; current sink failures never invalidate.
 	GateStorageExhausted GateReason = "storage_exhausted"
 	GateIntakeExhausted  GateReason = "intake_exhausted"
 	GateUnknownLength    GateReason = "unknown_length"
@@ -30,7 +31,7 @@ var gateReasonClasses = [...]struct {
 	invalidatesCapture bool
 }{
 	{GateInputLimit, true},
-	{GateStorageExhausted, true},
+	{GateStorageExhausted, false},
 	{GateIntakeExhausted, true},
 	{GateUnknownLength, true},
 	{GateUnknownKind, true},

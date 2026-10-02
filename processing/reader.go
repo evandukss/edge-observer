@@ -38,13 +38,13 @@ var ErrNoArtifacts = errors.New("approved artifact contains no records")
 // connection with complete, present request/response pairs and base64 bodies.
 // Truncation and exclusion evidence must refer to that retained population;
 // the detailed structural rules are in docs/approved-inspection.md.
-func ReadArtifacts(session fs.FS, visit func(Artifact) error) (result error) {
-	if session == nil || visit == nil {
-		return errors.New("approved artifact reader requires a filesystem and visitor")
-	}
-	f, err := session.Open(ArtifactName)
+func ReadArtifacts(files fs.FS, visit func(Artifact) error) error {
+	return ReadArtifactFiles(files, []string{ArtifactName}, "", visit)
+}
+func readArtifactFile(files fs.FS, name, session string, visit func(Artifact) error) (count int, result error) {
+	f, err := files.Open(name)
 	if err != nil {
-		return fmt.Errorf("open approved artifact: %w", err)
+		return 0, fmt.Errorf("open approved artifact: %w", err)
 	}
 	defer func() {
 		if err := f.Close(); result == nil && err != nil {
@@ -55,26 +55,27 @@ func ReadArtifacts(session fs.FS, visit func(Artifact) error) (result error) {
 	for number := 1; ; number++ {
 		line, err := r.ReadBytes('\n')
 		if errors.Is(err, io.EOF) && len(line) == 0 {
-			if number == 1 {
-				return ErrNoArtifacts
-			}
-			return nil
+			return count, nil
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				return fmt.Errorf("approved artifact record %d: unterminated final line", number)
+				return count, fmt.Errorf("approved artifact record %d: unterminated final line (malformed)", number)
 			}
-			return fmt.Errorf("approved artifact record %d: read failed", number)
+			return count, fmt.Errorf("approved artifact record %d: read failed", number)
 		}
 		var a Artifact
 		if err := json.Unmarshal(line, &a); err != nil {
-			return fmt.Errorf("approved artifact record %d: invalid JSON", number)
+			return count, fmt.Errorf("approved artifact record %d: invalid JSON (malformed)", number)
 		}
 		if err := validateArtifact(a); err != nil {
-			return fmt.Errorf("approved artifact record %d: %w", number, err)
+			return count, fmt.Errorf("approved artifact record %d: %w (malformed)", number, err)
 		}
+		if session != "" && a.Session != session {
+			continue
+		}
+		count++
 		if err := visit(a); err != nil {
-			return err
+			return count, err
 		}
 	}
 }

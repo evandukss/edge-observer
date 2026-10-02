@@ -14,7 +14,7 @@ import (
 
 // Error text is structural and never includes a value taken from the file.
 func validateArtifact(a Artifact) error {
-	if a.Version != ArtifactVersion && a.Version != ArtifactVersion1 {
+	if a.Version != ArtifactVersion && a.Version != ArtifactVersion2 && a.Version != ArtifactVersion1 {
 		return errors.New("unsupported artifact version")
 	}
 	if a.PolicyRevision == "" || a.Route.Pipeline == "" || a.Route.Sink == "" || a.Route.Kind == "" {
@@ -23,7 +23,7 @@ func validateArtifact(a Artifact) error {
 	if a.Connection.Record != record.KindConnection || a.Connection.Version != record.Version || a.Connection.ID == "" {
 		return errors.New("invalid connection identity or version")
 	}
-	if a.Version == ArtifactVersion {
+	if a.Version == ArtifactVersion2 {
 		if err := validateIDs(a); err != nil {
 			return err
 		}
@@ -31,9 +31,31 @@ func validateArtifact(a Artifact) error {
 			return errors.New("missing extension outcomes or replacement exclusions")
 		}
 	}
+	if a.Version == ArtifactVersion3 {
+		if a.Session == "" || a.ExchangeIDs != nil || a.PolicyExclusions == nil || a.ExtensionOutcomes == nil || a.ReplacementExclusions == nil {
+			return errors.New("invalid exchange-line envelope")
+		}
+		switch a.Record {
+		case ArtifactExchange:
+			if _, ok := positiveDecimal(a.ExchangeID); !ok || a.Index == nil || *a.Index < 0 || a.Reconstruction == nil || len(a.Reconstruction.Exchanges) != 1 || a.Reconstruction.Exchanges[0].Index != *a.Index || a.ReconstructionTruncation != nil {
+				return errors.New("invalid exchange-line identity or population")
+			}
+		case ArtifactConnection:
+			if a.ExchangeID != "" || a.Index != nil || a.Reconstruction != nil {
+				return errors.New("exchange content on retirement line")
+			}
+			if a.ReconstructionTruncation != nil {
+				if err := validateRetirementTruncation(a.ReconstructionTruncation); err != nil {
+					return err
+				}
+			}
+		default:
+			return errors.New("invalid approved record kind")
+		}
+	}
 	r := a.Reconstruction
 	if r == nil {
-		if a.ReconstructionTruncation != nil || len(a.PolicyExclusions) != 0 || len(a.ExtensionOutcomes) != 0 ||
+		if (a.ReconstructionTruncation != nil && a.Version != ArtifactVersion3) || len(a.PolicyExclusions) != 0 || len(a.ExtensionOutcomes) != 0 ||
 			len(a.ReplacementExclusions) != 0 {
 			return errors.New("reconstruction evidence without reconstruction")
 		}
@@ -56,7 +78,7 @@ func validateArtifact(a Artifact) error {
 	if err := validateTruncation(a); err != nil {
 		return err
 	}
-	if a.Version == ArtifactVersion {
+	if a.Version == ArtifactVersion2 {
 		if err := validateCount(a, r); err != nil {
 			return err
 		}
@@ -403,4 +425,9 @@ func lowerFieldName(name string) bool {
 		return false
 	}
 	return true
+}
+
+func validateRetirementTruncation(t *ReconstructionTruncation) error {
+	a := Artifact{Reconstruction: &record.Reconstruction{Unplaced: record.Count{State: record.Undetermined, Unit: record.Bytes, Why: "reconstruction_truncated"}}, ReconstructionTruncation: t}
+	return validateTruncation(a)
 }

@@ -71,7 +71,7 @@ See [the line contract](../record/record.md#approved-line-envelope).
 With `write_content` false no exchange is sent or written and no id is issued.
 
 A result must name an id this generation was sent and has not answered. A derived record's source id is
-valid when it lies in a range issued so far in the session. **That establishes that the exchange existed
+valid when it is an id issued so far in the session. **That establishes that the exchange existed
 in the session - not that this extension received it, and not that it was written.**
 
 ## Lifecycle
@@ -251,7 +251,7 @@ A derived record is refused - counted, never written, and never fatal to the ses
 | reason | when |
 |---|---|
 | `malformed` | `sources`, `basis` or `record` breaks the rules above |
-| `unknown_source` | a source id is outside every range issued so far |
+| `unknown_source` | a source id is not an id issued so far in the session |
 | `rate` | the extension is over `derived_lines_per_second` |
 | `queue_full` | `derived_queue_bytes` of its records are already waiting to be written |
 | `stopped` | the session's output has stopped |

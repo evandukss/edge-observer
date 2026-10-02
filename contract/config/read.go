@@ -20,7 +20,7 @@ import (
 func ReadFile(content []byte) (File, []Finding) {
 	r := &reader{document: "configuration"}
 	file := File{Log: LogStdout, WriteContent: true,
-		Limits: Limits{OutputMiB: DefaultApprovedOutputBoundMiB, Events: DefaultAdmittedEventLimit,
+		Limits: Limits{Events: DefaultAdmittedEventLimit,
 			StateEverySeconds: DefaultStateEverySeconds, Workers: DefaultWorkers}}
 	root := r.root(content)
 	if root == nil || !r.version(root, FileVersion) {
@@ -74,13 +74,12 @@ func ReadFile(content []byte) (File, []Finding) {
 		file.Extensions = r.extensions(extensions, file.WriteContent)
 	}
 	if limits := root.member("limits"); limits != nil && r.object(limits, "limits") {
-		r.keys(limits, "limits", "output_mib", "events", "state_every_seconds", "workers")
+		r.keys(limits, "limits", "events", "state_every_seconds", "workers")
 		for _, one := range []struct {
 			key  string
 			max  int64
 			into *int64
 		}{
-			{"output_mib", MaxOutputMiB, &file.Limits.OutputMiB},
 			{"events", MaxEvents, &file.Limits.Events},
 			{"state_every_seconds", MaxStateEverySeconds, &file.Limits.StateEverySeconds},
 			{"workers", MaxWorkers, &file.Limits.Workers},

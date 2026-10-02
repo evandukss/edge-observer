@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
-	"os"
 	"regexp"
 	"slices"
 	"strconv"
@@ -174,6 +173,12 @@ func (e *extensions) counts() []account.ExtensionCounts {
 		c.Restarts, c.StateResets, c.Late, c.Duplicate = lifecycle.Restarts, lifecycle.StateResets, lifecycle.Late, lifecycle.Duplicate
 		c.DerivedWritten, c.DerivedBytes, c.DerivedRefused = lifecycle.DerivedWritten, lifecycle.DerivedBytes, lifecycle.DerivedRefused
 		c.DerivedRefusedBy = lifecycle.DerivedRefusedBy
+		delivery := e.files[i].writer.DerivedStats(one.Name)
+		c.Delivery = delivery
+		c.DerivedWritten, c.DerivedBytes = delivery.Written, uint64(delivery.Bytes)
+		c.DerivedRefused += delivery.Failed + delivery.Discarded
+		c.DerivedRefusedBy[extension.DerivedWriteFailed] += delivery.Failed
+		c.DerivedRefusedBy[extension.DerivedStopped] += delivery.Discarded
 		c.StderrDropped = lifecycle.StderrDropped
 		out = append(out, c)
 	}
@@ -750,38 +755,23 @@ func (w *Worker) rechain(d *dispatch, i int, name string, r replacement) {
 	}
 }
 
-// derivedFile is one extension's derived output. The Writer's mutex guards
-// it.
 type derivedFile struct {
 	writer *Writer
-	file   *os.File
-	// failed is a write that failed: a partial line may be in the file, so
-	// nothing more is written to it.
-	failed bool
+	name   string
 }
 
-func (f *derivedFile) close() error {
-	f.writer.mutex.Lock()
-	defer f.writer.mutex.Unlock()
-	if f.file == nil {
-		return nil
-	}
-	err := f.file.Close()
-	f.file = nil
-	return err
-}
+func (f *derivedFile) close() error { return nil }
 
 // writeDerived writes one derived line under the session's release and stop
 // gate, the same authorization the observer's own lines need, and within the
-// derived budget. A refusal is a reason, never a failure of the release.
+// bounded queue. A refusal is a reason, never a failure of the release.
 func (r *release) writeDerived(w *Writer, f *derivedFile, line []byte) string {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	if r.err != nil {
 		return extension.DerivedStopped
 	}
-	if decision := r.gate.Authorize(releaseEvidence); !decision.Authorized {
-		return extension.DerivedStopped
-	}
-	return w.writeDerived(f, line)
+	result := extension.DerivedStopped
+	r.gate.AuthorizeEnqueue(releaseEvidence, func() { result = w.writeDerived(f, line) })
+	return result
 }

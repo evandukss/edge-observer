@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/evandukss/edge-observer/sink"
 	"maps"
 	"reflect"
 	"slices"
@@ -218,6 +219,15 @@ func Project(source observed.Account, supply Supply) (Account, error) {
 			a.Seal = sealOf(source)
 		}
 	}
+	if source.LogDelivery != nil {
+		a.LogDelivery = deliveryOf(*source.LogDelivery)
+	}
+	if source.LogDestinations != nil {
+		a.LogDestinations = make(map[string]SinkDelivery, len(source.LogDestinations))
+		for name, stats := range source.LogDestinations {
+			a.LogDestinations[name] = *deliveryOf(stats)
+		}
+	}
 	a.Processing = Processing{Block: Block{State: NotCarried}}
 	if p := source.Processing; p != nil {
 		extensions, err := extensionsOf(source.Extensions, p.Extensions)
@@ -228,7 +238,7 @@ func Project(source observed.Account, supply Supply) (Account, error) {
 			Aggregate: &ProcessingAggregate{
 				GateReason: string(p.GateReason), ProcessingFailures: decimalOf(p.ProcessingFailures),
 				OutputFailures: decimalOf(p.OutputFailures), Authorized: decimalOf(p.Authorized),
-				Written: decimalOf(p.Written),
+				Written: decimalOf(p.Written), Delivery: deliveryOf(p.Delivery),
 			},
 			ExchangeIDs: decimalOf(p.ExchangeIDs), Extensions: extensions,
 		}
@@ -254,7 +264,7 @@ func extensionsOf(configured []observed.Extension, counted []observed.ExtensionC
 			FailedBy: decimalsOf(c.FailedBy), RetiredBy: decimalsOf(c.RetiredBy),
 			Restarts: decimalOf(c.Restarts), StateResets: decimalOf(c.StateResets),
 			Late: decimalOf(c.Late), Duplicate: decimalOf(c.Duplicate),
-			DerivedWritten: decimalOf(c.DerivedWritten), DerivedBytes: decimalOf(c.DerivedBytes),
+			Delivery: deliveryOf(c.Delivery), DerivedWritten: decimalOf(c.DerivedWritten), DerivedBytes: decimalOf(c.DerivedBytes),
 			DerivedRefused: decimalOf(c.DerivedRefused), DerivedRefusedBy: decimalsOf(c.DerivedRefusedBy),
 			StderrDropped: decimalOf(c.StderrDropped),
 		}
@@ -760,4 +770,8 @@ func countersOf(counters connection.Counters) map[string]record.Count {
 		out[name] = countOf(count, counterUnits[name])
 	}
 	return maps.Clone(out)
+}
+
+func deliveryOf(s sink.Stats) *SinkDelivery {
+	return &SinkDelivery{Authorized: decimalOf(s.Authorized), Written: decimalOf(s.Written), Failed: decimalOf(s.Failed), Dropped: decimalOf(s.Dropped), Pending: decimalOf(s.Pending), Discarded: decimalOf(s.Discarded), Bytes: strconv.FormatInt(s.Bytes, 10), PendingBytes: strconv.FormatInt(s.PendingBytes, 10), HighWaterBytes: strconv.FormatInt(s.HighWaterBytes, 10), LimitBytes: strconv.FormatInt(s.LimitBytes, 10)}
 }

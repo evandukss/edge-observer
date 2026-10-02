@@ -16,7 +16,8 @@ import (
 // where the account carries it ([] for array positions, * for map keys): a
 // contract path or the reason it is not carried.
 var represented = map[string]string{
-	".version": "account", ".kind": "moment", ".session": "session", ".at": "at.value",
+	".log_destinations.*": "log_destinations.*",
+	".version":            "account", ".kind": "moment", ".session": "session", ".at": "at.value",
 	".policy.revision":   "provenance.configuration.references[].revision",
 	".policy.generation": "provenance.configuration.references[].generation",
 
@@ -157,6 +158,12 @@ var represented = map[string]string{
 // Facts that recur at several places in the operational account, written once:
 // every instance, and every capability.
 func init() {
+	for _, pair := range [][2]string{{".log_destinations.*", "log_destinations.*"}, {".log_delivery", "log_delivery"}, {".processing.delivery", "processing.aggregate.delivery"}, {".processing.extensions[].delivery", "processing.extensions.*.delivery"}} {
+		for _, field := range []string{"authorized", "written", "failed", "dropped", "pending", "discarded", "bytes", "pending_bytes", "high_water_bytes", "limit_bytes"} {
+			represented[pair[0]+"."+field] = pair[1] + "." + field
+		}
+	}
+
 	instances := map[string]string{
 		".targets[].roots[]":                    "scope.targets[].roots[]",
 		".targets[].descendants[]":              "scope.targets[].existing_descendants[]",
@@ -330,7 +337,7 @@ func TestEveryFactTheOperationalAccountHoldsIsCarried(t *testing.T) {
 	carried := map[string]bool{}
 	for _, truth := range []bool{true, false} {
 		account := filled(t, truth)
-		for leaf := range leaves(t, account, ".refused.reasons", ".seal.counters", ".processing.extensions[].failed_by",
+		for leaf := range leaves(t, account, ".log_destinations", ".refused.reasons", ".seal.counters", ".processing.extensions[].failed_by",
 			".processing.extensions[].retired_by", ".processing.extensions[].derived_refused_by") {
 			source[leaf] = true
 		}
@@ -338,7 +345,7 @@ func TestEveryFactTheOperationalAccountHoldsIsCarried(t *testing.T) {
 		if err != nil {
 			t.Fatalf("projecting the filled account (truth %v): %v", truth, err)
 		}
-		for leaf := range leaves(t, projected, ".capture.refused.reasons", ".seal.counters", ".processing.extensions",
+		for leaf := range leaves(t, projected, ".log_destinations", ".capture.refused.reasons", ".seal.counters", ".processing.extensions",
 			".processing.extensions.*.failed_by", ".processing.extensions.*.retired_by",
 			".processing.extensions.*.derived_refused_by") {
 			carried[strings.TrimPrefix(leaf, ".")] = true

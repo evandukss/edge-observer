@@ -89,7 +89,7 @@ func (w *Worker) process(ctx context.Context, b *batch) (bool, error) {
 		w.withhold(refused)
 	}
 	for i, p := range w.pipelines {
-		artifact := &Artifact{Version: ArtifactVersion, PolicyRevision: w.options.PolicyRevision, Connection: metadata,
+		artifact := &Artifact{Version: ArtifactVersion, Session: w.options.Session, PolicyRevision: w.options.PolicyRevision, Connection: metadata,
 			PolicyExclusions: []PolicyExclusion{}, ExtensionOutcomes: []ExtensionOutcome{},
 			ReplacementExclusions: []ReplacementExclusion{}}
 		switch p.Input {
@@ -179,50 +179,60 @@ func (w *Worker) process(ctx context.Context, b *batch) (bool, error) {
 // refused suffix against its pipeline once written.
 func (w *Worker) write(ctx context.Context, d *dispatch) error {
 	for _, line := range d.lines {
-		artifact := line.artifact
-		artifact.ExchangeIDs = &d.ids
-		emit := true
-		if line.input == "reconstruction" {
-			emit = false
-			if d.good != 0 {
-				written := d.processed
-				written.Exchanges = d.processed.Exchanges[:d.good]
-				projected, _, err := record.FromReconstruction(reconstruct.Reconstruction{Connections: []reconstruct.Connection{written}}, nil)
-				if err != nil {
-					w.countProcessingFailure(line.name)
-					continue
-				}
-				d.run.mark(&projected[0], written)
-				artifact.Reconstruction = &projected[0]
-				artifact.ReconstructionTruncation = d.truncation
-				if d.truncation != nil {
-					artifact.Reconstruction.Unplaced = record.Count{State: record.Undetermined, Unit: record.Bytes, Why: "reconstruction_truncated"}
-				}
-				for _, entry := range d.run.evidence.fields {
-					if entry.Exchange < d.good {
-						artifact.PolicyExclusions = append(artifact.PolicyExclusions, entry)
+		artifact := *line.artifact
+		emit := func(a Artifact) error {
+			for _, route := range w.routes {
+				if route.Pipeline == line.name {
+					a.Route = route
+					if err := w.emit(ctx, a); err != nil {
+						return err
 					}
 				}
-				for _, outcome := range d.outcomes {
-					if outcome.Exchange < d.good {
-						artifact.ExtensionOutcomes = append(artifact.ExtensionOutcomes, outcome)
+			}
+			return nil
+		}
+		if line.input == "connection" {
+			artifact.Record = ArtifactConnection
+			artifact.ReconstructionTruncation = d.truncation
+			if err := emit(artifact); err != nil {
+				return err
+			}
+		} else if d.good > 0 {
+			written := d.processed
+			written.Exchanges = d.processed.Exchanges[:d.good]
+			projected, _, err := record.FromReconstruction(reconstruct.Reconstruction{Connections: []reconstruct.Connection{written}}, nil)
+			if err != nil {
+				w.countProcessingFailure(line.name)
+				continue
+			}
+			d.run.mark(&projected[0], written)
+			for i, exchange := range projected[0].Exchanges {
+				a := artifact
+				a.Record = ArtifactExchange
+				a.Index = &exchange.Index
+				a.ExchangeID = strconv.FormatUint(d.first+uint64(i), 10)
+				reconstruction := projected[0]
+				reconstruction.Exchanges = []record.Exchange{exchange}
+				a.Reconstruction = &reconstruction
+				a.PolicyExclusions = []PolicyExclusion{}
+				a.ExtensionOutcomes = []ExtensionOutcome{}
+				a.ReplacementExclusions = []ReplacementExclusion{}
+				for _, entry := range d.run.evidence.fields {
+					if entry.Exchange == exchange.Index {
+						a.PolicyExclusions = append(a.PolicyExclusions, entry)
+					}
+				}
+				for _, entry := range d.outcomes {
+					if entry.Exchange == exchange.Index {
+						a.ExtensionOutcomes = append(a.ExtensionOutcomes, entry)
 					}
 				}
 				for _, entry := range d.replaced {
-					if entry.Exchange < d.good {
-						artifact.ReplacementExclusions = append(artifact.ReplacementExclusions, entry)
+					if entry.Exchange == exchange.Index {
+						a.ReplacementExclusions = append(a.ReplacementExclusions, entry)
 					}
 				}
-				emit = true
-			}
-		}
-		if emit {
-			for _, route := range w.routes {
-				if route.Pipeline != line.name {
-					continue
-				}
-				artifact.Route = route
-				if err := w.emit(ctx, *artifact); err != nil {
+				if err := emit(a); err != nil {
 					return err
 				}
 			}
@@ -391,11 +401,8 @@ func (w *Worker) emit(ctx context.Context, artifact Artifact) error {
 // inputs and the batch's lifecycle.
 var releaseEvidence = probe.ReleaseEvidence{InputsSettled: true, LifecycleSettled: true}
 
-// release is the one point where lines are authorized and written, shared by
-// every worker of a Run. Authorization happens immediately before each write,
-// and both happen under one lock, so writes are serialised and the first
-// worker failure is terminal for every worker: after it nothing is authorized
-// or written, and nothing more is counted.
+// release orders short enqueue decisions shared by all workers. Sink I/O runs
+// on the queue's goroutine, outside both this lock and the gate's lock.
 type release struct {
 	mutex  sync.Mutex
 	gate   *probe.DeliveryGate
@@ -416,27 +423,19 @@ func (r *release) write(ctx context.Context, line Approved, outcome *Outcome) er
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	decision := r.gate.Authorize(releaseEvidence)
+	var delivery error
+	decision := r.gate.AuthorizeEnqueue(releaseEvidence, func() { delivery = r.output.WriteApproved(ctx, line) })
 	if !decision.Authorized {
 		outcome.GateReason = decision.Reason
 		return nil
 	}
 	outcome.Authorized++
-	if err := r.output.WriteApproved(ctx, line); err != nil {
+	if delivery != nil {
 		outcome.OutputFailures++
-		switch {
-		case errors.Is(err, ErrOutputLimit):
-			r.err = ErrOutputLimit
-		case errors.Is(err, context.Canceled):
-			r.err = context.Canceled
-		case errors.Is(err, context.DeadlineExceeded):
-			r.err = context.DeadlineExceeded
-		default:
-			r.err = errors.New("approved output failed")
-		}
-		return r.err
+	} else {
+		outcome.Written++
 	}
-	outcome.Written++
+
 	return nil
 }
 

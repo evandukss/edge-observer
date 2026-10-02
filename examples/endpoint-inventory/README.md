@@ -50,7 +50,7 @@ A batch holds at most 64 endpoint summaries and 256 source ids (or the observer'
 the bound, when the source bound is reached, and at `session_ending`. Every batch
 contains only its own counts; sum batches to get generation totals. A new process
 generation starts empty. A crash loses the unflushed batch. The observer can refuse
-derived output for rate, queue or output limits; inspect its account for those
+derived output for rate or queue limits and failed delivery; inspect its account for those
 refusals before treating the file as complete.
 
 Totals always mean **exchanges this extension received**, including excluded,

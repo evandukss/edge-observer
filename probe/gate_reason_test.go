@@ -62,10 +62,7 @@ func TestGateReasonClassifiesReachedDecisions(t *testing.T) {
 		{"input_limit", func(g *probe.DeliveryGate, _ chan struct{}) probe.GateReason {
 			return g.Admit(probe.DeliveryClose, false).State.Reason
 		}, probe.GateInputLimit, true},
-		{"storage_exhausted", func(g *probe.DeliveryGate, exhausted chan struct{}) probe.GateReason {
-			close(exhausted)
-			return g.Snapshot().Reason
-		}, probe.GateStorageExhausted, true},
+
 		{"unknown_length", func(g *probe.DeliveryGate, _ chan struct{}) probe.GateReason {
 			return g.Admit(probe.DeliveryTransfer, false).State.Reason
 		}, probe.GateUnknownLength, true},

@@ -37,29 +37,22 @@ func TestAdmittedEventCountReachesActivationAndPlan(t *testing.T) {
 	document := processingDocument(t)
 	limits := member(document, "limits")
 	limits["events"] = 7
-	limits["output_mib"] = 13
 	read, err := policy.CompileProcessing([]byte(encoded(t, document)), "")
 	if err != nil || read.Processing == nil {
 		t.Fatalf("positive event count refused: plan=%v error=%v", read.Processing, err)
 	}
 	eventCountViews(t, read, 7)
-	if read.Settings.ApprovedOutputBoundMiB != 13 {
-		t.Fatalf("event count changed the separate approved output allowance: %+v", read.Settings)
-	}
+
 }
 
-func TestAdmittedEventCountDefaultsWithoutOutputCoupling(t *testing.T) {
-	for _, outputMiB := range []int{1, 97} {
-		document := processingDocument(t)
-		limits := member(document, "limits")
-		delete(limits, "events")
-		limits["output_mib"] = outputMiB
-		read, err := policy.CompileProcessing([]byte(encoded(t, document)), "")
-		if err != nil || read.Processing == nil {
-			t.Fatalf("default event count refused: plan=%v error=%v", read.Processing, err)
-		}
-		eventCountViews(t, read, 16384)
+func TestAdmittedEventCountDefaults(t *testing.T) {
+	document := processingDocument(t)
+	delete(member(document, "limits"), "events")
+	read, err := policy.CompileProcessing([]byte(encoded(t, document)), "")
+	if err != nil {
+		t.Fatal(err)
 	}
+	eventCountViews(t, read, 16384)
 }
 
 func TestNonpositiveAdmittedEventCountRefusesAtItsOwnSetting(t *testing.T) {

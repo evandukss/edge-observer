@@ -27,7 +27,7 @@ func TestProcessingRevisionDistinguishesRulesFromObservation(t *testing.T) {
 	}
 	observation := processingDocument(t)
 	observation["watch"] = []any{watching("different-observed-process", map[string]any{"exe": "/usr/bin/other"}, "all")}
-	member(observation, "limits")["output_mib"] = 19
+	member(observation, "limits")["events"] = 19
 	changedObservation := compiled(t, observation)
 	if changedObservation.Revision == base.Revision || changedObservation.ProcessingRevision != base.ProcessingRevision {
 		t.Fatalf("observation/settings change did not remain separate: base=%+v changed=%+v", base, changedObservation)

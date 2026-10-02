@@ -98,6 +98,10 @@ tagged commit. It unpacks into one directory, `observer-linux-amd64`, holding ex
     observer                     the program: one static file, linux/amd64
     README.md                    this document
     docs/compatibility.md        what a host must provide, and what the observer has been seen to run on
+    docs/extensions.md           how to configure an extension
+    docs/observer.logrotate      external rotation with acknowledged reopen
+    contract/config/CONFIG.md    the configuration contract
+    contract/extension/PROTOCOL.md  the extension protocol
     observer.config.json         the simplest configuration the program runs, for you to edit
     LICENSE                      the Mozilla Public License 2.0
     LICENSES/GPL-2.0-only.txt    the GNU General Public License version 2, the BPF programs' other licence
@@ -122,8 +126,8 @@ The observer reads one JSON file, the configuration specified in
 In a release archive that file is already there, as `observer.config.json`. Three things in it are yours
 to set.
 
-**Where it writes.** `output` is where the observer keeps its pid file and one directory per run under
-`sessions`; it is created if missing. `log` is `stdout`, or an absolute path for a log file.
+**Where it writes.** `output` holds the stable approved and derived files, the pid file, and
+accounts under `sessions/<session>`; it is created if missing. `log` is `stdout`, or an absolute path for a log file.
 
 **What it watches.** `watch` is the list of processes you approve, and no other process is observed. For
 one process already running, find what identifies it:
@@ -207,12 +211,18 @@ path of the account it sealed.
 
 ### 4. Inspect
 
-A finished run is a directory: `<output>/sessions/<session>`, the session `stop` named.
+Each session keeps its sealed account in `<output>/sessions/<session>`, the
+session `stop` named. Approved output is appended across sessions to
+`<output>/approved.jsonl`; extension output goes to `<output>/derived-<name>.jsonl`.
 
     sudo ./observer inspect /var/lib/observer/sessions/<session> --text
 
-That reads the directory alone. No running observer and no configuration is needed, so the directory
-can be copied to another machine and inspected there with the same program. Its files are readable only
+Text inspection reads the account and selects its session from the stable approved file.
+To inspect a copy or rotated files, name each file and optionally select a session:
+
+    ./observer inspect ./session --text --file ./approved.jsonl.1 --file ./approved.jsonl --session <session>
+
+No running observer or configuration is needed. The files are readable only
 by the user that ran the observer - root, above - so either inspect as that user or copy the directory
 and give the copy to yourself. Without `--text` it prints the account as JSON.
 
@@ -224,7 +234,7 @@ probes were attached.
 `--text` prints the sealed account and the approved records from `approved.jsonl`, including
 permitted header and trailer values, decoded body bytes, and their capture-time policy revision,
 route, connection metadata and message positions. Inspection uses the persisted result; changing
-local policy does not reinterpret it. Copying just `account.json` and `approved.jsonl` is sufficient.
+local policy does not reinterpret it. Copy the account and explicitly name the output files you want to read. Inspection makes no claim about missing lines between files.
 
 Named policy exclusions distinguish fields that were removed from fields absent in the retained
 messages. An empty exclusion array means none were excluded there; an absent or null array in an
@@ -237,12 +247,28 @@ fallback. See [approved inspection](docs/approved-inspection.md) for the reader 
 bounded volatile intake. Reaching its limit refuses the next record whole and signals exhaustion;
 releasing held records does not reopen an exhausted intake. Intake records are not approved output.
 The processing worker writes authorized, processed route records to `approved.jsonl`; it does not
-write raw fragments or connection records to the legacy spool. The sealed account sits beside that
-approved output.
+write raw fragments or connection records to the legacy spool. The sealed account remains in the session directory.
 
 Legacy `fragments.jsonl` files contain header values and body bytes base64-encoded, including any
 credentials and personal data the traffic carried. Reading such a file does not sanitize it or remove
 it from disk.
+
+## Rotation and delivery
+
+Rotation and retention are external. The [logrotate example](docs/observer.logrotate)
+uses rename, `create 0600`, `sharedscripts`, and `observer reopen` in postrotate.
+Reopen success acknowledges the switch: no old-descriptor write remains blocked
+and subsequent writes go to the active paths. Run logrotate as the file owner,
+and keep replacement ownership compatible with the observer's retained privileges.
+`copytruncate` also works, with possible loss between copying and truncating.
+
+Sink failures never stop monitoring. Fully processed lines enter a bounded queue;
+a full queue drops at once. Authorized, written, failed, dropped and pending are
+separate account counts. A failed attempt can leave part or all of a line, is
+not retried, and the following record starts on a new line. Inspection reports
+damaged records as malformed. An unavailable file can recover on reopen.
+Shutdown is bounded and counts pending lines it discards. Enqueue is the release
+decision: a line queued before a later invalidation can still be written.
 
 ## Documentation
 

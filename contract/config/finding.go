@@ -47,12 +47,11 @@ type Resolved struct {
 
 // ResolvedObserver is the observer settings with every optional one resolved.
 type ResolvedObserver struct {
-	Log                    string `json:"log"`
-	Directory              string `json:"directory"`
-	ApprovedOutputBoundMiB int64  `json:"approved_output_bound_mib"`
-	StateEverySeconds      int64  `json:"state_every_seconds"`
-	AdmittedEventLimit     int64  `json:"admitted_event_limit"`
-	Workers                int64  `json:"workers"`
+	Log                string `json:"log"`
+	Directory          string `json:"directory"`
+	StateEverySeconds  int64  `json:"state_every_seconds"`
+	AdmittedEventLimit int64  `json:"admitted_event_limit"`
+	Workers            int64  `json:"workers"`
 }
 
 // EffectivePipeline is a pipeline as it will be composed.

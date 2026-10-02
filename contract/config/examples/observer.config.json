@@ -19,5 +19,5 @@
   },
   "mask": {"headers": {"x-api-key": "withheld"}, "json": {"response": {"/email": "withheld"}}},
   "truncate": {"headers": {"x-trace-id": 8}},
-  "limits": {"output_mib": 64, "events": 16384, "state_every_seconds": 30, "workers": 1}
+  "limits": {"events": 16384, "state_every_seconds": 30, "workers": 1}
 }

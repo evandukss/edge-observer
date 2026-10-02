@@ -33,9 +33,7 @@ func TestTheObserverDefaultsAgreeWithTheObserver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wiring, not the property: the observer refused a configuration stating neither setting: %v", err)
 	}
-	if loaded.Settings.ApprovedOutputBoundMiB != config.DefaultApprovedOutputBoundMiB {
-		t.Errorf("the observer defaults the approved output bound to %d MiB and the contract to %d", loaded.Settings.ApprovedOutputBoundMiB, config.DefaultApprovedOutputBoundMiB)
-	}
+
 	if loaded.Settings.StateEvery != time.Duration(config.DefaultStateEverySeconds)*time.Second {
 		t.Errorf("the observer defaults the state interval to %s and the contract to %ds", loaded.Settings.StateEvery, config.DefaultStateEverySeconds)
 	}
