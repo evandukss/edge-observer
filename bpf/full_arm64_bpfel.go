@@ -95,6 +95,13 @@ type fullHandleKey struct {
 	Ssl      uint64
 }
 
+type fullHolding struct {
+	_       structs.HostLayout
+	Entries uint8
+	Events  uint8
+	Padding [6]uint8
+}
+
 type fullInstanceKey struct {
 	_        structs.HostLayout
 	NsDev    uint64
@@ -199,6 +206,7 @@ const (
 	fullMapForking              = "forking"
 	fullMapGenerations          = "generations"
 	fullMapHandles              = "handles"
+	fullMapHolders              = "holders"
 	fullMapInflight             = "inflight"
 	fullMapNamespaces           = "namespaces"
 	fullMapOccupancies          = "occupancies"
@@ -212,6 +220,7 @@ const (
 	fullMapUnmatchedAt          = "unmatched_at"
 	fullMapUnmeasurable         = "unmeasurable"
 	fullProgObsAcceptReturn     = "obs_accept_return"
+	fullProgObsClearEntry       = "obs_clear_entry"
 	fullProgObsClose            = "obs_close"
 	fullProgObsConnect          = "obs_connect"
 	fullProgObsDup2             = "obs_dup2"
@@ -224,6 +233,7 @@ const (
 	fullProgObsInet6Recvmsg     = "obs_inet6_recvmsg"
 	fullProgObsInet6Sendmsg     = "obs_inet6_sendmsg"
 	fullProgObsInetRecvmsg      = "obs_inet_recvmsg"
+	fullProgObsInetRelease      = "obs_inet_release"
 	fullProgObsInetSendmsg      = "obs_inet_sendmsg"
 	fullProgObsNewReturn        = "obs_new_return"
 	fullProgObsRead             = "obs_read"
@@ -298,6 +308,7 @@ type fullSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type fullProgramSpecs struct {
 	ObsAcceptReturn     *ebpf.ProgramSpec `ebpf:"obs_accept_return"`
+	ObsClearEntry       *ebpf.ProgramSpec `ebpf:"obs_clear_entry"`
 	ObsClose            *ebpf.ProgramSpec `ebpf:"obs_close"`
 	ObsConnect          *ebpf.ProgramSpec `ebpf:"obs_connect"`
 	ObsDup2             *ebpf.ProgramSpec `ebpf:"obs_dup2"`
@@ -310,6 +321,7 @@ type fullProgramSpecs struct {
 	ObsInet6Recvmsg     *ebpf.ProgramSpec `ebpf:"obs_inet6_recvmsg"`
 	ObsInet6Sendmsg     *ebpf.ProgramSpec `ebpf:"obs_inet6_sendmsg"`
 	ObsInetRecvmsg      *ebpf.ProgramSpec `ebpf:"obs_inet_recvmsg"`
+	ObsInetRelease      *ebpf.ProgramSpec `ebpf:"obs_inet_release"`
 	ObsInetSendmsg      *ebpf.ProgramSpec `ebpf:"obs_inet_sendmsg"`
 	ObsNewReturn        *ebpf.ProgramSpec `ebpf:"obs_new_return"`
 	ObsRead             *ebpf.ProgramSpec `ebpf:"obs_read"`
@@ -355,6 +367,7 @@ type fullMapSpecs struct {
 	Forking          *ebpf.MapSpec `ebpf:"forking"`
 	Generations      *ebpf.MapSpec `ebpf:"generations"`
 	Handles          *ebpf.MapSpec `ebpf:"handles"`
+	Holders          *ebpf.MapSpec `ebpf:"holders"`
 	Inflight         *ebpf.MapSpec `ebpf:"inflight"`
 	Namespaces       *ebpf.MapSpec `ebpf:"namespaces"`
 	Occupancies      *ebpf.MapSpec `ebpf:"occupancies"`
@@ -405,6 +418,7 @@ type fullMaps struct {
 	Forking          *ebpf.Map `ebpf:"forking"`
 	Generations      *ebpf.Map `ebpf:"generations"`
 	Handles          *ebpf.Map `ebpf:"handles"`
+	Holders          *ebpf.Map `ebpf:"holders"`
 	Inflight         *ebpf.Map `ebpf:"inflight"`
 	Namespaces       *ebpf.Map `ebpf:"namespaces"`
 	Occupancies      *ebpf.Map `ebpf:"occupancies"`
@@ -431,6 +445,7 @@ func (m *fullMaps) Close() error {
 		m.Forking,
 		m.Generations,
 		m.Handles,
+		m.Holders,
 		m.Inflight,
 		m.Namespaces,
 		m.Occupancies,
@@ -457,6 +472,7 @@ type fullVariables struct {
 // It can be passed to loadFullObjects or ebpf.CollectionSpec.LoadAndAssign.
 type fullPrograms struct {
 	ObsAcceptReturn     *ebpf.Program `ebpf:"obs_accept_return"`
+	ObsClearEntry       *ebpf.Program `ebpf:"obs_clear_entry"`
 	ObsClose            *ebpf.Program `ebpf:"obs_close"`
 	ObsConnect          *ebpf.Program `ebpf:"obs_connect"`
 	ObsDup2             *ebpf.Program `ebpf:"obs_dup2"`
@@ -469,6 +485,7 @@ type fullPrograms struct {
 	ObsInet6Recvmsg     *ebpf.Program `ebpf:"obs_inet6_recvmsg"`
 	ObsInet6Sendmsg     *ebpf.Program `ebpf:"obs_inet6_sendmsg"`
 	ObsInetRecvmsg      *ebpf.Program `ebpf:"obs_inet_recvmsg"`
+	ObsInetRelease      *ebpf.Program `ebpf:"obs_inet_release"`
 	ObsInetSendmsg      *ebpf.Program `ebpf:"obs_inet_sendmsg"`
 	ObsNewReturn        *ebpf.Program `ebpf:"obs_new_return"`
 	ObsRead             *ebpf.Program `ebpf:"obs_read"`
@@ -503,6 +520,7 @@ type fullPrograms struct {
 func (p *fullPrograms) Close() error {
 	return _FullClose(
 		p.ObsAcceptReturn,
+		p.ObsClearEntry,
 		p.ObsClose,
 		p.ObsConnect,
 		p.ObsDup2,
@@ -515,6 +533,7 @@ func (p *fullPrograms) Close() error {
 		p.ObsInet6Recvmsg,
 		p.ObsInet6Sendmsg,
 		p.ObsInetRecvmsg,
+		p.ObsInetRelease,
 		p.ObsInetSendmsg,
 		p.ObsNewReturn,
 		p.ObsRead,

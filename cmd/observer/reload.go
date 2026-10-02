@@ -372,7 +372,9 @@ func (d *daemon) reload(at time.Time, body []byte) reloadRecord {
 					attempt.Capability = capability
 				}
 			}
+			d.planMutex.Lock()
 			d.plan.Processes = append(d.plan.Processes, attachment.Describe(attempt))
+			d.planMutex.Unlock()
 		}
 	}
 

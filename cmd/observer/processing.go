@@ -116,6 +116,7 @@ func (d *daemon) processingSnapshot() *account.Processing {
 	if r := d.processing; r != nil && r.run != nil {
 		outcome := r.run.Snapshot()
 		state.ProcessingFailures, state.OutputFailures = outcome.ProcessingFailures, outcome.OutputFailures
+		state.ConnectionsCut, state.InputCut = outcome.ConnectionsCut, outcome.InputCut
 		state.Authorized, state.Written = outcome.Authorized, outcome.Written
 		state.ExchangeIDs, state.Extensions = outcome.ExchangeIDs, outcome.Extensions
 	}

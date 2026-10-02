@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -565,6 +566,8 @@ func start(path string, stdout io.Writer) (err error) {
 	}
 	running.path = path
 	running.log = log
+	// Ends of executions reach the session from here on, with its log in place.
+	running.ends.serve(running)
 	if err := held.record(os.Getpid(), session); err != nil {
 		running.abandon()
 		_ = log.write(startFailed(session, time.Now(), err))
@@ -672,14 +675,23 @@ type daemon struct {
 	processingTaken func(worker int, process fragment.Process, connection fragment.ConnectionID)
 
 	// plan is the account at activation - resolved policy and what the kernel
-	// confirmed attached - which every later account starts from.
-	plan account.Account
+	// confirmed attached - which every later account starts from. planMutex
+	// guards its processes, which an attachment's goroutine drops as their
+	// executions end (ended).
+	plan      account.Account
+	planMutex sync.Mutex
 
 	// log is the session's log, which extensions' standard error is copied
 	// into; extensionLogFailures counts the lines of it that could not be
 	// written, from the extensions' own goroutines.
 	log                  *logger
 	extensionLogFailures atomic.Int64
+
+	// endedLogFailures counts the ends of executions that could not be written
+	// to the log, from the attachment's goroutines (ended), and ends is where
+	// the attachment tells of them.
+	endedLogFailures atomic.Int64
+	ends             *endings
 
 	logFailures int
 }
@@ -741,7 +753,8 @@ func begin(read policy.Policy, session string) (*daemon, error) {
 		_ = os.RemoveAll(directory)
 	}
 	recording := prepared.Recording
-	attached, observed, err := observe(catalog, resolution, table, recording, prepared.Gate)
+	ends := &endings{}
+	attached, observed, err := observe(catalog, resolution, table, recording, prepared.Gate, ends.told)
 	if err != nil {
 		leaveNothing()
 		return nil, err
@@ -766,7 +779,7 @@ func begin(read policy.Policy, session string) (*daemon, error) {
 		capture: recording, attached: attached, plan: plan,
 		output: output,
 		intake: prepared.Intake, gate: prepared.Gate, payloadPosture: prepared.Posture,
-		verifyParticipants: protected.VerifyActive,
+		verifyParticipants: protected.VerifyActive, ends: ends,
 	}, nil
 }
 
@@ -867,8 +880,6 @@ func posture() error {
 
 // snapshot is the session's account as it stands at one moment.
 func (d *daemon) snapshot(kind account.Kind, at time.Time) account.Account {
-	a := d.plan
-	a.Kind = kind
 	run := account.Run{Seen: d.capture.Stats()}
 	run.Losses, run.LossesErr = losses(d.attached)
 	run.Refusals, run.RefusalsErr = refused(d.attached)
@@ -877,10 +888,22 @@ func (d *daemon) snapshot(kind account.Kind, at time.Time) account.Account {
 		if run.GrantsErr == nil && run.Grants == nil {
 			run.Grants = []probe.Grant{}
 		}
+		// Read after the grants: reading them lets go of the admissions it finds
+		// ended, which are counted here.
+		if ending, can := d.attached.(probe.Ending); can && run.GrantsErr == nil {
+			run.Ended, run.GrantsErr = ending.EndedCounts()
+		}
 	} else {
 		run.GrantsErr = errors.New("this attachment does not record what it admitted")
 	}
 	run.Processing = d.processingSnapshot()
+	// The plan is read after the grants, whose reading drops the processes it
+	// finds ended.
+	d.planMutex.Lock()
+	a := d.plan
+	a.Processes = slices.Clone(d.plan.Processes)
+	d.planMutex.Unlock()
+	a.Kind = kind
 	a.Ran(at, run)
 	if d.log != nil && d.log.queue != nil {
 		stats := d.log.queue.Stats()
@@ -935,7 +958,7 @@ func (d *daemon) finish(log *logger) error {
 
 	record := stopped{
 		Record: "stopped", Version: recordVersion, Session: d.session, At: time.Now(),
-		Sealed: sealErr == nil, Complete: sealErr == nil && seal.Complete, LogFailures: d.logFailures + int(d.extensionLogFailures.Load()),
+		Sealed: sealErr == nil, Complete: sealErr == nil && seal.Complete, LogFailures: d.logFailures + int(d.extensionLogFailures.Load()) + int(d.endedLogFailures.Load()),
 		Processing: final.Processing,
 	}
 	if log != nil && log.queue != nil {
@@ -1072,7 +1095,7 @@ func (u unstoppable) Account() (connection.Counters, error) {
 // at once: a probe is placed on a file and fires for every process running it,
 // so per-process placement would report each call once per placement.
 func observe(catalog probe.Catalog, resolution process.Resolution, table process.Table,
-	sink probe.Sink, gate *probe.DeliveryGate) (probe.Attachment, []attachment.Observed, error) {
+	sink probe.Sink, gate *probe.DeliveryGate, ended func(probe.Ended)) (probe.Attachment, []attachment.Observed, error) {
 	state := gate.Snapshot()
 	if state.MaxEvents == 0 || state.Charged != 0 || state.Reason != "" {
 		return nil, nil, &protected.Refusal{Check: protected.DeliveryGate, PID: os.Getpid(), Detail: "attach requires the verified fresh delivery gate"}
@@ -1080,7 +1103,7 @@ func observe(catalog probe.Catalog, resolution process.Resolution, table process
 	adapter, canAttach := catalog.Adapters()[0].(probe.Adapter)
 
 	attempts := make([]attachment.Attempt, 0, len(resolution.Selections))
-	request := probe.Request{Deny: resolution.Denials, DeliveryGate: gate}
+	request := probe.Request{Deny: resolution.Denials, DeliveryGate: gate, Ended: ended}
 	for _, one := range resolution.Selections {
 		p, found := table.Lookup(one.ObserverPID)
 		if !found {

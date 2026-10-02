@@ -78,6 +78,10 @@ var baseHelpers = map[string]bool{
 	// The monotonic clock, which gives a counted loss its occasion. It reads no
 	// memory, only elapsed nanoseconds since boot, so both programs may call it.
 	"FnKtimeGetNs": true,
+
+	// An ended execution's entries are found by walking the tables keyed by it
+	// (obs_reclaim); the walk reads and deletes map entries only.
+	"FnForEachMapElem": true,
 }
 
 // payloadHelpers is what the full program may additionally call. It is exactly

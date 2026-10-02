@@ -96,7 +96,7 @@ func coverageOf(scope Scope) Instances {
 			covered.Coverage = CoverageUndetermined
 			covered.Why = fmt.Sprintf("placement is %s, so nothing says whether it was attached", scope.Placement.State)
 		default:
-			covered = placed(covered, one.selection, scope.Placement.Processes)
+			covered = placed(covered, one.selection, scope.Placement)
 		}
 		out.Instances = append(out.Instances, covered)
 	}
@@ -104,8 +104,10 @@ func coverageOf(scope Scope) Instances {
 }
 
 // placed is a selected instance's coverage, from the one placement that names
-// it.
-func placed(covered InstanceCoverage, selection []string, processes []Placed) InstanceCoverage {
+// it. A placement whose execution ended is dropped and counted, so an instance
+// no placement names may be one of those.
+func placed(covered InstanceCoverage, selection []string, placement Placement) InstanceCoverage {
+	processes := placement.Processes
 	var matches []int
 	for index, process := range processes {
 		if process.PID == covered.Instance.PID && samePidNamespace(process.PidNamespace, covered.Instance) {
@@ -116,6 +118,10 @@ func placed(covered InstanceCoverage, selection []string, processes []Placed) In
 	case 0:
 		covered.Coverage = CoverageUndetermined
 		covered.Why = "no placement names this instance"
+		if placement.Ended != "" && placement.Ended != "0" {
+			covered.Why += fmt.Sprintf("; %s placements were dropped because their execution ended, and it may "+
+				"be one of them", placement.Ended)
+		}
 		return covered
 	case 1:
 	default:

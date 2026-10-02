@@ -261,6 +261,10 @@ type Overlapping struct {
 type Placement struct {
 	Block
 	Processes []Placed `json:"processes"`
+
+	// Ended is how many placed processes were dropped from Processes because
+	// their execution ended.
+	Ended string `json:"ended" account:"count"`
 }
 
 // Placed is one process's attachment. Its identity is not unique under pid

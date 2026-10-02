@@ -29,7 +29,7 @@ type Settings struct {
 	// Directory holds the pid file and one subdirectory per session.
 	Directory string
 
-	// AdmittedEventLimit bounds decoded-event admission for this session.
+	// AdmittedEventLimit bounds the decoded events this session holds at once.
 	// It is independent of approved output and is not a process-memory bound.
 	AdmittedEventLimit int64
 

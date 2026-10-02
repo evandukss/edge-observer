@@ -37,7 +37,7 @@ func TestEveryRecordedAdmissionIsAnsweredOnceByTheStateOfItsGrant(t *testing.T) 
 	interval := process.Interval{From: at.Add(time.Millisecond), To: at.Add(2 * time.Millisecond)}
 
 	read := make(map[int32]int)
-	grants := grantsOf(recorded, held, nil, at, func(one admission.Selection) process.Execution {
+	grants, _ := grantsOf(recorded, held, nil, at, func(one admission.Selection) process.Execution {
 		read[one.ObserverPID]++
 		return process.Execution{Observed: interval}
 	})
@@ -81,7 +81,7 @@ func TestAKeyHeldUnderAnotherGenerationIsNotTheRecordedAdmissionsGrant(t *testin
 	successor := map[instanceKey]admission.Generation{keyOf(recorded[0].Instance): recorded[0].Instance.Generation + 100}
 	at := time.Date(2026, 9, 11, 7, 0, 0, 0, time.UTC)
 
-	grants := grantsOf(recorded, successor, nil, at, func(admission.Selection) process.Execution {
+	grants, _ := grantsOf(recorded, successor, nil, at, func(admission.Selection) process.Execution {
 		return process.Execution{}
 	})
 	if len(grants) != 1 || grants[0].State != probe.GrantAbsent {
@@ -91,7 +91,7 @@ func TestAKeyHeldUnderAnotherGenerationIsNotTheRecordedAdmissionsGrant(t *testin
 
 	unstamped := recordedFour()[:1]
 	unstamped[0].Instance.Generation = 0
-	grants = grantsOf(unstamped, successor, nil, at, func(admission.Selection) process.Execution {
+	grants, _ = grantsOf(unstamped, successor, nil, at, func(admission.Selection) process.Execution {
 		return process.Execution{}
 	})
 	if len(grants) != 1 || grants[0].State != probe.GrantUnknown {
@@ -106,7 +106,7 @@ func TestAnAllowlistThatCouldNotBeReadLeavesEveryGrantUnknownRatherThanAbsent(t 
 	at := time.Date(2026, 9, 11, 7, 0, 0, 0, time.UTC)
 
 	read := 0
-	grants := grantsOf(recorded, nil, errors.New("the iterator failed"), at, func(admission.Selection) process.Execution {
+	grants, _ := grantsOf(recorded, nil, errors.New("the iterator failed"), at, func(admission.Selection) process.Execution {
 		read++
 		return process.Execution{}
 	})

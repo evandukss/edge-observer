@@ -336,7 +336,7 @@ func (w *Worker) settle(ctx context.Context) error {
 		}
 		delete(w.waiting, d)
 		err = w.write(ctx, d)
-		d.b.release()
+		d.b.release(processedUnless(err))
 		if err != nil {
 			return err
 		}

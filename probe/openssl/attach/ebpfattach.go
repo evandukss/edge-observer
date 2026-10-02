@@ -109,8 +109,9 @@ func (a EBPF) Attach(request probe.Request, sink probe.Sink) (probe.Attachment, 
 		attached.refuse(pid, err)
 	}
 
+	ended := attached.ending(request.Ended)
 	for _, one := range objects {
-		live, declined, err := a.place(one, sink, request.DeliveryGate)
+		live, declined, err := a.place(one, sink, request.DeliveryGate, ended)
 		if err == nil {
 			for _, refused := range declined {
 				attached.refuse(refused.Selection.ObserverPID, refused.Err)
@@ -306,7 +307,8 @@ func observed(processes []process.Process, declined []ebpf.Declined) []int32 {
 
 // place attaches one library object's probes for its processes, and says
 // which of them the kernel was never given an authorisation for.
-func (a EBPF) place(one object, sink probe.Sink, gate *probe.DeliveryGate) (probe.Attachment, []ebpf.Declined, error) {
+func (a EBPF) place(one object, sink probe.Sink, gate *probe.DeliveryGate,
+	ended func(probe.Ended)) (probe.Attachment, []ebpf.Declined, error) {
 	points, discarded := ebpf.PointsFrom(one.support.Probes, a.Adapter.Runtime)
 	if len(discarded) > 0 {
 		// The resolver found symbols no program was chosen for: the catalogue and the
@@ -332,6 +334,7 @@ func (a EBPF) place(one object, sink probe.Sink, gate *probe.DeliveryGate) (prob
 		Points:  points,
 		Admit:   one.admit,
 		Deny:    one.deny,
+		Ended:   ended,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -527,16 +530,29 @@ func (a *ebpfAttachment) deliver() {
 }
 
 func (a *ebpfAttachment) deliverEvent(event ebpf.Event) {
+	if event.Kind == ebpf.Exited {
+		// An execution's end carries no input: nothing is admitted, and what was kept
+		// for the execution goes.
+		a.ended(event)
+		return
+	}
 	// Reservation and kind classification precede identify: even a refused
 	// close on an unseen PID must neither read procfs nor grow the identity cache.
+	var reserved held.Slot
 	if a.gate != nil {
-		if decision := a.gate.Admit(probe.DeliveryKind(event.Kind), event.Measured); !decision.Admitted {
+		decision := a.gate.Admit(probe.DeliveryKind(event.Kind), event.Measured)
+		reserved = decision.Slot
+		if !decision.Admitted {
 			a.refused(event, decision.State.Reason)
+			unkept(reserved)
 			return
 		}
 	} else {
 		a.ungated.Add(1)
 	}
+	// The slot travels with the event to whatever retains its input; one that
+	// nothing kept is returned here, once the sink has returned.
+	defer unkept(reserved)
 	who := a.identify(event)
 	switch event.Kind {
 	case ebpf.Closed:
@@ -549,6 +565,7 @@ func (a *ebpfAttachment) deliverEvent(event ebpf.Event) {
 			Final:    event.Final,
 			Endpoint: event.SSL,
 			At:       event.At,
+			Slot:     reserved,
 		})
 	case ebpf.Transfer:
 		a.sink.Transfer(probe.Transfer{
@@ -570,7 +587,16 @@ func (a *ebpfAttachment) deliverEvent(event ebpf.Event) {
 			Early:      event.Early,
 			Measured:   event.Measured,
 			At:         event.At,
+			Slot:       reserved,
 		})
+	}
+}
+
+// unkept returns a slot no store kept: the event left no input anything
+// retains, so nothing else will return it.
+func unkept(reserved held.Slot) {
+	if reserved != nil && !reserved.Kept() {
+		reserved.Refund(held.Unretained)
 	}
 }
 
@@ -615,23 +641,42 @@ type identity struct {
 	instance admission.Instance
 }
 
+// ended lets go of what this placement keeps for an execution that has ended:
+// the identity read for its pid, and the namespace read when it was admitted,
+// so neither is handed to the next process holding the number.
+func (a *ebpfAttachment) ended(event ebpf.Event) {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+	delete(a.known, event.PID)
+	delete(a.networks, event.PID)
+}
+
+// EndedCounts is how many admissions this placement's session has let go of
+// because their execution ended, by target.
+func (a *ebpfAttachment) EndedCounts() ([]probe.EndedCount, error) {
+	return a.session.EndedCounts(), nil
+}
+
 // identify names the execution an event came from. The identity comes off the
 // event (pid namespace, pid inside it, admission generation), never off /proc,
 // which answers in the observer's own numbering. /proc supplies the start
-// identity and executable, read the first time a pid is seen. A process that
-// has exited leaves those indeterminate, and is still identified.
+// identity and executable, read the first time a pid is seen under an admission:
+// a pid admitted again carries another generation and is read again. A process
+// that has exited leaves those indeterminate, and is still identified. The
+// reading is kept until the program reports the execution ended (ended).
 func (a *ebpfAttachment) identify(event ebpf.Event) identity {
 	a.mutex.Lock()
 	known, found := a.known[event.PID]
 	a.mutex.Unlock()
 
-	if !found {
+	if !found || known.instance.Generation != event.Generation {
 		known = identity{process: fragment.Process{PID: event.PID}}
 		if p, err := process.Identify(a.procfs, event.PID); err == nil {
 			known.process = p.Identity()
 			known.instance.Start = p.Start()
 			known.instance.Executable = p.Executable
 		}
+		known.instance.Generation = event.Generation
 		a.mutex.Lock()
 		a.known[event.PID] = known
 		a.mutex.Unlock()
@@ -744,6 +789,9 @@ func (a *ebpfAttachment) Retained() ([]held.Occupancy, error) {
 		{Store: "attach.gate_refused", Held: len(a.gateRefused)},
 	}
 	a.mutex.Unlock()
+	if a.session == nil {
+		return out, nil
+	}
 	session, err := a.session.Retained()
 	if err != nil {
 		return nil, err

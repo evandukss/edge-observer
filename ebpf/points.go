@@ -6,8 +6,8 @@ import (
 	"slices"
 )
 
-// The BPF programs, by their names in the object: seven transfer pairs, one
-// entry-only close and one return-only birth. A function's program is decided
+// The BPF programs, by their names in the object: seven transfer pairs, two
+// entry-only endings (a release and a recycle) and one return-only birth. A function's program is decided
 // by whether it begins a handle, then by its direction, whether
 // its count is a register or an out-parameter, and whether the bytes are early
 // data (package bpf; the catalogue in package probe).
@@ -27,6 +27,7 @@ const (
 	progWriteEx2Entry    = "obs_write_ex2_entry"
 	progWriteEx2Return   = "obs_write_ex2_return"
 	progFreeEntry        = "obs_free_entry"
+	progClearEntry       = "obs_clear_entry"
 	progNewReturn        = "obs_new_return"
 	progSendfile         = "obs_sendfile"
 )
@@ -152,6 +153,10 @@ func programsFor(function probe.Function) (entry, back string) {
 	if function.Begins {
 		// A handle's birth: the new handle is the return value.
 		return "", progNewReturn
+	}
+	if function.Recycles {
+		// A handle recycled in place: an ending, on the call.
+		return progClearEntry, ""
 	}
 	switch function.Count {
 	case probe.CountNone:

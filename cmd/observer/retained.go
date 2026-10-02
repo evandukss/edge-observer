@@ -8,10 +8,12 @@ import "github.com/evandukss/edge-observer/held"
 // part this session does not have is not listed; one that cannot be read
 // fails the reading.
 func (d *daemon) Retained() ([]held.Occupancy, error) {
+	d.planMutex.Lock()
 	out := []held.Occupancy{
 		{Store: "observer.plan_processes", Held: len(d.plan.Processes)},
 		{Store: "observer.plan_targets", Held: len(d.plan.Targets)},
 	}
+	d.planMutex.Unlock()
 	var parts []held.Reader
 	if d.capture != nil {
 		parts = append(parts, d.capture)

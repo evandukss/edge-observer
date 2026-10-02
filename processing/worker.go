@@ -165,6 +165,8 @@ type Worker struct {
 	outcome   Outcome
 	terminal  error
 	finished  bool
+	// bound is the most fragments one connection may hold (Options.ConnectionInput).
+	bound int
 }
 
 // New validates only Options. It performs no capture, parsing or durable write.
@@ -178,11 +180,11 @@ func New(options Options) (*Worker, error) {
 }
 
 func (o Options) valid() bool {
-	if o.Plan == nil || o.Intake == nil || o.Gate == nil || o.Output == nil || o.PolicyRevision == "" || o.Session == "" || o.Workers < 0 {
+	if o.Plan == nil || o.Intake == nil || o.Gate == nil || o.Output == nil || o.PolicyRevision == "" || o.Session == "" || o.Workers < 0 || o.ConnectionInput < 0 {
 		return false
 	}
 	h, j := o.Limits.HTTP, o.Limits.JSON
-	for _, n := range []int{h.MaxStartLine, h.MaxHeaderLine, h.MaxHeaders, h.MaxHeaderBytes, h.MaxBodyBytes, h.MaxMessages, h.MaxChunks, h.MaxTrailers, j.MaxDepth, j.MaxNodes, j.MaxFields, j.MaxElemShapes, j.MaxNameBytes, j.ShortStringBytes} {
+	for _, n := range []int{h.MaxStartLine, h.MaxHeaderLine, h.MaxHeaders, h.MaxHeaderBytes, h.MaxBodyBytes, h.MaxChunks, h.MaxTrailers, j.MaxDepth, j.MaxNodes, j.MaxFields, j.MaxElemShapes, j.MaxNameBytes, j.ShortStringBytes} {
 		if n < 0 {
 			return false
 		}
@@ -193,7 +195,8 @@ func (o Options) valid() bool {
 func newWorker(options Options, index int, from source, release *release, running *extensions) *Worker {
 	w := &Worker{options: options, index: index, source: from, release: release, extensions: running,
 		waiting: map[*dispatch]struct{}{}, pipelines: options.Plan.Pipelines(), routes: options.Plan.Routes(),
-		batches: make(map[batchKey]*batch), outcome: Outcome{Withheld: connection.Counted(0)}}
+		batches: make(map[batchKey]*batch), outcome: Outcome{Withheld: connection.Counted(0)},
+		bound: connectionInput(options)}
 	if q, ok := from.(*queue); ok {
 		w.queue = q
 	}
@@ -325,10 +328,24 @@ func (w *Worker) Close() error {
 	return nil
 }
 
+// connectionInput is the most fragments one connection may hold: the option, or
+// half the gate's event allowance, so that one connection reaches its own bound
+// before it can fill the session's.
+func connectionInput(options Options) int {
+	if options.ConnectionInput > 0 {
+		return options.ConnectionInput
+	}
+	allowance := options.Gate.Snapshot().MaxEvents
+	return int(max(allowance/2, 1))
+}
+
 // Retained is what this worker holds now, store by store: the connections
 // whose input it holds, with their entries and the fragments indexed from them,
 // the order it examines them in, and the connections waiting on an extension's
-// result. Its owner reads it, never while Drain or Finish runs.
+// result, with the exchanges each keeps as parsed and as processed and what
+// policy did to their bodies. A dispatch that is not waiting is let go of when
+// its lines are written, so nothing else of one is kept. Its owner reads it,
+// never while Drain or Finish runs.
 func (w *Worker) Retained() ([]held.Occupancy, error) {
 	if w == nil {
 		return nil, nil
@@ -338,12 +355,21 @@ func (w *Worker) Retained() ([]held.Occupancy, error) {
 		entries += len(b.entries)
 		fragments += len(b.fragments)
 	}
+	exchanges, bodies := 0, 0
+	for d := range w.waiting {
+		exchanges += len(d.source.Exchanges) + len(d.processed.Exchanges)
+		if d.run != nil {
+			bodies += len(d.run.bodies)
+		}
+	}
 	return []held.Occupancy{
 		{Store: "processing.batches", Held: len(w.batches)},
 		{Store: "processing.entries", Held: entries},
 		{Store: "processing.fragments", Held: fragments},
 		{Store: "processing.order", Held: len(w.order)},
 		{Store: "processing.waiting", Held: len(w.waiting)},
+		{Store: "processing.waiting_exchanges", Held: exchanges},
+		{Store: "processing.waiting_bodies", Held: bodies},
 	}, nil
 }
 
@@ -365,7 +391,7 @@ func (w *Worker) snapshot() Outcome {
 func (w *Worker) discard() {
 	for id, b := range w.batches {
 		w.withhold(connection.Uncounted("unsettled_input"))
-		b.release()
+		b.release(held.Discarded)
 		delete(w.batches, id)
 	}
 	w.order = nil
@@ -374,7 +400,7 @@ func (w *Worker) discard() {
 		// written.
 		d.dead = true
 		w.withhold(connection.Uncounted("unsettled_input"))
-		d.b.release()
+		d.b.release(held.Discarded)
 		delete(w.waiting, d)
 	}
 }
@@ -448,9 +474,9 @@ func (w *Worker) drain(ctx context.Context, final bool) error {
 			return err
 		}
 		w.outcome.Batches++
-		held, err := w.process(ctx, b)
-		if !held {
-			b.release()
+		waits, err := w.process(ctx, b)
+		if !waits {
+			b.release(processedUnless(err))
 		}
 		delete(w.batches, id)
 		if err != nil {

@@ -65,7 +65,7 @@ type Coverage struct {
 	Unobserved []string
 
 	// Unprobed names the entry points capture requires - byte-moving or lifecycle
-	// (SSL_new, SSL_free) - that were present to probe but could not be
+	// (SSL_new, SSL_free, SSL_clear) - that were present to probe but could not be
 	// (Session.Unprobed). While it is non-empty capture is not live: no occupancy
 	// forms, nothing is sequenced, and the whole attachment certifies no exchange,
 	// though metadata still flows. Empty is capture live; an export absent from the
@@ -96,6 +96,10 @@ func CoverageOf(answered []Placed) Coverage {
 		// held through, not whether a descendant is observed.
 		case one.Point.Entry == progFreeEntry:
 			coverage.Lifecycle = true
+		case one.Point.Entry == progClearEntry:
+			// A recycle ends occupancies as a release does; the release alone decides
+			// whether endings are observed, and a recycle that did not place leaves
+			// capture not live (Session.Unprobed).
 		case one.Point.Return == progNewReturn:
 			// A handle's birth moves no plaintext; it only numbers the handle's
 			// transfers from their first.

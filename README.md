@@ -231,6 +231,12 @@ before believing anything else in it**: a run that lost events is not evidence a
 host. And a run that saw nothing is only evidence of a quiet process if the account also says the
 probes were attached.
 
+**The account holds what may still run.** An attached process or an admission whose execution has ended
+is counted, not listed: in the placement's `ended` and its target's coverage `ended`. Its identity is
+written once, when its end is established, to the operational log as an `execution-ended` record, so the
+record of which process it was is only as durable as that log, which is best effort (Rotation and
+delivery, below).
+
 `--text` prints the sealed account and the approved records from `approved.jsonl`, including
 permitted header and trailer values, decoded body bytes, and their capture-time policy revision,
 route, connection metadata and message positions. Inspection uses the persisted result; changing

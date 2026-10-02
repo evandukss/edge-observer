@@ -29,6 +29,9 @@ func (w *Worker) process(ctx context.Context, b *batch) (bool, error) {
 		w.countProcessingFailure("")
 		return false, nil
 	}
+	if b.cut {
+		return false, w.processCut(ctx, b)
+	}
 	fragments, prefix, valid := b.placed()
 	if !valid {
 		w.withhold(connection.Uncounted("invalid_input"))
@@ -173,6 +176,43 @@ func (w *Worker) process(ctx context.Context, b *batch) (bool, error) {
 		}
 	}
 	return false, w.write(ctx, d)
+}
+
+// processCut writes the connection line of a connection cut at the bound on
+// what one connection may hold: its input from the first byte in each
+// direction was discarded, so the line's truncation stops there, naming the
+// cut, and no exchange or extension message is produced. A cut is counted as
+// itself (Outcome.ConnectionsCut), never as a processing failure.
+func (w *Worker) processCut(ctx context.Context, b *batch) error {
+	metadata, err := record.FromConnection(*b.retirement)
+	if err != nil {
+		w.withhold(connection.Uncounted("invalid_input"))
+		w.countProcessingFailure("")
+		return nil
+	}
+	w.withhold(connection.Uncounted("connection_cut"))
+	d := &dispatch{b: b, metadata: metadata, reconstruction: -1, ids: IDRange{Count: "0"}}
+	var stops []TruncationStop
+	for _, direction := range []fragment.Direction{fragment.Sent, fragment.Received} {
+		if _, carried := b.retirement.Placement(direction); !carried && b.reached[direction] == 0 {
+			continue
+		}
+		stops = append(stops, TruncationStop{Direction: direction.String(), Offset: "0",
+			Reason: TruncationConnectionCut, EvidenceOffset: strconv.FormatUint(b.reached[direction], 10)})
+	}
+	if len(stops) != 0 {
+		d.truncation = &ReconstructionTruncation{State: "truncated", Suffix: "indeterminate", Stops: stops}
+	}
+	for _, p := range w.pipelines {
+		if p.Input != config.ConnectionInput {
+			continue
+		}
+		d.lines = append(d.lines, pipelineLine{name: p.Name, input: p.Input, artifact: &Artifact{Version: ArtifactVersion,
+			Session: w.options.Session, PolicyRevision: w.options.PolicyRevision, Connection: metadata,
+			PolicyExclusions: []PolicyExclusion{}, ExtensionOutcomes: []ExtensionOutcome{},
+			ReplacementExclusions: []ReplacementExclusion{}}})
+	}
+	return w.write(ctx, d)
 }
 
 // write writes d's lines, in pipeline order, each to its routes, and counts a

@@ -95,6 +95,13 @@ type metaHandleKey struct {
 	Ssl      uint64
 }
 
+type metaHolding struct {
+	_       structs.HostLayout
+	Entries uint8
+	Events  uint8
+	Padding [6]uint8
+}
+
 type metaInstanceKey struct {
 	_        structs.HostLayout
 	NsDev    uint64
@@ -199,6 +206,7 @@ const (
 	metaMapForking              = "forking"
 	metaMapGenerations          = "generations"
 	metaMapHandles              = "handles"
+	metaMapHolders              = "holders"
 	metaMapInflight             = "inflight"
 	metaMapNamespaces           = "namespaces"
 	metaMapOccupancies          = "occupancies"
@@ -211,6 +219,7 @@ const (
 	metaMapUnmatchedAt          = "unmatched_at"
 	metaMapUnmeasurable         = "unmeasurable"
 	metaProgObsAcceptReturn     = "obs_accept_return"
+	metaProgObsClearEntry       = "obs_clear_entry"
 	metaProgObsClose            = "obs_close"
 	metaProgObsConnect          = "obs_connect"
 	metaProgObsDup2             = "obs_dup2"
@@ -223,6 +232,7 @@ const (
 	metaProgObsInet6Recvmsg     = "obs_inet6_recvmsg"
 	metaProgObsInet6Sendmsg     = "obs_inet6_sendmsg"
 	metaProgObsInetRecvmsg      = "obs_inet_recvmsg"
+	metaProgObsInetRelease      = "obs_inet_release"
 	metaProgObsInetSendmsg      = "obs_inet_sendmsg"
 	metaProgObsNewReturn        = "obs_new_return"
 	metaProgObsRead             = "obs_read"
@@ -297,6 +307,7 @@ type metaSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type metaProgramSpecs struct {
 	ObsAcceptReturn     *ebpf.ProgramSpec `ebpf:"obs_accept_return"`
+	ObsClearEntry       *ebpf.ProgramSpec `ebpf:"obs_clear_entry"`
 	ObsClose            *ebpf.ProgramSpec `ebpf:"obs_close"`
 	ObsConnect          *ebpf.ProgramSpec `ebpf:"obs_connect"`
 	ObsDup2             *ebpf.ProgramSpec `ebpf:"obs_dup2"`
@@ -309,6 +320,7 @@ type metaProgramSpecs struct {
 	ObsInet6Recvmsg     *ebpf.ProgramSpec `ebpf:"obs_inet6_recvmsg"`
 	ObsInet6Sendmsg     *ebpf.ProgramSpec `ebpf:"obs_inet6_sendmsg"`
 	ObsInetRecvmsg      *ebpf.ProgramSpec `ebpf:"obs_inet_recvmsg"`
+	ObsInetRelease      *ebpf.ProgramSpec `ebpf:"obs_inet_release"`
 	ObsInetSendmsg      *ebpf.ProgramSpec `ebpf:"obs_inet_sendmsg"`
 	ObsNewReturn        *ebpf.ProgramSpec `ebpf:"obs_new_return"`
 	ObsRead             *ebpf.ProgramSpec `ebpf:"obs_read"`
@@ -354,6 +366,7 @@ type metaMapSpecs struct {
 	Forking          *ebpf.MapSpec `ebpf:"forking"`
 	Generations      *ebpf.MapSpec `ebpf:"generations"`
 	Handles          *ebpf.MapSpec `ebpf:"handles"`
+	Holders          *ebpf.MapSpec `ebpf:"holders"`
 	Inflight         *ebpf.MapSpec `ebpf:"inflight"`
 	Namespaces       *ebpf.MapSpec `ebpf:"namespaces"`
 	Occupancies      *ebpf.MapSpec `ebpf:"occupancies"`
@@ -403,6 +416,7 @@ type metaMaps struct {
 	Forking          *ebpf.Map `ebpf:"forking"`
 	Generations      *ebpf.Map `ebpf:"generations"`
 	Handles          *ebpf.Map `ebpf:"handles"`
+	Holders          *ebpf.Map `ebpf:"holders"`
 	Inflight         *ebpf.Map `ebpf:"inflight"`
 	Namespaces       *ebpf.Map `ebpf:"namespaces"`
 	Occupancies      *ebpf.Map `ebpf:"occupancies"`
@@ -428,6 +442,7 @@ func (m *metaMaps) Close() error {
 		m.Forking,
 		m.Generations,
 		m.Handles,
+		m.Holders,
 		m.Inflight,
 		m.Namespaces,
 		m.Occupancies,
@@ -453,6 +468,7 @@ type metaVariables struct {
 // It can be passed to loadMetaObjects or ebpf.CollectionSpec.LoadAndAssign.
 type metaPrograms struct {
 	ObsAcceptReturn     *ebpf.Program `ebpf:"obs_accept_return"`
+	ObsClearEntry       *ebpf.Program `ebpf:"obs_clear_entry"`
 	ObsClose            *ebpf.Program `ebpf:"obs_close"`
 	ObsConnect          *ebpf.Program `ebpf:"obs_connect"`
 	ObsDup2             *ebpf.Program `ebpf:"obs_dup2"`
@@ -465,6 +481,7 @@ type metaPrograms struct {
 	ObsInet6Recvmsg     *ebpf.Program `ebpf:"obs_inet6_recvmsg"`
 	ObsInet6Sendmsg     *ebpf.Program `ebpf:"obs_inet6_sendmsg"`
 	ObsInetRecvmsg      *ebpf.Program `ebpf:"obs_inet_recvmsg"`
+	ObsInetRelease      *ebpf.Program `ebpf:"obs_inet_release"`
 	ObsInetSendmsg      *ebpf.Program `ebpf:"obs_inet_sendmsg"`
 	ObsNewReturn        *ebpf.Program `ebpf:"obs_new_return"`
 	ObsRead             *ebpf.Program `ebpf:"obs_read"`
@@ -499,6 +516,7 @@ type metaPrograms struct {
 func (p *metaPrograms) Close() error {
 	return _MetaClose(
 		p.ObsAcceptReturn,
+		p.ObsClearEntry,
 		p.ObsClose,
 		p.ObsConnect,
 		p.ObsDup2,
@@ -511,6 +529,7 @@ func (p *metaPrograms) Close() error {
 		p.ObsInet6Recvmsg,
 		p.ObsInet6Sendmsg,
 		p.ObsInetRecvmsg,
+		p.ObsInetRelease,
 		p.ObsInetSendmsg,
 		p.ObsNewReturn,
 		p.ObsRead,

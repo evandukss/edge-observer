@@ -175,8 +175,11 @@ type Admission struct {
 
 // coverageRule states in the account how admissions are placed below.
 const coverageRule = "an admission whose grant the kernel still holds is covered and is counted rather " +
-	"than listed; one whose grant it no longer holds has had its coverage end, and is listed with the " +
-	"latest moment that can have happened; one whose grant could not be read is listed as unknown"
+	"than listed; one whose execution is established as ended is counted under its target as ended and " +
+	"no longer listed, its identity written once to the operational log when that was established; one " +
+	"whose grant the kernel no longer holds while its execution may still run has had its coverage end, " +
+	"and is listed with the latest moment that can have happened; one whose grant could not be read is " +
+	"listed as unknown"
 
 // TargetCoverage is one target's share of the admissions, so one target going
 // dark is told apart from the whole run going dark.
@@ -233,16 +236,21 @@ type Account struct {
 	Extensions []Extension `json:"extensions"`
 
 	// Everything below exists only once something has attached.
-	Processes  []attachment.Observed `json:"processes,omitempty"`
-	Capability *probe.Capability     `json:"capability,omitempty"`
-	Capturing  string                `json:"capturing,omitempty"`
-	Seen       *capture.Stats        `json:"seen,omitempty"`
-	Loss       *Loss                 `json:"loss,omitempty"`
-	Admitted   *Admitted             `json:"admitted,omitempty"`
-	Admissions *Admissions           `json:"admissions,omitempty"`
-	Refused    *Refused              `json:"refused,omitempty"`
-	Spool      *spool.Stats          `json:"spool,omitempty"`
-	Processing *Processing           `json:"processing,omitempty"`
+	//
+	// Processes is every attached process whose execution has not been
+	// established as ended, and ProcessesEnded how many were dropped from it
+	// because it was: each is written once to the operational log when it is.
+	Processes      []attachment.Observed `json:"processes,omitempty"`
+	ProcessesEnded int                   `json:"processes_ended"`
+	Capability     *probe.Capability     `json:"capability,omitempty"`
+	Capturing      string                `json:"capturing,omitempty"`
+	Seen           *capture.Stats        `json:"seen,omitempty"`
+	Loss           *Loss                 `json:"loss,omitempty"`
+	Admitted       *Admitted             `json:"admitted,omitempty"`
+	Admissions     *Admissions           `json:"admissions,omitempty"`
+	Refused        *Refused              `json:"refused,omitempty"`
+	Spool          *spool.Stats          `json:"spool,omitempty"`
+	Processing     *Processing           `json:"processing,omitempty"`
 
 	// Seal is how a sealed session ended; SealError why it could not be finalised.
 	Seal      *connection.Seal `json:"seal,omitempty"`
@@ -259,6 +267,7 @@ type Run struct {
 	RefusalsErr error
 	Grants      []probe.Grant
 	GrantsErr   error
+	Ended       []probe.EndedCount
 	Spool       *spool.Stats
 	Processing  *Processing
 }
@@ -448,7 +457,7 @@ func (a *Account) Ran(at time.Time, run Run) {
 		a.Admissions = &Admissions{Rule: coverageRule, ByTarget: []TargetCoverage{}, CoverageEnded: []Admission{},
 			GrantUnknown: []Admission{}, Unavailable: run.GrantsErr.Error()}
 	case run.Grants != nil:
-		a.Admissions = admissionsOf(run.Grants)
+		a.Admissions = admissionsOf(run.Grants, run.Ended)
 	default:
 		a.Admissions = nil
 	}
@@ -531,10 +540,20 @@ func limitsOf(one process.Resolved) []string {
 	return limits
 }
 
-func admissionsOf(grants []probe.Grant) *Admissions {
+func admissionsOf(grants []probe.Grant, ended []probe.EndedCount) *Admissions {
 	admissions := &Admissions{Rule: coverageRule, ByTarget: []TargetCoverage{}, CoverageEnded: []Admission{},
 		GrantUnknown: []Admission{}}
 	at := make(map[string]int)
+	for _, one := range ended {
+		target := targetOf(admission.Provenance{Target: one.Target, Number: one.Number})
+		index, seen := at[target]
+		if !seen {
+			index = len(admissions.ByTarget)
+			at[target] = index
+			admissions.ByTarget = append(admissions.ByTarget, TargetCoverage{Target: target})
+		}
+		admissions.ByTarget[index].Ended += one.Count
+	}
 	for _, grant := range grants {
 		one := Admission{
 			Instance:    instanceOfSelection(grant.Selection),
@@ -588,6 +607,18 @@ func namespaceBy(selection admission.Selection) string {
 		return record.ByAttachRead
 	default:
 		return record.ByResolutionRead
+	}
+}
+
+// EndedAdmission is one admission established as ended, as the operational log
+// records it: the only record of its identity once the account counts it.
+func EndedAdmission(one probe.Ended) Admission {
+	return Admission{
+		Instance:    instanceOfSelection(one.Selection),
+		Target:      targetOf(one.Selection.Provenance),
+		Inherited:   one.Selection.Provenance.Inherited(),
+		NamespaceBy: namespaceBy(one.Selection),
+		Why:         one.Evidence,
 	}
 }
 

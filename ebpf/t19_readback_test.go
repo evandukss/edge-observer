@@ -4,6 +4,7 @@ package ebpf_test
 
 import (
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,14 +12,17 @@ import (
 	"github.com/evandukss/edge-observer/admission"
 	"github.com/evandukss/edge-observer/bpf"
 	"github.com/evandukss/edge-observer/ebpf"
+	"github.com/evandukss/edge-observer/probe"
 )
 
 // A child already running when probes are placed, and offered by nobody, is
 // admitted by the walk of its parent's running descendants, which read its
 // namespace from /proc then. A child forked afterwards is admitted by the
-// kernel, and its namespace is the one its events carry. The account says, per
-// admission, which of the two read the namespace; both children are inherited,
-// so inheritance cannot decide it.
+// kernel, and its namespace is the one its events carry. The record of each
+// admission says which of the two read the namespace; both children are
+// inherited, so inheritance cannot decide it. Both children have ended by the
+// time it is read, so the record is the one the session hands on as it lets
+// go of each (Options.Ended), which the operational log writes.
 func TestT19TheAttachWalkAndTheForkHookAreToldApartInTheAccount(t *testing.T) {
 	port, received := independentPeer(t)
 	actor := independentActor(t, heldFamilySource(), port)
@@ -29,8 +33,15 @@ func TestT19TheAttachWalkAndTheForkHookAreToldApartInTheAccount(t *testing.T) {
 	}
 	waitActorState(t, walked, "T")
 
+	var mutex sync.Mutex
+	ended := make(map[int32]probe.Ended)
 	session, err := ebpf.Attach(ebpf.Options{
 		Program: bpf.Full(), Points: append(points(t, parent), independentForkPoint(t, parent)), Admit: authorise(parent),
+		Ended: func(one probe.Ended) {
+			mutex.Lock()
+			defer mutex.Unlock()
+			ended[one.Selection.ObserverPID] = one
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -50,17 +61,24 @@ func TestT19TheAttachWalkAndTheForkHookAreToldApartInTheAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	peerReceived(t, received, "/independent-held-child")
-	drain(session, 100*time.Millisecond)
-
-	grants := session.Grants()
-	selected := make(map[int32]admission.Selection, len(grants))
-	for _, one := range grants {
-		selected[one.Selection.ObserverPID] = one.Selection
+	selected := make(map[int32]admission.Selection)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		drain(session, 100*time.Millisecond)
+		session.Grants()
+		mutex.Lock()
+		for pid, one := range ended {
+			selected[pid] = one.Selection
+		}
+		mutex.Unlock()
+		if len(selected) >= 2 || time.Now().After(deadline) {
+			break
+		}
 	}
 	byWalk, walkFound := selected[walked]
 	byFork, forkFound := selected[forked]
 	if !walkFound || !forkFound {
-		t.Fatalf("wiring, not the property: the session recorded the walked child pid %d: %v and the forked "+
+		t.Fatalf("wiring, not the property: the session let go of the walked child pid %d: %v and the forked "+
 			"child pid %d: %v, so there is no pair to tell apart", walked, walkFound, forked, forkFound)
 	}
 	if byWalk.Instance.Generation.FromKernel() || !byFork.Instance.Generation.FromKernel() {
@@ -73,29 +91,23 @@ func TestT19TheAttachWalkAndTheForkHookAreToldApartInTheAccount(t *testing.T) {
 			"both true", byWalk.Provenance.Inherited(), byFork.Provenance.Inherited())
 	}
 
-	var a account.Account
-	a.Ran(time.Now(), account.Run{Grants: grants})
-	encoded, err := json.Marshal(a.Admissions)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var lists struct {
-		Ended   []t19Admission `json:"coverage_ended"`
-		Unknown []t19Admission `json:"grant_unknown"`
-	}
-	if err := json.Unmarshal(encoded, &lists); err != nil {
-		t.Fatal(err)
-	}
-	rows := make(map[int32][]t19Admission)
-	for _, one := range append(lists.Ended, lists.Unknown...) {
-		rows[one.Instance.PID] = append(rows[one.Instance.PID], one)
-	}
 	for pid, want := range map[int32]string{walked: "attach_proc_read", forked: "admission_event"} {
-		if len(rows[pid]) != 1 {
-			t.Fatalf("wiring, not the property: pid %d is listed %d times in the account, want once", pid, len(rows[pid]))
+		mutex.Lock()
+		one := ended[pid]
+		mutex.Unlock()
+		encoded, err := json.Marshal(account.EndedAdmission(one))
+		if err != nil {
+			t.Fatal(err)
 		}
-		if got := rows[pid][0].NamespaceBy; got != want {
-			t.Errorf("the account says pid %d's namespace was established by %q, want %q", pid, got, want)
+		var row t19Admission
+		if err := json.Unmarshal(encoded, &row); err != nil {
+			t.Fatal(err)
+		}
+		if row.Instance.PID != pid {
+			t.Fatalf("wiring, not the property: the record of pid %d names pid %d", pid, row.Instance.PID)
+		}
+		if row.NamespaceBy != want {
+			t.Errorf("the record says pid %d's namespace was established by %q, want %q", pid, row.NamespaceBy, want)
 		}
 	}
 }

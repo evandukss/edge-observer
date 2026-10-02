@@ -194,11 +194,14 @@ type Terminal struct {
 }
 
 // Final is an occupancy's last numbers in each direction. Known is false where
-// the producer held nothing for the occupancy when it was asked.
+// the producer held nothing for the occupancy when it was asked. Exited says the
+// occupancy ended because its execution did (an exit, or an exec replacing its
+// image) while it still held the handle, not by a release of the handle.
 type Final struct {
 	Known    bool
 	Sent     Terminal
 	Received Terminal
+	Exited   bool
 }
 
 // Handle names one handle of one admitted execution, which is what a producer
@@ -318,6 +321,37 @@ type Request struct {
 	// Deny is what an exclusion denies: those instances and their subtrees, given
 	// with Admit so the adapter enforces the denial where admissions are decided.
 	Deny []admission.Denial
+
+	// Ended, where set, is told once of every admitted execution the attachment
+	// establishes as ended, as it lets go of what it kept for it. It runs on the
+	// attachment's own goroutines and must return quickly.
+	Ended func(Ended)
+}
+
+// Ended is an admitted execution established as ended. An attachment keeps
+// nothing for it afterwards: it is counted under its target (Ending), and this
+// is the only record of its identity.
+type Ended struct {
+	Selection admission.Selection
+
+	// Evidence is what established the end.
+	Evidence string
+	At       time.Time
+}
+
+// EndedCount is how many admissions under one target an attachment has
+// established as ended and let go of.
+type EndedCount struct {
+	Target string
+	Number int
+	Count  int
+}
+
+// Ending is an attachment that lets go of an admission once its execution is
+// established as ended, and counts it under its target instead.
+type Ending interface {
+	Attachment
+	EndedCounts() ([]EndedCount, error)
 }
 
 // Unmet is why a capability does not satisfy this request, nil where it does.

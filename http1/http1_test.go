@@ -540,21 +540,18 @@ func TestABodyLargerThanTheBoundIsSteppedOverAndWhatWasDroppedIsCounted(t *testi
 	}
 }
 
-func TestTheNumberOfMessagesReadFromOneStreamIsBounded(t *testing.T) {
-	limits := http1.DefaultLimits()
-	limits.MaxMessages = 3
-
-	pieces := make([]string, 10)
+func TestAStreamIsReadToItsEndWhateverItsNumberOfMessages(t *testing.T) {
+	pieces := make([]string, 2048)
 	for i := range pieces {
 		pieces[i] = "GET /one HTTP/1.1\r\n\r\n"
 	}
 
-	parsed := http1.Parse(fragments(t, fragment.Received, pieces...), http1.Request, limits)
-	if got, want := len(parsed.Messages), 3; got != want {
-		t.Fatalf("parsed %d messages, want the bound %d", got, want)
+	parsed := http1.Parse(fragments(t, fragment.Received, pieces...), http1.Request, http1.DefaultLimits())
+	if got, want := len(parsed.Messages), len(pieces); got != want {
+		t.Fatalf("parsed %d messages, want every one of %d", got, want)
 	}
-	if parsed.Unplaced == 0 {
-		t.Error("Unplaced = 0; the messages past the bound are unaccounted for")
+	if parsed.Unplaced != 0 {
+		t.Errorf("Unplaced = %d; every message was complete", parsed.Unplaced)
 	}
 }
 

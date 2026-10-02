@@ -42,6 +42,7 @@ var represented = map[string]string{
 	".exclusions[].number":            "scope.exclusions[].number",
 	".limits[]":                       "scope.limits[]",
 
+	".processes_ended":                    "scope.placement.ended",
 	".processes[].PID":                    "scope.placement.processes[].pid",
 	".processes[].StartTime":              "scope.placement.processes[].birth.value",
 	".processes[].Runtime":                "scope.placement.processes[].runtime",
