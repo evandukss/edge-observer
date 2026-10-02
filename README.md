@@ -19,7 +19,7 @@ proven, and what does not work. Read it before relying on anything here.
 - **A second TLS adapter is selected and never attached.** One registered after OpenSSL is chosen by
   the catalogue for its processes, which are then handed to the OpenSSL adapter, and it refuses them.
   Registered first, it is attached to every supported process, OpenSSL ones included.
-  [docs/extension-guide.md](docs/extension-guide.md) names the code that still assumes OpenSSL.
+  [docs/adding-support.md](docs/adding-support.md) names the code that still assumes OpenSSL.
 
 ### Built but not proven
 
@@ -58,16 +58,17 @@ proven, and what does not work. Read it before relying on anything here.
   storage. Durable payload output requires processing and release authorization. Nothing is exported.
 - **One set of rules for every watched program.** The configuration
   ([contract/config/CONFIG.md](contract/config/CONFIG.md)) removes, masks and truncates headers, query
-  parameters, form fields, JSON members and whole bodies, in one fixed order, and packs add rules from
-  `packs/<name>.json` beside it. Different rules for different watched programs are not in it. Three
-  things the earlier format could write cannot be written: stopping a pipeline at its first undecidable
-  exchange, exchanges written without connection records, and a mask with a truncation on one header.
+  parameters, form fields, JSON members and whole bodies, in one fixed order. Different rules for
+  different watched programs are not in it. Three things the earlier format could write cannot be
+  written: stopping a pipeline at its first undecidable exchange, exchanges written without connection
+  records, and a mask with a truncation on one header.
 - **A reload only adds.** It puts in force a new target that needs no probe beyond those already
   placed. Anything it would take away, and a library nothing has attached to, waits for a restart.
 - **No release**: no archive, no tag, no version number.
 - **Every published format is a draft and not frozen**: the record (`observer.record/1-draft`), the
-  account and bundle (`observer.account/2-draft`, `observer.bundle/1-draft`), and the configuration and
-  pack (`observer.config/1`, `observer.pack/1`).
+  account and bundle (`observer.account/2-draft`, `observer.bundle/1-draft`), the configuration
+  (`observer.config/1`), and the extension protocol and its derived records (`observer.extension/1`,
+  `observer.derived/1`).
 - **The account format has no worked example bundle** in this repository;
   [contract/account/ACCOUNT.md](contract/account/ACCOUNT.md) specifies it.
 
@@ -145,10 +146,14 @@ the matched process's children are watched too - every one, only those already r
 **What it removes.** Without rules the observer writes every exchange of a watched process as it
 crossed the TLS boundary. `remove` takes headers, query parameters, form fields, JSON members and whole
 bodies out before anything is written, and the observer refuses to start when it cannot enforce
-every one. `mask` replaces a value and `truncate` shortens a header's value. The shipped pack
-`credentials` removes the usual credential headers: copy `contract/config/examples/packs/credentials.json`
-to `packs/credentials.json` beside your configuration and add `"packs": ["credentials"]`. A misspelled
-key is refused by name, never ignored.
+every one. `mask` replaces a value and `truncate` shortens a header's value. The example
+`contract/config/examples/credentials.config.json` removes the usual credential headers: copy its
+`remove` into your configuration. A misspelled key is refused by name, never ignored.
+
+**Extensions.** `extensions` runs your own executables over the records, after every rule, to change
+exchanges or write records of their own - an endpoint inventory, a classification.
+[docs/extensions.md](docs/extensions.md) says how to configure one and what one can do: **extensions
+are trusted code, not sandboxed, and run as the observer's user**.
 
 Check what it would select, attaching nothing:
 
@@ -243,8 +248,10 @@ it from disk.
 
     docs/compatibility.md       kernels, architectures, TLS libraries and protocols: declared and observed
     docs/architecture.md        how a capture flows through the packages, and what each one owns
-    docs/extension-guide.md     adding a TLS library, a protocol or an output, and what stops each today
-    contract/                   the formats: configuration, policy, record, account, acceptance
+    docs/extensions.md          configuring an extension: your own executable fed the observer's records
+    docs/approved-inspection.md reading the approved output, and what each of its lines records
+    docs/adding-support.md      adding a TLS library, a protocol or an output, and what stops each today
+    contract/                   the formats: configuration, extension protocol, record, account, acceptance
 
 [CONTRIBUTING.md](CONTRIBUTING.md) says how to build, test and propose a change,
 [GOVERNANCE.md](GOVERNANCE.md) who decides, [SECURITY.md](SECURITY.md) how to report a vulnerability

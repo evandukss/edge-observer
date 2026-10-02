@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"testing"
 
+	observed "github.com/evandukss/edge-observer/account"
 	"github.com/evandukss/edge-observer/probe"
 )
 
@@ -33,9 +34,13 @@ func TestProcessingAggregatePreservesDistinctFactsAndCaptureLoss(t *testing.T) {
 				} else if before.Capture.Loss.State != Unavailable || before.Capture.Loss.Why != "7" {
 					t.Fatalf("unavailable capture-loss control became zero: %+v", before.Capture.Loss)
 				}
+				// The filled account configures one extension, so its counts are
+				// among the ruled facts.
+				counts := observed.NoCounts(source.Extensions[0].Name)
+				counts.Considered, counts.Changed = 13, 13
 				facts := map[string]any{
 					"gate_reason": reason, "processing_failures": 3, "output_failures": 2,
-					"authorized": 11, "written": 5,
+					"authorized": 11, "written": 5, "exchange_ids": 13, "extensions": []observed.ExtensionCounts{counts},
 				}
 				encoded, err := json.Marshal(facts)
 				if err != nil {
@@ -68,6 +73,11 @@ func TestProcessingAggregatePreservesDistinctFactsAndCaptureLoss(t *testing.T) {
 				}
 				if got["state"] != string(Carried) || !reflect.DeepEqual(got["aggregate"], want) {
 					t.Fatalf("ruled aggregate missing or dispositions conflated: %s", encoded)
+				}
+				extension, _ := got["extensions"].(map[string]any)[counts.Name].(map[string]any)
+				if got["exchange_ids"] != "13" || extension["considered"] != "13" || extension["changed"] != "13" ||
+					extension["unchanged"] != "0" {
+					t.Fatalf("the ids issued or an extension's counts were not carried as counted: %s", encoded)
 				}
 				if pipelines, ok := got["pipelines"].([]any); !ok || len(pipelines) != 0 {
 					t.Fatal("session aggregate fabricated per-pipeline attribution")

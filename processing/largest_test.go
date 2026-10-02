@@ -27,7 +27,7 @@ func keyed(prefix string, n int, value func(i int) string) string {
 }
 
 // largest is a configuration with every rule key at its limit and every limit
-// at its largest value, enabling the most packs. With form rules, the form and
+// at its largest value. With form rules, the form and
 // the request JSON rules compile to one operation; without them, every rule
 // key compiles to operations of its own.
 func largest(form bool) string {
@@ -39,17 +39,12 @@ func largest(form bool) string {
 	if form {
 		remove += `, "form": ` + listed("f", config.MaxRuleNames)
 	}
-	var packs []string
-	for i := range config.MaxProcessingPacks {
-		packs = append(packs, fmt.Sprintf("%q", fmt.Sprintf("p%d", i)))
-	}
 	return `"remove": {` + remove + `}` +
 		`, "mask": {"headers": ` + keyed("x-m", config.MaxMaskedHeaders, value) +
 		`, "json": {"request": ` + keyed("/m", config.MaxRulePointers, value) + `, "response": ` + keyed("/m", config.MaxRulePointers, value) + `}}` +
 		`, "truncate": {"headers": ` + keyed("x-t", config.MaxTruncatedHeaders, func(i int) string { return fmt.Sprint(i + 1) }) + `}` +
-		fmt.Sprintf(`, "limits": {"output_mib": %d, "events": %d, "state_every_seconds": %d}`,
-			config.MaxOutputMiB, config.MaxEvents, config.MaxStateEverySeconds) +
-		`, "packs": [` + strings.Join(packs, ", ") + `]`
+		fmt.Sprintf(`, "limits": {"output_mib": %d, "events": %d, "state_every_seconds": %d, "workers": %d}`,
+			config.MaxOutputMiB, config.MaxEvents, config.MaxStateEverySeconds, config.MaxWorkers)
 }
 
 // The largest configuration a user can write compiles, the internal layer
@@ -61,23 +56,12 @@ func TestTheLargestConfigurationCompilesAndWrites(t *testing.T) {
 		t.Run(map[bool]string{true: "with form rules", false: "every key its own operation"}[form], func(t *testing.T) {
 			document := `{"version": "observer.config/1", "output": "/var/lib/observer", ` +
 				`"watch": [{"name": "api", "exe": "/usr/bin/php"}], ` + largest(form) + `}`
-			var packs []config.Supplied
-			for i := range config.MaxProcessingPacks {
-				// Each pack repeats one of the configuration's removals, which adds
-				// no name to any limit.
-				name := fmt.Sprintf("p%d", i)
-				packs = append(packs, config.Supplied{Name: name, Content: []byte(
-					`{"version": "observer.pack/1", "name": "` + name + `", "remove": {"headers": ["x-r0"]}}`)})
-			}
 			if len(document) > config.MaxProcessingBytes {
 				t.Fatalf("wiring, not the property: the file is %d bytes, over the budget", len(document))
 			}
-			compiled, findings := config.Compile([]byte(document), packs)
+			compiled, findings := config.Compile([]byte(document), "")
 			if len(findings) != 0 {
 				t.Fatalf("PROPERTY: the largest configuration was refused: %+v", findings)
-			}
-			if len(compiled.File.Packs) != config.MaxProcessingPacks {
-				t.Fatalf("wiring, not the property: %d packs were enabled, want %d", len(compiled.File.Packs), config.MaxProcessingPacks)
 			}
 			var slots []config.EffectiveSlot
 			for _, p := range compiled.Plan.Pipelines() {
@@ -89,7 +73,8 @@ func TestTheLargestConfigurationCompilesAndWrites(t *testing.T) {
 				t.Errorf("the rules compiled to %d operations, above the internal bound %d", len(slots), config.MaxCompiledSlots)
 			}
 			if observer := compiled.Plan.Observer(); observer.ApprovedOutputBoundMiB != config.MaxOutputMiB ||
-				observer.AdmittedEventLimit != config.MaxEvents || observer.StateEverySeconds != config.MaxStateEverySeconds {
+				observer.AdmittedEventLimit != config.MaxEvents || observer.StateEverySeconds != config.MaxStateEverySeconds ||
+				observer.Workers != config.MaxWorkers {
 				t.Errorf("the limits resolved to %+v", observer)
 			}
 			out := &outputLog{}

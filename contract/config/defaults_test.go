@@ -29,7 +29,7 @@ func TestTheObserverDefaultsAgreeWithTheObserver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode the configuration: %v", err)
 	}
-	loaded, err := observerpolicy.CompileProcessing(file, nil)
+	loaded, err := observerpolicy.CompileProcessing(file, "")
 	if err != nil {
 		t.Fatalf("wiring, not the property: the observer refused a configuration stating neither setting: %v", err)
 	}
@@ -38,5 +38,8 @@ func TestTheObserverDefaultsAgreeWithTheObserver(t *testing.T) {
 	}
 	if loaded.Settings.StateEvery != time.Duration(config.DefaultStateEverySeconds)*time.Second {
 		t.Errorf("the observer defaults the state interval to %s and the contract to %ds", loaded.Settings.StateEvery, config.DefaultStateEverySeconds)
+	}
+	if int64(loaded.Settings.Workers) != config.DefaultWorkers {
+		t.Errorf("the observer defaults the workers to %d and the contract to %d", loaded.Settings.Workers, config.DefaultWorkers)
 	}
 }

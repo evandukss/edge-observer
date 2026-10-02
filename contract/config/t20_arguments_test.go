@@ -71,7 +71,7 @@ func TestT20ArgumentRules(t *testing.T) {
 func compiled(t *testing.T, rules string) *config.ProcessingPlan {
 	t.Helper()
 	c, findings := config.Compile([]byte(`{"version": "observer.config/1", "output": "/var/lib/observer", `+
-		`"watch": [{"name": "api", "exe": "/usr/bin/php"}], `+rules+`}`), nil)
+		`"watch": [{"name": "api", "exe": "/usr/bin/php"}], `+rules+`}`), "")
 	if len(findings) > 0 {
 		t.Fatalf("wiring, not the property: the rules were refused: %+v", findings)
 	}

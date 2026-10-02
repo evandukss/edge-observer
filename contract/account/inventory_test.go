@@ -111,6 +111,30 @@ var represented = map[string]string{
 	".processing.output_failures":     "processing.aggregate.output_failures",
 	".processing.authorized":          "processing.aggregate.authorized",
 	".processing.written":             "processing.aggregate.written",
+	".processing.exchange_ids":        "processing.exchange_ids",
+
+	// An extension's name is the key of its entry.
+	".extensions[].name": "processing.extensions.*", ".extensions[].fields[]": "processing.extensions.*.fields[]",
+	".extensions[].timeout_ms": "processing.extensions.*.timeout_ms",
+	".extensions[].effects":    "processing.extensions.*.effects",
+
+	".processing.extensions[].name":                 "processing.extensions.*",
+	".processing.extensions[].considered":           "processing.extensions.*.considered",
+	".processing.extensions[].changed":              "processing.extensions.*.changed",
+	".processing.extensions[].unchanged":            "processing.extensions.*.unchanged",
+	".processing.extensions[].failed":               "processing.extensions.*.failed",
+	".processing.extensions[].pending":              "processing.extensions.*.pending",
+	".processing.extensions[].failed_by.*":          "processing.extensions.*.failed_by.*",
+	".processing.extensions[].retired_by.*":         "processing.extensions.*.retired_by.*",
+	".processing.extensions[].restarts":             "processing.extensions.*.restarts",
+	".processing.extensions[].state_resets":         "processing.extensions.*.state_resets",
+	".processing.extensions[].late":                 "processing.extensions.*.late",
+	".processing.extensions[].duplicate":            "processing.extensions.*.duplicate",
+	".processing.extensions[].derived_written":      "processing.extensions.*.derived_written",
+	".processing.extensions[].derived_bytes":        "processing.extensions.*.derived_bytes",
+	".processing.extensions[].derived_refused":      "processing.extensions.*.derived_refused",
+	".processing.extensions[].derived_refused_by.*": "processing.extensions.*.derived_refused_by.*",
+	".processing.extensions[].stderr_dropped":       "processing.extensions.*.stderr_dropped",
 
 	".seal.stopped": "seal.stopped.value", ".seal.sealed": "seal.sealed.value",
 	".seal.withdrawal.at": "seal.withdrawal.at.value", ".seal.withdrawal.instances": "seal.withdrawal.instances",
@@ -121,6 +145,7 @@ var represented = map[string]string{
 	".seal.drain.outstanding.known": "seal.drain.outstanding.state",
 	".seal.drain.outstanding.why":   "seal.drain.outstanding.why",
 	".seal.drain.complete":          "seal.drain.complete", ".seal.drain.because": "seal.drain.because",
+	".seal.counters.*":       "seal.counters.*",
 	".seal.counters.*.value": "seal.counters.*.value", ".seal.counters.*.known": "seal.counters.*.state",
 	".seal.counters.*.why":    "seal.counters.*.why",
 	".seal.interrupted.value": "seal.interrupted.value", ".seal.interrupted.known": "seal.interrupted.state",
@@ -253,7 +278,9 @@ func filled(t *testing.T, truth bool) observed.Account {
 }
 
 // leaves is every path in a JSON document that holds a value, with array
-// positions written [] and the members of the two open maps written *.
+// positions written [] and the members of the open maps written *. An open
+// map that holds a member is itself a leaf, written *, since its keys are
+// facts.
 func leaves(t *testing.T, document any, open ...string) map[string]bool {
 	t.Helper()
 	encoded, err := json.Marshal(document)
@@ -270,6 +297,9 @@ func leaves(t *testing.T, document any, open ...string) map[string]bool {
 		switch typed := value.(type) {
 		case map[string]any:
 			if slices.Contains(open, at) {
+				if len(typed) > 0 {
+					found[at+".*"] = true
+				}
 				for _, member := range typed {
 					walk(member, at+".*")
 				}
@@ -300,14 +330,17 @@ func TestEveryFactTheOperationalAccountHoldsIsCarried(t *testing.T) {
 	carried := map[string]bool{}
 	for _, truth := range []bool{true, false} {
 		account := filled(t, truth)
-		for leaf := range leaves(t, account, ".refused.reasons", ".seal.counters") {
+		for leaf := range leaves(t, account, ".refused.reasons", ".seal.counters", ".processing.extensions[].failed_by",
+			".processing.extensions[].retired_by", ".processing.extensions[].derived_refused_by") {
 			source[leaf] = true
 		}
 		projected, err := Project(account, Supplied(Records{}))
 		if err != nil {
 			t.Fatalf("projecting the filled account (truth %v): %v", truth, err)
 		}
-		for leaf := range leaves(t, projected, ".capture.refused.reasons", ".seal.counters") {
+		for leaf := range leaves(t, projected, ".capture.refused.reasons", ".seal.counters", ".processing.extensions",
+			".processing.extensions.*.failed_by", ".processing.extensions.*.retired_by",
+			".processing.extensions.*.derived_refused_by") {
 			carried[strings.TrimPrefix(leaf, ".")] = true
 		}
 	}

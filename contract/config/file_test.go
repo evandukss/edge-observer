@@ -18,14 +18,6 @@ func withRules(rules string) string {
 	return strings.Replace(minimal, `"watch"`, rules+`, "watch"`, 1)
 }
 
-func pack(name, rules string) Supplied {
-	body := fmt.Sprintf(`{"version": "observer.pack/1", "name": %q`, name)
-	if rules != "" {
-		body += ", " + rules
-	}
-	return Supplied{Name: name, Content: []byte(body + "}")}
-}
-
 // refused asserts one finding with this document, subject and reason, and
 // returns it.
 func refused(t *testing.T, findings []Finding, document, subject string, reason Reason) Finding {
@@ -39,9 +31,9 @@ func refused(t *testing.T, findings []Finding, document, subject string, reason 
 	return Finding{}
 }
 
-func compiles(t *testing.T, configuration string, packs ...Supplied) *Compiled {
+func compiles(t *testing.T, configuration string) *Compiled {
 	t.Helper()
-	compiled, findings := Compile([]byte(configuration), packs)
+	compiled, findings := Compile([]byte(configuration), "")
 	if len(findings) > 0 || compiled == nil {
 		t.Fatalf("refused: %+v", findings)
 	}
@@ -67,22 +59,10 @@ func implementations(slots []EffectiveSlot) []string {
 	return out
 }
 
-func TestEachDocumentIsRefusedAtAnotherVersionNamingItsOwn(t *testing.T) {
+func TestTheConfigurationIsRefusedAtAnotherVersionNamingItsOwn(t *testing.T) {
 	_, findings := ReadFile([]byte(`{"version": "observer.config/draft", "output": "/x", "watch": []}`))
 	if f := refused(t, findings, "configuration", "version", UnknownVersion); !strings.Contains(f.Detail, FileVersion) {
 		t.Errorf("the refusal does not name %s: %s", FileVersion, f.Detail)
-	}
-	_, findings = ReadFile([]byte(`{"version": "observer.pack/1", "name": "credentials"}`))
-	if f := refused(t, findings, "configuration", "version", UnknownVersion); !strings.Contains(f.Detail, "a pack") {
-		t.Errorf("a pack given as a configuration is not named as a pack: %s", f.Detail)
-	}
-	_, findings = ReadPack(Supplied{Name: "p", Content: []byte(`{"version": "observer.pack/draft", "name": "p"}`)})
-	if f := refused(t, findings, "pack:p", "version", UnknownVersion); !strings.Contains(f.Detail, PackVersion) {
-		t.Errorf("the refusal does not name %s: %s", PackVersion, f.Detail)
-	}
-	_, findings = ReadPack(Supplied{Name: "p", Content: []byte(minimal)})
-	if f := refused(t, findings, "pack:p", "version", UnknownVersion); !strings.Contains(f.Detail, "a configuration") {
-		t.Errorf("a configuration given as a pack is not named as a configuration: %s", f.Detail)
 	}
 }
 
@@ -106,6 +86,12 @@ func TestTheReaderIsStrictAndNamesTheKey(t *testing.T) {
 		{"a bad pointer", withRules(`"remove": {"json": {"request": ["card"]}}`), "remove.json.request[0]", InvalidValue},
 		{"a truncation too long", withRules(`"truncate": {"headers": {"x-trace-id": 4097}}`), "truncate.headers.x-trace-id", InvalidValue},
 		{"a limit of zero", withRules(`"limits": {"events": 0}`), "limits.events", InvalidValue},
+		{"no workers", withRules(`"limits": {"workers": 0}`), "limits.workers", InvalidValue},
+		{"more workers than the bound", withRules(fmt.Sprintf(`"limits": {"workers": %d}`, MaxWorkers+1)),
+			"limits.workers", InvalidValue},
+		// packs is not a key of this format: refused by name, never read and
+		// never ignored.
+		{"packs", withRules(`"packs": ["credentials"]`), "packs", UnknownKey},
 	} {
 		t.Run(one.name, func(t *testing.T) {
 			_, findings := ReadFile([]byte(one.content))
@@ -125,7 +111,8 @@ func TestAbsentKeysResolveToTheirDefaults(t *testing.T) {
 		t.Fatal(findings)
 	}
 	if file.Log != LogStdout || !file.WriteContent || file.Watch[0].Children != ChildrenAll ||
-		file.Limits != (Limits{DefaultApprovedOutputBoundMiB, DefaultAdmittedEventLimit, DefaultStateEverySeconds}) {
+		file.Limits != (Limits{DefaultApprovedOutputBoundMiB, DefaultAdmittedEventLimit, DefaultStateEverySeconds,
+			DefaultWorkers}) || file.Extensions != nil {
 		t.Errorf("defaults: %+v", file)
 	}
 }
@@ -142,23 +129,20 @@ func TestTheContractExampleCompilesInTheFixedOrder(t *testing.T) {
 	    "bodies": [], "body_values": []},
 	  "mask": {"headers": {"x-api-key": "withheld"}, "json": {"response": {"/email": "withheld"}}},
 	  "truncate": {"headers": {"x-trace-id": 8}},
-	  "limits": {"output_mib": 64, "events": 16384, "state_every_seconds": 30},
-	  "packs": ["credentials"]}`,
-		pack("credentials", `"remove": {"headers": ["authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key"]}`))
+	  "limits": {"output_mib": 64, "events": 16384, "state_every_seconds": 30, "workers": 1}}`)
 	want := []string{RemoveHeaders, RemoveQueryParameters, RequestBodyFields, RemoveJSONFields, ReplaceHeaderValues,
 		ReplaceJSONValues, TruncateHeaderValues}
 	if got := implementations(exchangeSlots(t, c)); !slices.Equal(got, want) {
 		t.Errorf("operations %v, want %v", got, want)
 	}
-	if got := exchangeSlots(t, c)[0].Arguments.Headers; !slices.Equal(got,
-		[]string{"authorization", "cookie", "proxy-authorization", "set-cookie", "x-api-key"}) {
+	if got := exchangeSlots(t, c)[0].Arguments.Headers; !slices.Equal(got, []string{"authorization", "cookie"}) {
 		t.Errorf("removed headers %v", got)
 	}
 	var fields []string
 	for _, e := range c.Plan.Exclusions() {
 		fields = append(fields, e.Field)
 	}
-	for _, field := range []string{"message.headers.x-api-key", "message.query.token", "message.form.card_number",
+	for _, field := range []string{"message.headers.cookie", "message.query.token", "message.form.card_number",
 		"message.body.json/card/number", "message.body.json/items/*/pan"} {
 		if !slices.Contains(fields, field) {
 			t.Errorf("no exclusion of %s among %v", field, fields)
@@ -183,27 +167,25 @@ func TestWriteContentFalseWritesConnectionsOnly(t *testing.T) {
 
 // Removal wins over every other rule and is never a conflict.
 func TestRemovalWinsAndIsNeverAConflict(t *testing.T) {
-	compiles(t, withRules(`"remove": {"headers": ["x-api-key"]}, "packs": ["masking"]`),
-		pack("masking", `"mask": {"headers": {"x-api-key": "withheld"}}`))
+	compiles(t, withRules(`"remove": {"headers": ["x-api-key"]}, "mask": {"headers": {"X-Api-Key": "withheld"}}`))
 	compiles(t, withRules(`"remove": {"json": {"response": ["/card"]}}, "mask": {"json": {"response": {"/card/number": "a"}}}`))
 	compiles(t, withRules(`"remove": {"headers": ["x-a"]}, "mask": {"headers": {"x-a": "v"}}, "truncate": {"headers": {"x-a": 4}}`))
 }
 
 func TestTwoRulesKeepingDifferentValuesForOneFieldAreRefused(t *testing.T) {
-	_, findings := Compile([]byte(withRules(`"mask": {"headers": {"x-a": "one"}}, "packs": ["other"]`)),
-		[]Supplied{pack("other", `"mask": {"headers": {"X-A": "two"}}`)})
-	if f := refused(t, findings, "pack:other", "mask.headers.X-A", RuleConflict); !strings.Contains(f.Detail, "configuration mask.headers.x-a") {
-		t.Errorf("the refusal does not name the other document and key: %s", f.Detail)
+	// One header written in two cases is one field.
+	_, findings := Compile([]byte(withRules(`"mask": {"headers": {"x-a": "one", "X-A": "two"}}`)), "")
+	if f := refused(t, findings, "configuration", "mask.headers.X-A", RuleConflict); !strings.Contains(f.Detail, "configuration mask.headers.x-a") {
+		t.Errorf("the refusal does not name the other key: %s", f.Detail)
 	}
-	_, findings = Compile([]byte(withRules(`"mask": {"headers": {"x-a": "v"}}, "truncate": {"headers": {"x-a": 4}}`)), nil)
+	_, findings = Compile([]byte(withRules(`"mask": {"headers": {"x-a": "v"}}, "truncate": {"headers": {"x-a": 4}}`)), "")
 	refused(t, findings, "configuration", "truncate.headers.x-a", RuleConflict)
-	_, findings = Compile([]byte(withRules(`"truncate": {"headers": {"x-a": 4}}, "packs": ["p"]`)),
-		[]Supplied{pack("p", `"truncate": {"headers": {"x-a": 8}}`)})
-	refused(t, findings, "pack:p", "truncate.headers.x-a", RuleConflict)
-	_, findings = Compile([]byte(withRules(`"mask": {"json": {"response": {"/card": "a", "/Card/*": "b"}}}`)), nil)
+	_, findings = Compile([]byte(withRules(`"truncate": {"headers": {"x-a": 4, "X-A": 8}}`)), "")
+	refused(t, findings, "configuration", "truncate.headers.X-A", RuleConflict)
+	_, findings = Compile([]byte(withRules(`"mask": {"json": {"response": {"/card": "a", "/Card/*": "b"}}}`)), "")
 	refused(t, findings, "configuration", "mask.json.response./Card/*", RuleConflict)
 	// The same value twice is one rule, not a conflict.
-	compiles(t, withRules(`"mask": {"headers": {"x-a": "v"}}, "packs": ["p"]`), pack("p", `"mask": {"headers": {"X-A": "v"}}`))
+	compiles(t, withRules(`"mask": {"headers": {"x-a": "v", "X-A": "v"}}`))
 }
 
 func TestOneOperationPastItsLimitIsRefusedInTheUsersTerms(t *testing.T) {
@@ -212,9 +194,8 @@ func TestOneOperationPastItsLimitIsRefusedInTheUsersTerms(t *testing.T) {
 		names = append(names, fmt.Sprintf("%q", fmt.Sprintf("p%d", i)))
 	}
 	compiles(t, withRules(`"remove": {"query": [`+strings.Join(names, ", ")+`]}`))
-	_, findings := Compile([]byte(withRules(`"remove": {"query": [`+strings.Join(names, ", ")+`]}, "packs": ["more"]`)),
-		[]Supplied{pack("more", `"remove": {"query": ["p0", "extra"]}`)})
-	refused(t, findings, "pack:more", "remove.query[1]", LimitExceeded)
+	_, findings := Compile([]byte(withRules(`"remove": {"query": [`+strings.Join(names, ", ")+`, "p0", "extra"]}`)), "")
+	refused(t, findings, "configuration", fmt.Sprintf("remove.query[%d]", MaxRuleNames+1), LimitExceeded)
 }
 
 func TestFormAndRequestJSONRulesCompileToTheOneRequestBodyOperation(t *testing.T) {
@@ -249,7 +230,7 @@ func TestAPlanThatDoesNotEnforceAWrittenRemovalFailsClosed(t *testing.T) {
 }
 
 // Reload applies a file that only adds a watch entry: the revision binds the
-// rules, write_content and the packs, and not the watch list.
+// rules, write_content and the extensions, and not the watch list or a limit.
 func TestTheProcessingRevisionBindsTheRulesAndNotTheWatchList(t *testing.T) {
 	base := compiles(t, withRules(`"mask": {"headers": {"x-a": "v"}}`))
 	added := compiles(t, strings.Replace(withRules(`"mask": {"headers": {"x-a": "v"}}`), `"watch": [`,
@@ -261,27 +242,36 @@ func TestTheProcessingRevisionBindsTheRulesAndNotTheWatchList(t *testing.T) {
 	if base.ProcessingRevision == changed.ProcessingRevision {
 		t.Errorf("changing a mask value kept the processing revision")
 	}
-	packed := compiles(t, withRules(`"packs": ["p"]`), pack("p", `"remove": {"headers": ["a"]}`))
-	repacked := compiles(t, withRules(`"packs": ["p"]`), pack("p", `"remove": {"headers": ["b"]}`))
-	if packed.ProcessingRevision == repacked.ProcessingRevision {
-		t.Errorf("changing a pack's bytes kept the processing revision")
+	workers := compiles(t, withRules(`"mask": {"headers": {"x-a": "v"}}, "limits": {"workers": 4}`))
+	if base.ProcessingRevision != workers.ProcessingRevision {
+		t.Errorf("changing limits.workers changed the processing revision")
 	}
-}
 
-func TestAPackIsReadUnderTheNameItIsEnabledBy(t *testing.T) {
-	_, findings := Compile([]byte(withRules(`"packs": ["credentials"]`)), nil)
-	refused(t, findings, "configuration", "packs[0]", UnknownPack)
-	_, findings = Compile([]byte(withRules(`"packs": ["credentials"]`)),
-		[]Supplied{{Name: "credentials", Content: []byte(`{"version": "observer.pack/1", "name": "other"}`)}})
-	refused(t, findings, "pack:credentials", "name", PackNameMismatch)
+	directory := t.TempDir()
+	executable(t, directory, "inventory")
+	entry := func(timeout int) string {
+		return fmt.Sprintf(`"extensions": [{"name": "inventory", "command": ["./inventory"], `+
+			`"fields": ["request.line"], "timeout_ms": %d}]`, timeout)
+	}
+	extended, findings := Compile([]byte(withRules(entry(100))), directory)
+	retimed, findings2 := Compile([]byte(withRules(entry(200))), directory)
+	if len(findings) != 0 || len(findings2) != 0 {
+		t.Fatalf("wiring, not the property: an extension entry was refused: %+v %+v", findings, findings2)
+	}
+	plain := compiles(t, minimal)
+	if extended.ProcessingRevision == plain.ProcessingRevision {
+		t.Errorf("adding an extension kept the processing revision")
+	}
+	if extended.ProcessingRevision == retimed.ProcessingRevision {
+		t.Errorf("changing an extension's timeout_ms kept the processing revision")
+	}
 }
 
 // reasons is every reason the reader and the compiler give, as CONFIG.md's
 // Refusals table lists them.
 var reasons = []Reason{
 	UnknownVersion, Malformed, UnknownKey, DuplicateKey, WrongType, TrailingContent, MissingKey, InvalidValue,
-	LimitExceeded, DuplicateName, RuleConflict, UnknownPack, ConfigurationTooLarge, PackNameInvalid,
-	PackNameMismatch, InternalDefect,
+	LimitExceeded, DuplicateName, RuleConflict, ConfigurationTooLarge, CommandNotExecutable, InternalDefect,
 }
 
 // CONFIG.md's Refusals table and the reasons the reader and the compiler

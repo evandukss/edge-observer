@@ -142,7 +142,7 @@ func p3t9ActivationCompiled(t *testing.T, peer process.Process) policy.Policy {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := policy.CompileProcessing(raw, nil)
+	p, err := policy.CompileProcessing(raw, "")
 	if err != nil || p.Processing == nil {
 		t.Fatalf("valid protected policy unavailable: %v", err)
 	}

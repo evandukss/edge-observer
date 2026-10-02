@@ -60,9 +60,9 @@ func watching(name string, match map[string]any, children string) map[string]any
 	return entry
 }
 
-func compiled(t *testing.T, document map[string]any, packs ...config.Supplied) policy.Policy {
+func compiled(t *testing.T, document map[string]any) policy.Policy {
 	t.Helper()
-	read, err := policy.CompileProcessing([]byte(encoded(t, document)), packs)
+	read, err := policy.CompileProcessing([]byte(encoded(t, document)), "")
 	if err != nil || read.Processing == nil {
 		t.Fatalf("refused: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestTheNoRulesExampleIsRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the no-rules example: %v", err)
 	}
-	read, err := policy.CompileProcessing(content, nil)
+	read, err := policy.CompileProcessing(content, "")
 	if err != nil {
 		t.Fatalf("the contract's no-rules example is refused: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestAKeyInAnotherCaseIsRefused(t *testing.T) {
 			if content == base {
 				t.Fatal("wiring, not the property: the replacement changed nothing, so the case reads the example")
 			}
-			_, err := policy.CompileProcessing([]byte(content), nil)
+			_, err := policy.CompileProcessing([]byte(content), "")
 			var refused *policy.Refused
 			if !errors.As(err, &refused) {
 				t.Fatalf("answered %v, want the reader's refusal", err)
@@ -266,7 +266,7 @@ func TestAFileThatSaysSomethingElseIsRefused(t *testing.T) {
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := policy.CompileProcessing([]byte(content(example(t))), nil)
+			_, err := policy.CompileProcessing([]byte(content(example(t))), "")
 			var refused *policy.Refused
 			if !errors.As(err, &refused) {
 				t.Fatalf("answered %v, want the reader's refusal", err)

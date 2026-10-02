@@ -1,17 +1,14 @@
 package account
 
 import (
-	"encoding/json"
 	"io/fs"
 )
 
-// Manifest is a bundle's bundle.json: the session it is of, every member, and
-// the extension schemas the bundle carries.
+// Manifest is a bundle's bundle.json: the session it is of and every member.
 type Manifest struct {
 	Bundle  string   `json:"bundle"`
 	Session string   `json:"session"`
 	Members []Member `json:"members"`
-	Schemas []Schema `json:"schemas"`
 }
 
 // Member is one file of a bundle, by a path relative to the bundle's root.
@@ -20,12 +17,6 @@ type Member struct {
 	Path     string `json:"path"`
 	Contract string `json:"contract"`
 	SHA256   string `json:"sha256"`
-}
-
-// Schema is one extension schema a bundle carries, by id and path.
-type Schema struct {
-	ID   string `json:"id"`
-	Path string `json:"path"`
 }
 
 // The member roles. Every one is required, and a bundle carries each once.
@@ -43,29 +34,13 @@ var (
 	RecordRoles = []string{RoleObservations, RoleConnections, RoleReconstructions, RoleReassembly}
 )
 
-// ExtensionChecker checks one extension's content against the schema it names.
-// It returns every problem it found, and none for content that conforms.
-type ExtensionChecker func(content json.RawMessage) []string
-
-// Options is what a validation has beyond the bundle: the extension schemas it
-// can execute, by schema id. A schema id not here is not checked, whatever the
-// bundle carries.
-type Options struct {
-	Extensions map[string]ExtensionChecker
-}
-
 // Outcome is where a validation ended.
 type Outcome string
 
 const (
 	// Refused is a bundle that is not a conforming bundle; Findings say why.
 	Refused Outcome = "refused"
-	// CoreValidatedExtensionNotChecked is a bundle whose core envelope
-	// validated and at least one of whose extension sections was not checked.
-	// It is not Validated: nothing is said about the unchecked sections.
-	CoreValidatedExtensionNotChecked Outcome = "core_validated_extension_not_checked"
-	// Validated is a bundle whose core envelope validated and every extension
-	// section of which was checked and conforms, including a bundle with none.
+	// Validated is a bundle whose core envelope validated.
 	Validated Outcome = "validated"
 )
 
@@ -75,12 +50,9 @@ type Extent string
 const (
 	// ExtentNone is nothing vouched for: the bundle was refused.
 	ExtentNone Extent = "none"
-	// ExtentCoreEnvelope is the manifest, the account's core blocks, the record
-	// members and their binding to the session, and not every extension.
+	// ExtentCoreEnvelope is the manifest, the account, the record members and
+	// their binding to the session.
 	ExtentCoreEnvelope Extent = "core_envelope"
-	// ExtentCoreEnvelopeAndExtensions is the core envelope and every extension
-	// section the account carries.
-	ExtentCoreEnvelopeAndExtensions Extent = "core_envelope_and_extensions"
 )
 
 // Reason is why a finding was made.
@@ -126,17 +98,11 @@ const (
 	// with a capture it has not reached, or a planned one carrying a seal.
 	BlockStateNotPermitted Reason = "block_state_not_permitted"
 	// MemberNotInContract is a member the contract does not name, wherever it
-	// appears outside an extension's content.
+	// appears.
 	MemberNotInContract Reason = "member_not_in_contract"
 	// AccountNotSealed is an account in a bundle that is not sealed. A bundle
 	// is of a session that ended.
 	AccountNotSealed Reason = "account_not_sealed"
-	// ExtensionNamespaceInvalid is a namespace that is not a lower-case dotted
-	// name, or one that names a core block.
-	ExtensionNamespaceInvalid Reason = "extension_namespace_invalid"
-	// ExtensionInvalid is an extension section whose schema was executed and
-	// which does not conform to it.
-	ExtensionInvalid Reason = "extension_invalid"
 )
 
 // Record reasons: the record members.
@@ -170,8 +136,7 @@ var (
 	}
 	AccountReasons = []Reason{
 		AccountMalformed, UnknownAccountVersion, RequiredBlockAbsent, RequiredMemberAbsent, ValueNotInContract,
-		UnknownBlockState, BlockStateNotPermitted, MemberNotInContract, AccountNotSealed, ExtensionNamespaceInvalid,
-		ExtensionInvalid,
+		UnknownBlockState, BlockStateNotPermitted, MemberNotInContract, AccountNotSealed,
 	}
 	RecordReasons  = []Reason{RecordMalformed, UnknownRecordVersion, RecordKindMismatch}
 	SessionReasons = []Reason{SessionMismatch, SessionBindingUnavailable, MemberNotOfSession, MemberCountDisagrees}
@@ -189,34 +154,6 @@ type Finding struct {
 	Detail string `json:"detail"`
 }
 
-// ExtensionState is what became of one extension section.
-type ExtensionState string
-
-const (
-	ExtensionConforms ExtensionState = "conforms"
-	// ExtensionNotChecked is a section whose schema could not be executed.
-	ExtensionNotChecked    ExtensionState = "not_checked"
-	ExtensionNonconforming ExtensionState = "nonconforming"
-)
-
-// Why an extension section was not checked.
-const (
-	// SchemaUnavailable is a schema id neither the bundle nor the validator
-	// has.
-	SchemaUnavailable = "schema_unavailable"
-	// SchemaNotExecutable is a schema the bundle carries and nothing here can
-	// execute.
-	SchemaNotExecutable = "schema_not_executable"
-)
-
-// ExtensionResult is one extension section's result.
-type ExtensionResult struct {
-	Namespace string         `json:"namespace"`
-	Schema    string         `json:"schema"`
-	State     ExtensionState `json:"state"`
-	Why       string         `json:"why,omitempty"`
-}
-
 // Examined is how much a validation looked at, so a result can be told from one
 // that looked at nothing.
 type Examined struct {
@@ -228,22 +165,19 @@ type Examined struct {
 // Result is one validation's outcome. Findings is empty unless the outcome is
 // Refused.
 type Result struct {
-	Outcome    Outcome           `json:"outcome"`
-	Validated  Extent            `json:"validated"`
-	Session    string            `json:"session,omitempty"`
-	Findings   []Finding         `json:"findings"`
-	Extensions []ExtensionResult `json:"extensions"`
-	Examined   Examined          `json:"examined"`
+	Outcome   Outcome   `json:"outcome"`
+	Validated Extent    `json:"validated"`
+	Session   string    `json:"session,omitempty"`
+	Findings  []Finding `json:"findings"`
+	Examined  Examined  `json:"examined"`
 }
 
 // Validate reads a bundle offline: the manifest, every member it names, the
 // account's core blocks, the records, and whether they are of one session. It
 // resolves every reference inside bundle and nowhere else, so a bundle copied to
 // another path or another host validates the same.
-func Validate(bundle fs.FS, options Options) Result {
-	v := &validation{bundle: bundle, options: options, result: Result{
-		Outcome: Refused, Validated: ExtentNone, Findings: []Finding{}, Extensions: []ExtensionResult{},
-	}}
+func Validate(bundle fs.FS) Result {
+	v := &validation{bundle: bundle, result: Result{Outcome: Refused, Validated: ExtentNone, Findings: []Finding{}}}
 	v.run()
 	return v.result
 }

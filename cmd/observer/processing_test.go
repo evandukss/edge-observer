@@ -63,6 +63,25 @@ type processingControllerFixture struct {
 
 func processingController(t *testing.T, beforeAuthorize ...func()) *processingControllerFixture {
 	t.Helper()
+	setup := controllerSetup{events: 100}
+	if len(beforeAuthorize) != 0 {
+		setup.beforeAuthorize = beforeAuthorize[0]
+	}
+	return processingControllerWith(t, setup)
+}
+
+// controllerSetup is what a controller fixture varies: limits.workers (zero
+// leaves the example's), the event allowance, and the processing and gate
+// seams.
+type controllerSetup struct {
+	workers         int
+	events          uint64
+	taken           func(worker int, process fragment.Process, connection fragment.ConnectionID)
+	beforeAuthorize func()
+}
+
+func processingControllerWith(t *testing.T, setup controllerSetup) *processingControllerFixture {
+	t.Helper()
 	raw, err := config.Examples.ReadFile("examples/no-rules.config.json")
 	if err != nil {
 		t.Fatal(err)
@@ -72,6 +91,9 @@ func processingController(t *testing.T, beforeAuthorize ...func()) *processingCo
 		t.Fatal(err)
 	}
 	document["remove"] = map[string]any{"headers": []string{"authorization"}}
+	if setup.workers != 0 {
+		document["limits"].(map[string]any)["workers"] = setup.workers
+	}
 	raw, err = json.Marshal(document)
 	if err != nil {
 		t.Fatal(err)
@@ -83,14 +105,11 @@ func processingController(t *testing.T, beforeAuthorize ...func()) *processingCo
 	if err != nil {
 		t.Fatal(err)
 	}
-	recording, store, err := recordingIntake(100)
+	recording, store, err := recordingIntake(setup.events)
 	if err != nil {
 		t.Fatal(err)
 	}
-	options := probe.DeliveryGateOptions{MaxEvents: 100, StorageExhausted: output.Exhausted()}
-	if len(beforeAuthorize) != 0 {
-		options.BeforeAuthorize = beforeAuthorize[0]
-	}
+	options := probe.DeliveryGateOptions{MaxEvents: setup.events, StorageExhausted: output.Exhausted(), BeforeAuthorize: setup.beforeAuthorize}
 	gate, err := probe.NewDeliveryGate(options)
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +117,7 @@ func processingController(t *testing.T, beforeAuthorize ...func()) *processingCo
 	f := &processingControllerFixture{stop: make(chan os.Signal, 1), done: make(chan struct{})}
 	f.producer = &processingProducer{withdrawn: true, drained: true, stamp: &f.stamp}
 	f.d = &daemon{policy: read, session: "integration", directory: directory, capture: recording,
-		intake: store, gate: gate, output: output, storageExhausted: output.Exhausted(), attached: f.producer,
+		intake: store, gate: gate, output: output, storageExhausted: output.Exhausted(), attached: f.producer, processingTaken: setup.taken,
 		plan: account.Account{Version: account.Version, Session: "integration", Policy: account.Policy{Revision: read.Revision, Generation: 1}},
 	}
 	go func() {

@@ -35,7 +35,6 @@ const (
 	RequestBodyFields = "request-body-fields"
 
 	MaxProcessingBytes  = 256 * 1024
-	MaxProcessingPacks  = 8
 	MaxHeaderNames      = 32
 	MaxHeaderValueBytes = 4096
 
@@ -116,6 +115,7 @@ type ProcessingPlan struct {
 	resolved   Resolved
 	routes     []DurableRoute
 	exclusions []Exclusion
+	extensions []Extension
 }
 
 // DurableRoute identifies a final pipeline output and its configured sink.
@@ -132,7 +132,7 @@ type DurableRoute struct {
 // truncation or a replacement is not removal. Field is one of the exclusion
 // field forms; Header is the lowercase name when Field is a header field, and
 // empty otherwise. Header names include trailer occurrences, repeats and case
-// variants. Every remove entry of the configuration and its packs is one.
+// variants. Every remove entry of the configuration is one.
 type Exclusion struct {
 	Declaration string `json:"declaration"`
 	Field       string `json:"field"`
@@ -174,3 +174,14 @@ func (p *ProcessingPlan) Exclusions() []Exclusion { return slices.Clone(p.exclus
 
 // Observer returns the fully defaulted settings.
 func (p *ProcessingPlan) Observer() ResolvedObserver { return p.resolved.Observer }
+
+// Extensions returns the extensions in the order they run, each command's
+// executable resolved to an absolute path.
+func (p *ProcessingPlan) Extensions() []Extension {
+	extensions := slices.Clone(p.extensions)
+	for i := range extensions {
+		extensions[i].Command = slices.Clone(extensions[i].Command)
+		extensions[i].Fields = slices.Clone(extensions[i].Fields)
+	}
+	return extensions
+}

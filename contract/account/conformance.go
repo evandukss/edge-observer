@@ -74,10 +74,10 @@ type Agreement struct {
 // session ran under, and the acceptance specification's documents - and checks
 // that the record, account, configuration and acceptance contracts line up
 // across it (ACCOUNT.md, Agreement across the contracts).
-func CheckAgreement(tree fs.FS, options Options) Agreement {
+func CheckAgreement(tree fs.FS) Agreement {
 	a := &agreement{tree: tree, result: Agreement{Outcome: Disagree, Checked: []string{}, Findings: []Finding{},
 		References: map[string]int{}}}
-	a.run(options)
+	a.run()
 	if len(a.result.Findings) == 0 {
 		a.result.Outcome = Agree
 	}
@@ -96,13 +96,13 @@ func (a *agreement) find(member, at string, reason Reason, format string, args .
 		Detail: fmt.Sprintf(format, args...)})
 }
 
-func (a *agreement) run(options Options) {
+func (a *agreement) run() {
 	bundle, err := fs.Sub(a.tree, ConformanceBundle)
 	if err != nil {
 		a.find(ConformanceBundle, "", BundleNotValidated, "%v", err)
 		return
 	}
-	validated := Validate(bundle, options)
+	validated := Validate(bundle)
 	a.result.Checked = append(a.result.Checked, "bundle")
 	if validated.Outcome == Refused {
 		for _, finding := range validated.Findings {
@@ -129,11 +129,11 @@ func (a *agreement) run(options Options) {
 }
 
 // configurationCheck reads the tree's configuration with the configuration
-// reader, as the observer reads it. A configuration that enables packs is
-// refused here, since the tree holds none of them.
+// reader, as the observer reads it, apart from looking for its extensions'
+// commands, which are on the host that ran the session and not here.
 func (a *agreement) configurationCheck() {
 	a.result.Checked = append(a.result.Checked, "configuration")
-	_, findings := config.Compile(a.configuration, nil)
+	findings := config.CheckDocument(a.configuration)
 	for _, finding := range findings {
 		a.find(ConformanceConfiguration, finding.Subject, ConfigurationRefused, "%s %s: %s", finding.Document,
 			finding.Reason, finding.Detail)

@@ -6,7 +6,8 @@ document is the contract and the Go types in this directory encode it. Where the
 document is corrected first.
 
 These are the records the observer PRODUCES about what it captured. They are domain-neutral: nothing here
-names a business operation or a privacy rule, and a field that only a domain reader needs belongs to a pack.
+names a business operation or a privacy rule, and a field that only a domain reader needs belongs to an
+extension's derived records, never to these.
 
 | Record | One per | Built from |
 |---|---|---|

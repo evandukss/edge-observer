@@ -16,7 +16,6 @@ contract's version changes:
     observer.account/2-draft     the account
     observer.bundle/1-draft      the bundle
     observer.config/1            the configuration
-    observer.pack/1              the pack
 
 ## What is graded
 
@@ -28,8 +27,7 @@ FROM OBSERVATION FAILURES.
 the associated process, connection and failure evidence, and states where its own observation was incomplete.
 Business semantics, root-cause diagnosis, throughput and privacy adequacy are not graded.
 
-**Extension portability is a separate acceptance test and does not substitute for any row here.** This
-version grades the observer with no pack and no extension.
+This version grades the observer with no extension configured.
 
 ## Terms
 

@@ -22,7 +22,7 @@ var ErrNoArtifacts = errors.New("approved artifact contains no records")
 
 // ReadArtifacts visits the complete LF-terminated records in ArtifactName in
 // file order. It reads only that file through session; it never opens a raw
-// spool, configuration, pack, socket or running process. PolicyRevision and
+// spool, configuration, socket or running process. PolicyRevision and
 // Route are capture-time facts, not instructions to execute local policy.
 //
 // A missing file preserves errors.Is(err, fs.ErrNotExist). An empty file returns

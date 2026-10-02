@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -406,6 +407,10 @@ type activation struct {
 	Follows         *follows           `json:"follows,omitempty"`
 	PayloadPosture  *protected.Posture `json:"payload_posture,omitempty"`
 	MemoryAssurance string             `json:"memory_assurance,omitempty"`
+	// Extensions is every configured extension, each labelled
+	// extension-declared and not observer-enforced, written before any data
+	// reaches one.
+	Extensions []account.Extension `json:"extensions"`
 }
 
 func activated(session string, pid int, at time.Time, a account.Account, posture protected.Posture) activation {
@@ -417,6 +422,7 @@ func activated(session string, pid int, at time.Time, a account.Account, posture
 		Record: "activation-completed", Version: recordVersion, Session: session, PID: pid, At: at,
 		Policy: a.Policy, Features: features{Requested: a.Build, Available: available},
 		Capture: a.Capturing, Coverage: coverageOf(a), PayloadPosture: &posture,
+		Extensions: slices.Clone(a.Extensions),
 	}
 }
 

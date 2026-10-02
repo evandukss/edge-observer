@@ -11,7 +11,7 @@ import (
 func TestApprovedOutputAllowanceReachesProcessingPlan(t *testing.T) {
 	document := processingDocument(t)
 	member(document, "limits")["output_mib"] = 13
-	read, err := policy.CompileProcessing([]byte(encoded(t, document)), nil)
+	read, err := policy.CompileProcessing([]byte(encoded(t, document)), "")
 	if err != nil {
 		t.Fatalf("approved output allowance refused: %v", err)
 	}
@@ -34,11 +34,11 @@ func TestApprovedOutputAllowanceReachesProcessingPlan(t *testing.T) {
 func TestRetiredSpoolAllowanceCannotLookConfigured(t *testing.T) {
 	document := processingDocument(t)
 	limits := member(document, "limits")
-	if read, err := policy.CompileProcessing([]byte(encoded(t, document)), nil); err != nil || read.Processing == nil {
+	if read, err := policy.CompileProcessing([]byte(encoded(t, document)), ""); err != nil || read.Processing == nil {
 		t.Fatalf("neighbour with output default did not compile: %v", err)
 	}
 	limits["spool_bound_mib"] = 13
-	read, err := policy.CompileProcessing([]byte(encoded(t, document)), nil)
+	read, err := policy.CompileProcessing([]byte(encoded(t, document)), "")
 	if err == nil || read.Processing != nil || !strings.Contains(err.Error(), "spool_bound_mib") {
 		t.Fatalf("retired key did not refuse by name: plan=%v error=%v", read.Processing, err)
 	}

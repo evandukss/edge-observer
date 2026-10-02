@@ -3,24 +3,29 @@ package main
 import (
 	"context"
 	"errors"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/evandukss/edge-observer/account"
+	"github.com/evandukss/edge-observer/extension"
 	"github.com/evandukss/edge-observer/processing"
 )
 
-// processingEvery is the cadence for taking newly queued volatile records.
-// It is neither a batch-completeness test nor a finalization deadline.
+// processingEvery is the cadence for routing newly queued volatile records to
+// the workers. It is neither a batch-completeness test nor a finalization
+// deadline.
 const processingEvery = 10 * time.Millisecond
 
-// processingRun has one worker owner, separate from the controller selecting
-// withdrawal signals. No controller lock is held through parsing or writing.
-// A snapshot copies the ruled facts from the last returned outcome; it never
-// waits on writer I/O. Cleanup state and errors remain private to this owner.
+// processingRun is the intake's one owner: a goroutine, separate from the
+// controller selecting withdrawal signals, that routes the intake's entries to
+// limits.workers workers and finishes them. No controller lock is held through
+// parsing or writing. A snapshot reads the workers' last returned outcomes; it
+// never waits on writer I/O. Cleanup state and errors remain private to this
+// owner.
 type processingRun struct {
+	run      *processing.Run
 	mutex    sync.Mutex
-	outcome  processing.Outcome
 	finished bool
 	err      error
 	failed   chan struct{}
@@ -28,9 +33,10 @@ type processingRun struct {
 	done     chan struct{}
 }
 
-// startProcessing fixes the worker's inputs before serving any control request.
+// startProcessing fixes the workers' inputs before serving any control request.
 // begin already fixed this plan, revision, intake, gate and writer before
-// admission. Reload cannot replace the processing plan during this session.
+// admission. Reload cannot replace the processing plan or the worker count
+// during this session.
 func (d *daemon) startProcessing() <-chan struct{} {
 	if d.processing != nil {
 		return d.processing.failed
@@ -40,63 +46,64 @@ func (d *daemon) startProcessing() <-chan struct{} {
 		// begin requires that owner before constructing its delivery gate.
 		return nil
 	}
+	// Extensions start here, after the capabilities were given up and after
+	// the activation record listing them was written, so none receives data
+	// before that record exists.
 	opts := processing.Options{Plan: d.policy.Processing, PolicyRevision: d.policy.ProcessingRevision,
-		Intake: d.intake, Gate: d.gate, Output: d.output}
+		Intake: d.intake, Gate: d.gate, Output: d.output, Workers: d.policy.Settings.Workers, Taken: d.processingTaken,
+		Session: d.session, Derived: d.output, Supervision: d.extensionLogged}
 	r := &processingRun{
 		failed: make(chan struct{}), final: make(chan processing.Finalization, 1), done: make(chan struct{}),
 	}
+	r.run, r.err = processing.Start(opts)
 	d.processing = r
-	go r.run(opts, d.output)
+	go r.serve(d.output)
 	return r.failed
 }
 
-func (r *processingRun) run(opts processing.Options, output *processing.Writer) {
+func (r *processingRun) serve(output *processing.Writer) {
 	defer close(r.done)
-	worker, err := processing.New(opts)
-	if worker != nil {
-		defer func() { _ = worker.Close() }()
+	if r.run != nil {
+		defer func() { _ = r.run.Close() }()
 	}
 	ticker := time.NewTicker(processingEvery)
 	defer ticker.Stop()
 	poll := ticker.C
-	var outcome processing.Outcome
-	if err == nil {
-		outcome, err = worker.Drain(context.Background())
-	}
-	r.record(outcome, false, err)
-	if err != nil {
+	var failed <-chan struct{}
+	if r.run == nil {
 		close(r.failed)
 		ticker.Stop()
 		poll = nil
+	} else {
+		failed = r.run.Failed()
+		r.run.Route()
 	}
 	for {
 		select {
 		case facts := <-r.final:
-			finished := worker != nil
-			if worker != nil {
-				outcome, err = worker.Finish(context.Background(), facts)
+			var err error
+			if r.run != nil {
+				_, err = r.run.Finish(context.Background(), facts)
 			}
 			err = errors.Join(err, output.Close())
-			r.record(outcome, finished, err)
+			r.record(r.run != nil, err)
 			return
+		case <-failed:
+			close(r.failed)
+			ticker.Stop()
+			poll, failed = nil, nil
 		case <-poll:
-			outcome, err = worker.Drain(context.Background())
-			r.record(outcome, false, err)
-			if err != nil {
-				close(r.failed)
-				ticker.Stop()
-				poll = nil
-			}
+			r.run.Route()
 		}
 	}
 }
 
-func (r *processingRun) record(outcome processing.Outcome, finished bool, err error) {
+func (r *processingRun) record(finished bool, err error) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-	r.outcome, r.finished = outcome, finished
+	r.finished = finished
 	if err != nil {
-		// Worker and Writer return structural errors, never source bytes or
+		// Workers and Writer return structural errors, never source bytes or
 		// parser error text. Authorization and write errors remain independent.
 		r.err = err
 	}
@@ -107,14 +114,55 @@ func (d *daemon) processingSnapshot() *account.Processing {
 		return nil
 	}
 	state := account.Processing{}
-	if r := d.processing; r != nil {
-		r.mutex.Lock()
-		state.ProcessingFailures, state.OutputFailures = r.outcome.ProcessingFailures, r.outcome.OutputFailures
-		state.Authorized, state.Written = r.outcome.Authorized, r.outcome.Written
-		r.mutex.Unlock()
+	if r := d.processing; r != nil && r.run != nil {
+		outcome := r.run.Snapshot()
+		state.ProcessingFailures, state.OutputFailures = outcome.ProcessingFailures, outcome.OutputFailures
+		state.Authorized, state.Written = outcome.Authorized, outcome.Written
+		state.ExchangeIDs, state.Extensions = outcome.ExchangeIDs, outcome.Extensions
 	}
 	state.GateReason = d.gate.Snapshot().Reason
+	if state.Extensions == nil {
+		state.Extensions = []account.ExtensionCounts{}
+		for _, one := range d.policy.Processing.Extensions() {
+			state.Extensions = append(state.Extensions, account.NoCounts(one.Name))
+		}
+	}
 	return &state
+}
+
+// extensionLine is a line of an extension's standard error, or a failed
+// result's reason, copied into the log: escaped, cut at its bound and
+// attributed to the extension and generation.
+type extensionLine struct {
+	Record     string    `json:"record"`
+	Version    int       `json:"version"`
+	Session    string    `json:"session"`
+	At         time.Time `json:"at"`
+	Extension  string    `json:"extension"`
+	Generation string    `json:"generation"`
+	Line       string    `json:"line"`
+	Cut        bool      `json:"cut"`
+}
+
+// extensionLogged writes what the log carries of an extension. It runs on the
+// extension's supervisor, which is never the controller.
+func (d *daemon) extensionLogged(e extension.Event) {
+	kind := ""
+	switch e.Kind {
+	case extension.Stderr:
+		kind = "extension-stderr"
+	case extension.Reason:
+		kind = "extension-reason"
+	default:
+		return
+	}
+	if d.log == nil {
+		return
+	}
+	if err := d.log.write(extensionLine{Record: kind, Version: recordVersion, Session: d.session, At: time.Now(),
+		Extension: e.Extension, Generation: strconv.FormatUint(e.Generation, 10), Line: e.Line, Cut: e.Cut}); err != nil {
+		d.extensionLogFailures.Add(1)
+	}
 }
 
 // finishProcessing runs only after withdrawal, delivery drain and capture's

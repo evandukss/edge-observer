@@ -111,7 +111,7 @@ type ReleaseDecision struct {
 }
 
 // DeliveryGate orders capture-wide invalidation and release authorization.
-// Share one pointer between the delivery loops and the processing worker. It
+// Share one pointer between the delivery loops and the processing workers. It
 // must not be copied. A nil pointer or zero value refuses all work with
 // GateUninitialized; construct a usable gate with NewDeliveryGate.
 //

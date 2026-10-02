@@ -251,7 +251,7 @@ func TestT20iBodyOperationsReadContentTypeFromTheMessageAsParsed(t *testing.T) {
 // occur and nothing it asserts would measure it.
 func t20iRemovalPrecedesTheFormRule(t *testing.T, configuration []byte, header string) {
 	t.Helper()
-	compiled, findings := config.Compile(configuration, nil)
+	compiled, findings := config.Compile(configuration, "")
 	if compiled == nil || len(findings) != 0 {
 		t.Fatalf("wiring, not the property: the session's configuration does not compile here: %+v", findings)
 	}

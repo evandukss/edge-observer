@@ -30,7 +30,7 @@ exception() {
 	.github/CODEOWNERS | .github/PULL_REQUEST_TEMPLATE.md | .github/ISSUE_TEMPLATE/*)
 		echo "static unit bpf artifact attach|read by GitHub alone; no build, test or archive reads it"
 		;;
-	CONTRIBUTING.md | GOVERNANCE.md | SECURITY.md | CODE_OF_CONDUCT.md | docs/architecture.md | docs/extension-guide.md)
+	CONTRIBUTING.md | GOVERNANCE.md | SECURITY.md | CODE_OF_CONDUCT.md | docs/architecture.md | docs/adding-support.md)
 		echo "static unit bpf artifact attach|prose that no build, test or archive reads"
 		;;
 	README.md | docs/compatibility.md | LICENSE)

@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 	"github.com/evandukss/edge-observer/attachment"
 	"github.com/evandukss/edge-observer/capture"
 	"github.com/evandukss/edge-observer/connection"
+	"github.com/evandukss/edge-observer/fragment"
 	"github.com/evandukss/edge-observer/intake"
 	"github.com/evandukss/edge-observer/internal/published"
 	"github.com/evandukss/edge-observer/policy"
@@ -91,12 +93,13 @@ func usage() string {
 The configuration is one JSON file, observer.config/1 of
 contract/config/CONFIG.md: where approved output and the log go, what to
 watch, what to ignore, which library builds a probe may be placed on, and what
-to remove, mask and truncate. A key it does not define is refused by name. Each
-pack it enables is read from packs/<name>.json beside it; stop, and inspect of
-a running session, read only where the session is and never a pack. The
-account is JSON unless --text asks for the one a
-person reads; --local adds each target's conditions, arguments included, for a
-view that stays on this host.`
+to remove, mask and truncate, and the extensions to run. A key it does not
+define is refused by name. An extension's command written as a relative path is
+resolved against the configuration's directory, and every command must be an
+executable file before anything attaches; stop, and inspect of a running
+session, read only where the session is and never a command. The account is
+JSON unless --text asks for the one a person reads; --local adds each target's
+conditions, arguments included, for a view that stays on this host.`
 }
 
 func main() {
@@ -112,8 +115,9 @@ func run(arguments []string, stdout io.Writer) error {
 			len(arguments), usage())
 	}
 	command, configuration, options := arguments[0], arguments[1], arguments[2:]
-	// Made absolute once, here: packs are read beside the configuration, and a
-	// detached session and a reload read it again from elsewhere.
+	// Made absolute once, here: an extension's relative command is resolved
+	// against the configuration's directory, and a detached session and a
+	// reload read it again from elsewhere.
 	configuration, err := filepath.Abs(configuration)
 	if err != nil {
 		return fmt.Errorf("resolve the configuration's path: %w", err)
@@ -202,15 +206,25 @@ func ready(path string, text bool, stdout io.Writer) error {
 		}
 		return named
 	}
+	// The extensions start would run, each labelled: not a requirement, and
+	// never part of the verdict.
+	extensions := account.ExtensionsOf(read.Processing.Extensions())
 	if text {
 		_, _ = fmt.Fprintf(stdout, "verdict        %s\n", readiness.Verdict)
 		for _, r := range judged {
 			_, _ = fmt.Fprintf(stdout, "%-14s %s: %s\n", strings.ToUpper(string(r.Status)), subject(r), r.Found)
 		}
+		for _, one := range extensions {
+			_, _ = fmt.Fprintf(stdout, "%-14s %s: %s; timeout %d ms; extension-declared, not observer-enforced\n",
+				"EXTENSION", one.Name, strings.Join(one.Fields, ", "), one.TimeoutMS)
+		}
 	} else {
 		encoder := json.NewEncoder(stdout)
 		encoder.SetIndent("", "  ")
-		if err := encoder.Encode(readiness); err != nil {
+		if err := encoder.Encode(struct {
+			preflight.Readiness
+			Extensions []account.Extension `json:"extensions"`
+		}{readiness, extensions}); err != nil {
 			return err
 		}
 	}
@@ -247,6 +261,7 @@ func dryRun(path string, text, local bool, stdout io.Writer) error {
 		return err
 	}
 	plan := account.Plan(time.Now(), account.Policy{Revision: read.Revision}, resolution, attach.Built(), catalog.Inspect)
+	plan.Extensions = account.ExtensionsOf(read.Processing.Extensions())
 	return emit(stdout, plan, text, local)
 }
 
@@ -438,6 +453,7 @@ func start(path string, stdout io.Writer) (err error) {
 		return err
 	}
 	running.path = path
+	running.log = log
 	if err := held.record(os.Getpid(), session); err != nil {
 		running.abandon()
 		_ = log.write(startFailed(session, time.Now(), err))
@@ -543,10 +559,19 @@ type daemon struct {
 	storageExhausted              <-chan struct{}
 	storageExhaustionConsumptions uint64
 	verifyParticipants            func(*probe.DeliveryGate, []process.Process) (protected.Posture, error)
+	// processingTaken is processing.Options.Taken for this session's workers;
+	// nil outside tests.
+	processingTaken func(worker int, process fragment.Process, connection fragment.ConnectionID)
 
 	// plan is the account at activation - resolved policy and what the kernel
 	// confirmed attached - which every later account starts from.
 	plan account.Account
+
+	// log is the session's log, which extensions' standard error is copied
+	// into; extensionLogFailures counts the lines of it that could not be
+	// written, from the extensions' own goroutines.
+	log                  *logger
+	extensionLogFailures atomic.Int64
 
 	logFailures int
 }
@@ -571,6 +596,7 @@ func begin(read policy.Policy, session string) (*daemon, error) {
 	}
 	plan := account.Plan(time.Now(), account.Policy{Revision: read.Revision, Generation: 1}, resolution,
 		attach.Built(), catalog.Inspect)
+	plan.Extensions = account.ExtensionsOf(read.Processing.Extensions())
 	if err := selectedAnything(resolution); err != nil {
 		return nil, err
 	}
@@ -795,7 +821,7 @@ func (d *daemon) finish(log *logger) error {
 
 	record := stopped{
 		Record: "stopped", Version: recordVersion, Session: d.session, At: time.Now(),
-		Sealed: sealErr == nil, Complete: sealErr == nil && seal.Complete, LogFailures: d.logFailures,
+		Sealed: sealErr == nil, Complete: sealErr == nil && seal.Complete, LogFailures: d.logFailures + int(d.extensionLogFailures.Load()),
 		StorageExhaustionConsumptions: d.storageExhaustionConsumptions,
 		Processing:                    final.Processing,
 	}

@@ -38,7 +38,7 @@ func TestAdmittedEventCountReachesActivationAndPlan(t *testing.T) {
 	limits := member(document, "limits")
 	limits["events"] = 7
 	limits["output_mib"] = 13
-	read, err := policy.CompileProcessing([]byte(encoded(t, document)), nil)
+	read, err := policy.CompileProcessing([]byte(encoded(t, document)), "")
 	if err != nil || read.Processing == nil {
 		t.Fatalf("positive event count refused: plan=%v error=%v", read.Processing, err)
 	}
@@ -54,7 +54,7 @@ func TestAdmittedEventCountDefaultsWithoutOutputCoupling(t *testing.T) {
 		limits := member(document, "limits")
 		delete(limits, "events")
 		limits["output_mib"] = outputMiB
-		read, err := policy.CompileProcessing([]byte(encoded(t, document)), nil)
+		read, err := policy.CompileProcessing([]byte(encoded(t, document)), "")
 		if err != nil || read.Processing == nil {
 			t.Fatalf("default event count refused: plan=%v error=%v", read.Processing, err)
 		}
@@ -67,11 +67,11 @@ func TestNonpositiveAdmittedEventCountRefusesAtItsOwnSetting(t *testing.T) {
 		document := processingDocument(t)
 		limits := member(document, "limits")
 		delete(limits, "events")
-		if read, err := policy.CompileProcessing([]byte(encoded(t, document)), nil); err != nil || read.Processing == nil {
+		if read, err := policy.CompileProcessing([]byte(encoded(t, document)), ""); err != nil || read.Processing == nil {
 			t.Fatalf("default neighbour refused: plan=%v error=%v", read.Processing, err)
 		}
 		limits["events"] = count
-		read, err := policy.CompileProcessing([]byte(encoded(t, document)), nil)
+		read, err := policy.CompileProcessing([]byte(encoded(t, document)), "")
 		var refused *policy.Refused
 		if !errors.As(err, &refused) || read.Processing != nil {
 			t.Fatalf("nonpositive event count %d not refused: plan=%v error=%v", count, read.Processing, err)

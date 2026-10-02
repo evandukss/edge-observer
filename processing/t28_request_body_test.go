@@ -38,7 +38,7 @@ func t28Chunked(headers, body, trailers string) string {
 // pipeline holds exactly the one request-body-fields operation under test.
 func t28Plan(t *testing.T) *config.ProcessingPlan {
 	t.Helper()
-	compiled, findings := config.Compile([]byte(t28Configuration), nil)
+	compiled, findings := config.Compile([]byte(t28Configuration), "")
 	if compiled == nil || len(findings) > 0 {
 		t.Fatalf("wiring, not the property: the configuration was refused: %+v", findings)
 	}

@@ -49,9 +49,7 @@ const (
 
 // t17RemoveAuthorization rewrites c's configuration so the reconstruction
 // pipeline removes the authorization header and nothing else, leaving every
-// other field - X-Public among them - retained. This is the operator
-// configuration whose equivalent a pack would express; here it is written
-// directly, which is the ordinary no-pack path through the same dispatcher.
+// other field - X-Public among them - retained.
 func t17RemoveAuthorization(t *testing.T, c configured) {
 	t.Helper()
 	content, err := os.ReadFile(c.path)

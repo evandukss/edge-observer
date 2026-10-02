@@ -258,18 +258,12 @@ func jsonReferences(document any, at string, manifest bool) []reference {
 
 	if manifest {
 		top, _ := document.(map[string]any)
-		for _, list := range []string{"members", "schemas"} {
-			entries, _ := top[list].([]any)
-			for index, entry := range entries {
-				fields, _ := entry.(map[string]any)
-				if text, ok := fields["path"].(string); ok {
-					found = append(found, reference{kind: pathReference, value: text, fromRoot: true,
-						at: fmt.Sprintf("%s[%d].path", list, index)})
-				}
-				if text, ok := fields["id"].(string); ok && list == "schemas" {
-					found = append(found, reference{kind: identifierReference, value: text, fromRoot: true,
-						at: fmt.Sprintf("%s[%d].id", list, index)})
-				}
+		entries, _ := top["members"].([]any)
+		for index, entry := range entries {
+			fields, _ := entry.(map[string]any)
+			if text, ok := fields["path"].(string); ok {
+				found = append(found, reference{kind: pathReference, value: text, fromRoot: true,
+					at: fmt.Sprintf("members[%d].path", index)})
 			}
 		}
 	}

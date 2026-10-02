@@ -35,12 +35,12 @@ func additive(current, candidate policy.Policy) ([]process.Rule, string) {
 		return nil, "reload requires a nonempty compiler-produced processing revision"
 	}
 	if current.ProcessingRevision != candidate.ProcessingRevision {
-		return nil, "the candidate changes processing - remove, mask, truncate, write_content, or which packs are " +
-			"enabled or what they hold - which a restart applies"
+		return nil, "the candidate changes processing - remove, mask, truncate, write_content, or the extensions " +
+			"or their commands - which a restart applies"
 	}
 	if current.Settings != candidate.Settings {
-		return nil, "the candidate changes where the observer writes or how often it restates its state, " +
-			"which a restart applies"
+		return nil, "the candidate changes where the observer writes or one of its limits, limits.workers " +
+			"included, which a restart applies"
 	}
 	if !sameLibraries(current.Approval.Libraries, candidate.Approval.Libraries) {
 		return nil, "the candidate changes which library builds a probe may be placed on, which a restart applies"

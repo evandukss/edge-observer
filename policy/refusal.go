@@ -17,14 +17,9 @@ type Refused struct {
 func (r *Refused) Error() string {
 	lines := make([]string, 0, len(r.Findings))
 	for _, finding := range r.Findings {
-		// A key is named with its document where the document is not the
-		// configuration itself, so a pack's key is never read as the operator's.
 		where := strings.TrimSpace(finding.Subject)
-		switch {
-		case where == "":
+		if where == "" {
 			where = finding.Document
-		case finding.Document != "" && finding.Document != "configuration":
-			where = finding.Document + " " + where
 		}
 		lines = append(lines, fmt.Sprintf("%s: %s: %s", where, finding.Reason, finding.Detail))
 	}

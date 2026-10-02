@@ -2,6 +2,7 @@ package processing
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/contract/record"
+	"github.com/evandukss/edge-observer/extension"
 )
 
 const (
@@ -77,6 +79,71 @@ type Artifact struct {
 	Reconstruction           *record.Reconstruction    `json:"reconstruction,omitempty"`
 	ReconstructionTruncation *ReconstructionTruncation `json:"reconstruction_truncation,omitempty"`
 	PolicyExclusions         []PolicyExclusion         `json:"policy_exclusions"`
+	// ExchangeIDs is the range of exchange ids issued to this connection's
+	// exchanges, on every route. Version 1 artifacts have none.
+	ExchangeIDs *IDRange `json:"exchange_ids,omitempty"`
+	// ExtensionOutcomes is, per retained exchange and configured extension in
+	// the order they ran, what the extension did to it. Empty with no
+	// extension configured and on a connections route.
+	ExtensionOutcomes []ExtensionOutcome `json:"extension_outcomes"`
+	// ReplacementExclusions is what the configuration's rules removed from
+	// content an extension supplied, apart from PolicyExclusions, which is
+	// only what they removed from captured content.
+	ReplacementExclusions []ReplacementExclusion `json:"replacement_exclusions"`
+}
+
+// IDRange is the exchange ids issued to one connection's exchanges: the
+// exchange at index i has id First + i. Every member is a decimal string.
+// Count is "0", with no First or Last, where none was issued.
+type IDRange struct {
+	First string `json:"first,omitempty"`
+	Last  string `json:"last,omitempty"`
+	Count string `json:"count"`
+}
+
+// ExtensionOutcome is what one extension did to one retained exchange.
+// Outcome is extension.Unchanged, Changed or Failed. With Changed, Changed
+// lists the fields its accepted answer replaced and Overwritten those of them
+// a later extension replaced again, so they are not what is written; both are
+// present lists. With Failed, Reason is one of the protocol's reasons.
+type ExtensionOutcome struct {
+	Exchange    int      `json:"exchange"`
+	Extension   string   `json:"extension"`
+	Outcome     string   `json:"outcome"`
+	Changed     []string `json:"changed,omitempty"`
+	Overwritten []string `json:"overwritten,omitempty"`
+	Reason      string   `json:"reason,omitempty"`
+}
+
+// MarshalJSON writes Changed and Overwritten as lists, empty ones included,
+// where the outcome is Changed, and neither otherwise.
+func (o ExtensionOutcome) MarshalJSON() ([]byte, error) {
+	type plain ExtensionOutcome
+	if o.Outcome != extension.Changed {
+		o.Changed, o.Overwritten = nil, nil
+		return json.Marshal(plain(o))
+	}
+	listed := func(fields []string) []string {
+		if fields == nil {
+			return []string{}
+		}
+		return fields
+	}
+	return json.Marshal(struct {
+		Exchange    int      `json:"exchange"`
+		Extension   string   `json:"extension"`
+		Outcome     string   `json:"outcome"`
+		Changed     []string `json:"changed"`
+		Overwritten []string `json:"overwritten"`
+	}{o.Exchange, o.Extension, o.Outcome, listed(o.Changed), listed(o.Overwritten)})
+}
+
+// ReplacementExclusion is a removal the configuration's rules made from
+// replacement content, with the extension that supplied it. Its other members
+// follow PolicyExclusion's rules.
+type ReplacementExclusion struct {
+	PolicyExclusion
+	Extension string `json:"extension"`
 }
 
 // PolicyExclusion records that policy removed a field, never its value.
@@ -152,10 +219,14 @@ func (a Approved) Bytes() []byte { return append([]byte(nil), a.line...) }
 type WriterStats struct {
 	LimitBytes int64
 	Bytes      int64
-	Written    uint64
-	Refused    uint64
-	Exhausted  bool
-	Closed     bool
+	// DerivedBytes is what the extensions' derived files hold, which shares
+	// LimitBytes: at most half of it, and never so much that Bytes and
+	// DerivedBytes together pass it.
+	DerivedBytes int64
+	Written      uint64
+	Refused      uint64
+	Exhausted    bool
+	Closed       bool
 }
 
 // Writer owns the aggregate approved-output allowance for one session. Every
@@ -175,6 +246,7 @@ type WriterStats struct {
 // *os.File; this seam does not add a public output-injection API.
 type Writer struct {
 	mutex     sync.Mutex
+	directory string
 	file      io.WriteCloser
 	stats     WriterStats
 	exhausted chan struct{}
@@ -197,7 +269,7 @@ func Open(dir string, limitBytes int64) (*Writer, error) {
 	if err != nil {
 		return nil, errors.New("create fresh approved output file")
 	}
-	return &Writer{file: f, stats: WriterStats{LimitBytes: limitBytes}, exhausted: make(chan struct{})}, nil
+	return &Writer{directory: dir, file: f, stats: WriterStats{LimitBytes: limitBytes}, exhausted: make(chan struct{})}, nil
 }
 
 func (w *Writer) WriteApproved(ctx context.Context, result Approved) error {
@@ -221,8 +293,9 @@ func (w *Writer) WriteApproved(ctx context.Context, result Approved) error {
 		return err
 	}
 	// Subtraction prevents overflow. Every byte passed to Write fits the same
-	// allowance, even if the filesystem accepts only part of this line.
-	if int64(len(result.line)) > w.stats.LimitBytes-w.stats.Bytes {
+	// allowance, even if the filesystem accepts only part of this line, and
+	// derived output holds part of it.
+	if int64(len(result.line)) > w.stats.LimitBytes-w.stats.Bytes-w.stats.DerivedBytes {
 		w.stats.Refused++
 		w.stats.Exhausted = true
 		close(w.exhausted)
@@ -268,6 +341,50 @@ func (w *Writer) Stats() WriterStats {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 	return w.stats
+}
+
+// DerivedName is the derived file of the extension named name.
+func DerivedName(name string) string { return "derived-" + name + ".jsonl" }
+
+// openDerived creates the derived file of the extension named name beside
+// approved.jsonl, exclusively, with mode 0600. The name is the configuration's
+// validated extension name, which cannot leave the directory.
+func (w *Writer) openDerived(name string) (*derivedFile, error) {
+	if w == nil || w.directory == "" {
+		return nil, ErrOptions
+	}
+	f, err := os.OpenFile(filepath.Join(w.directory, DerivedName(name)), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, errors.New("create fresh derived output file")
+	}
+	return &derivedFile{writer: w, file: f}, nil
+}
+
+// writeDerived writes one derived line of n bytes only where D + n <= M/2 and
+// C + D + n <= M, with M the allowance, C the approved bytes and D the derived
+// bytes, and returns "" or why it did not. A refusal never exhausts the
+// approved output; an exhausted or closed approved output stops derived
+// output too.
+func (w *Writer) writeDerived(f *derivedFile, line []byte) string {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	if w.file == nil || w.failed || w.stats.Exhausted || f.file == nil {
+		return extension.DerivedStopped
+	}
+	if f.failed {
+		return extension.DerivedWriteFailed
+	}
+	n, limit := int64(len(line)), w.stats.LimitBytes
+	if n > limit/2-w.stats.DerivedBytes || n > limit-w.stats.Bytes-w.stats.DerivedBytes {
+		return extension.DerivedBudget
+	}
+	written, err := f.file.Write(line)
+	w.stats.DerivedBytes += int64(written)
+	if err != nil || written != len(line) {
+		f.failed = true
+		return extension.DerivedWriteFailed
+	}
+	return ""
 }
 
 func (w *Writer) Close() error {

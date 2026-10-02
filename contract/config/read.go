@@ -8,16 +8,10 @@ import (
 	"io"
 	"math"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 )
-
-// PackName is the rule a pack's name meets. It becomes a file name,
-// packs/<name>.json beside the configuration, so it can never reach outside
-// that directory.
-var PackName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 // ReadFile reads the configuration a user writes. It is strict at every level:
 // an unknown key, a key written twice, a wrong type, a missing required key or
@@ -27,13 +21,13 @@ func ReadFile(content []byte) (File, []Finding) {
 	r := &reader{document: "configuration"}
 	file := File{Log: LogStdout, WriteContent: true,
 		Limits: Limits{OutputMiB: DefaultApprovedOutputBoundMiB, Events: DefaultAdmittedEventLimit,
-			StateEverySeconds: DefaultStateEverySeconds}}
+			StateEverySeconds: DefaultStateEverySeconds, Workers: DefaultWorkers}}
 	root := r.root(content)
-	if root == nil || !r.version(root, FileVersion, PackVersion, "a pack, not a configuration") {
+	if root == nil || !r.version(root, FileVersion) {
 		return file, r.list
 	}
 	r.keys(root, "", "version", "output", "log", "watch", "ignore", "libraries", "write_content", "remove", "mask",
-		"truncate", "limits", "packs")
+		"truncate", "extensions", "limits")
 
 	if output, found := r.required(root, "", "output"); found {
 		if value, ok := r.text(output, "output"); ok {
@@ -76,8 +70,11 @@ func ReadFile(content []byte) (File, []Finding) {
 		}
 	}
 	file.Rules = r.rules(root, "")
+	if extensions := root.member("extensions"); extensions != nil {
+		file.Extensions = r.extensions(extensions, file.WriteContent)
+	}
 	if limits := root.member("limits"); limits != nil && r.object(limits, "limits") {
-		r.keys(limits, "limits", "output_mib", "events", "state_every_seconds")
+		r.keys(limits, "limits", "output_mib", "events", "state_every_seconds", "workers")
 		for _, one := range []struct {
 			key  string
 			max  int64
@@ -86,6 +83,7 @@ func ReadFile(content []byte) (File, []Finding) {
 			{"output_mib", MaxOutputMiB, &file.Limits.OutputMiB},
 			{"events", MaxEvents, &file.Limits.Events},
 			{"state_every_seconds", MaxStateEverySeconds, &file.Limits.StateEverySeconds},
+			{"workers", MaxWorkers, &file.Limits.Workers},
 		} {
 			if value := limits.member(one.key); value != nil {
 				if n, ok := r.integer(value, "limits."+one.key, 1, one.max); ok {
@@ -94,54 +92,7 @@ func ReadFile(content []byte) (File, []Finding) {
 			}
 		}
 	}
-	if packs := root.member("packs"); packs != nil {
-		seen := map[string]bool{}
-		for i, item := range r.array(packs, "packs") {
-			path := fmt.Sprintf("packs[%d]", i)
-			name, ok := r.text(item, path)
-			if !ok {
-				continue
-			}
-			switch {
-			case !PackName.MatchString(name):
-				r.add(path, PackNameInvalid, "%q does not match %s, so no file is looked for", name, PackName.String())
-			case seen[name]:
-				r.add(path, DuplicateName, "the pack %q is enabled twice", name)
-			default:
-				seen[name] = true
-				file.Packs = append(file.Packs, name)
-			}
-		}
-		if len(file.Packs) > MaxProcessingPacks {
-			r.add(fmt.Sprintf("packs[%d]", MaxProcessingPacks), LimitExceeded, "at most %d packs are enabled",
-				MaxProcessingPacks)
-		}
-	}
 	return file, r.list
-}
-
-// ReadPack reads one pack, supplied under the name its loader gives it. The
-// pack's own name must be that name.
-func ReadPack(supplied Supplied) (Pack, []Finding) {
-	r := &reader{document: "pack:" + supplied.Name}
-	var pack Pack
-	root := r.root(supplied.Content)
-	if root == nil || !r.version(root, PackVersion, FileVersion, "a configuration, not a pack") {
-		return pack, r.list
-	}
-	r.keys(root, "", "version", "name", "remove", "mask", "truncate")
-	if name, found := r.required(root, "", "name"); found {
-		if value, ok := r.text(name, "name"); ok {
-			switch {
-			case !PackName.MatchString(value):
-				r.add("name", PackNameInvalid, "%q does not match %s", value, PackName.String())
-			case value != supplied.Name:
-				r.add("name", PackNameMismatch, "the pack names itself %q and is enabled as %q", value, supplied.Name)
-			}
-		}
-	}
-	pack.Rules = r.rules(root, "")
-	return pack, r.list
 }
 
 // matchKeys are the conditions that select a program, as matched today.
@@ -279,8 +230,7 @@ func (r *reader) library(n *node, path string) (Library, bool) {
 	return library, ok
 }
 
-// rules reads remove, mask and truncate, the same shapes in a configuration
-// and in a pack.
+// rules reads remove, mask and truncate.
 func (r *reader) rules(root *node, path string) Rules {
 	var rules Rules
 	at := func(key string) string { return join(path, key) }
@@ -445,9 +395,8 @@ func (r *reader) root(content []byte) *node {
 	return root
 }
 
-// version reads the version, and refuses one that is not this document's. The
-// version of the other document is named as that document.
-func (r *reader) version(root *node, want, other, otherIs string) bool {
+// version reads the version, and refuses one that is not this document's.
+func (r *reader) version(root *node, want string) bool {
 	n, found := r.required(root, "", "version")
 	if !found {
 		return false
@@ -455,9 +404,6 @@ func (r *reader) version(root *node, want, other, otherIs string) bool {
 	value, ok := r.text(n, "version")
 	switch {
 	case !ok:
-		return false
-	case value == other:
-		r.add("version", UnknownVersion, "%q is %s; this document must be %s", value, otherIs, want)
 		return false
 	case value != want:
 		r.add("version", UnknownVersion, "%q is not %s", value, want)

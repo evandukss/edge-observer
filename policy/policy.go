@@ -20,7 +20,8 @@ import (
 // Stdout is the log value that sends the log to standard output alone.
 const Stdout = "stdout"
 
-// Settings is where the observer writes and how often it restates its state.
+// Settings is where the observer writes, its limits, how often it restates its
+// state and how many workers process.
 type Settings struct {
 	// Log is the configured log file, or Stdout.
 	Log string
@@ -38,6 +39,9 @@ type Settings struct {
 	// StateEvery is how often the log restates the observer's state after
 	// activation.
 	StateEvery time.Duration
+
+	// Workers is the number of processing workers, limits.workers.
+	Workers int
 }
 
 // Policy is one configuration file as the observer reads it.
@@ -45,7 +49,7 @@ type Policy struct {
 	// Processing is present only on a successfully compiled processing configuration.
 	Processing *config.ProcessingPlan
 	// ProcessingRevision binds the processing and retention declarations and
-	// supplied manifests, excluding observation scope and observer settings.
+	// the extensions, excluding observation scope and observer settings.
 	// CompileProcessing supplies it alongside Processing. Reload requires the
 	// same nonempty value and retains the active plan; restart changes it.
 	// A legacy policy has no processing revision and cannot replace a compiled one.
@@ -102,6 +106,7 @@ func assemble(content []byte, file config.File, resolved config.ResolvedObserver
 		ApprovedOutputBoundMiB: resolved.ApprovedOutputBoundMiB,
 		AdmittedEventLimit:     resolved.AdmittedEventLimit,
 		StateEvery:             time.Duration(resolved.StateEverySeconds) * time.Second,
+		Workers:                int(resolved.Workers),
 	}
 	sum := sha256.Sum256(content)
 	return Policy{Settings: settings, Approval: approval, Revision: "sha256:" + hex.EncodeToString(sum[:])}, nil

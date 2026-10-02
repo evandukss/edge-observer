@@ -1,13 +1,18 @@
 // Package processing executes a compiled plan over finalised volatile batches.
-// Capture callbacks only write intake; a separate serial owner calls the worker.
+// Capture callbacks only write intake. One owner takes its entries: a Worker
+// takes them itself, or a Run routes them to several workers, each owning the
+// connections routed to it.
 package processing
 
 import (
 	"context"
 	"errors"
 
+	"github.com/evandukss/edge-observer/account"
 	"github.com/evandukss/edge-observer/connection"
 	"github.com/evandukss/edge-observer/contract/config"
+	"github.com/evandukss/edge-observer/extension"
+	"github.com/evandukss/edge-observer/fragment"
 	"github.com/evandukss/edge-observer/intake"
 	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/reconstruct"
@@ -43,9 +48,37 @@ type Options struct {
 	// hold it to witness delivery proceeding while processing is blocked.
 	// The gate's BeforeAuthorize is the authorization barrier, not this hook.
 	BeforeParse func(context.Context) error
+	// Workers is how many workers Start runs, each owning the connections
+	// routed to it. Zero means one; negative refuses. New is one worker and
+	// refuses more.
+	Workers int
+	// Taken runs in the worker that takes an entry, before the entry is
+	// accepted, outside every lock, with that worker's index and the entry's
+	// connection. Tests use it to see which worker holds a connection, and may
+	// hold one worker in it.
+	Taken func(worker int, process fragment.Process, connection fragment.ConnectionID)
+
+	// Session is the session id. Extensions are sent it in start, and it is
+	// stamped on every derived line. Required when Plan configures an
+	// extension.
+	Session string
+	// Derived is the writer whose directory holds the extensions' derived
+	// files, derived-<name>.jsonl, and whose allowance they share with the
+	// approved output: derived lines take at most half of it, and a refused
+	// derived line never exhausts it for approved lines. Required when Plan
+	// configures an extension; usually the same Writer as Output.
+	Derived *Writer
+	// Clock is what extension supervision reads time from. Nil is
+	// extension.System.
+	Clock extension.Clock
+	// Supervision, where set, receives every step of every extension's
+	// supervision (extension.Event), on the supervisor's goroutine.
+	Supervision func(extension.Event)
 }
 
-// Outcome is cumulative for one worker. Counts are units, not bytes.
+// Outcome is cumulative for one worker, and for a Run the sum over its
+// workers, where one unknown term makes Withheld unknown. Counts are units,
+// not bytes.
 // Batches counts finalised connections examined. Authorized and Written count
 // route records, separately: authorization does not imply a successful write.
 // Withheld counts reconstruction exchanges refused before pipeline transforms.
@@ -78,6 +111,15 @@ type Outcome struct {
 	OutputFailures     uint64
 	Pending            int
 	GateReason         probe.GateReason
+	// ExchangeIDs is how many exchange ids the run issued: one per exchange
+	// reconstructed from a dispatched batch where content is written, from 1,
+	// contiguously per connection. A Run's count, never a worker's.
+	ExchangeIDs uint64
+	// Extensions is each configured extension's counts, in the order they
+	// run. A Run's counts, never a worker's: at every moment each one's
+	// Considered is ExchangeIDs, and Considered is Changed + Unchanged +
+	// Failed + Pending.
+	Extensions []account.ExtensionCounts
 }
 
 // Finalization is supplied only after capture authority has been withdrawn,
@@ -95,34 +137,64 @@ type Finalization struct {
 // Close releases all held entries without output; it does not close Intake or
 // Output, which belong to the session controller.
 type Worker struct {
-	options   Options
+	options Options
+	index   int
+	source  source
+	release *release
+	// queue is this worker's own queue under a Run, which also carries the
+	// extensions' results; nil for a Worker taking from the intake itself.
+	queue      *queue
+	extensions *extensions
+	// waiting is every batch whose lines wait on an extension's result.
+	waiting   map[*dispatch]struct{}
 	pipelines []config.EffectivePipeline
 	routes    []config.DurableRoute
 	batches   map[batchKey]*batch
 	order     []batchKey
-	completed map[batchKey]bool
 	outcome   Outcome
 	terminal  error
 	finished  bool
 }
 
 // New validates only Options. It performs no capture, parsing or durable write.
+// The worker takes entries from Intake itself. It runs no extension: a plan
+// that configures one is refused, and runs under Start.
 func New(options Options) (*Worker, error) {
-	if options.Plan == nil || options.Intake == nil || options.Gate == nil || options.Output == nil || options.PolicyRevision == "" {
+	if !options.valid() || options.Workers > 1 || len(options.Plan.Extensions()) > 0 {
 		return nil, ErrOptions
 	}
-	h, j := options.Limits.HTTP, options.Limits.JSON
+	return newWorker(options, 0, &direct{intake: options.Intake}, &release{gate: options.Gate, output: options.Output}, nil), nil
+}
+
+func (o Options) valid() bool {
+	if o.Plan == nil || o.Intake == nil || o.Gate == nil || o.Output == nil || o.PolicyRevision == "" || o.Workers < 0 {
+		return false
+	}
+	h, j := o.Limits.HTTP, o.Limits.JSON
 	for _, n := range []int{h.MaxStartLine, h.MaxHeaderLine, h.MaxHeaders, h.MaxHeaderBytes, h.MaxBodyBytes, h.MaxMessages, h.MaxChunks, h.MaxTrailers, j.MaxDepth, j.MaxNodes, j.MaxFields, j.MaxElemShapes, j.MaxNameBytes, j.ShortStringBytes} {
 		if n < 0 {
-			return nil, ErrOptions
+			return false
 		}
 	}
-	return &Worker{options: options, pipelines: options.Plan.Pipelines(), routes: options.Plan.Routes(), batches: make(map[batchKey]*batch), completed: make(map[batchKey]bool), outcome: Outcome{Withheld: connection.Counted(0)}}, nil
+	return true
+}
+
+func newWorker(options Options, index int, from source, release *release, running *extensions) *Worker {
+	w := &Worker{options: options, index: index, source: from, release: release, extensions: running,
+		waiting: map[*dispatch]struct{}{}, pipelines: options.Plan.Pipelines(), routes: options.Plan.Routes(),
+		batches: make(map[batchKey]*batch), outcome: Outcome{Withheld: connection.Counted(0)}}
+	if q, ok := from.(*queue); ok {
+		w.queue = q
+	}
+	return w
 }
 
 // Drain takes currently queued entries and processes ready closed batches.
 // Callback FIFO order is not completeness evidence: a retirement can precede
-// a fragment. A batch needs its matching (Process, ConnectionID) retirement,
+// a fragment. An entry for a connection id that was routed before, whose batch
+// this worker no longer holds, is late: it is released at once and withheld as
+// unknown, whatever its process, since a connection id is unique within a
+// capture session. A batch needs its matching (Process, ConnectionID) retirement,
 // a known nonnegative Fragments count, and every distinct sequence 1..count.
 // Zero is valid for a metadata-only batch. Duplicate/out-of-range sequences,
 // identity disagreement or invalid records fail that batch; missing sequences
@@ -170,13 +242,20 @@ func New(options Options) (*Worker, error) {
 //
 // Returns the cumulative outcome and a non-nil error for cancellation, output
 // failure or an unusable worker. Processing refusals are in Outcome. After an
-// output failure no further output is attempted by this worker.
+// output failure no further output is attempted by this worker, nor by any
+// worker of the same Run.
 func (w *Worker) Drain(ctx context.Context) (Outcome, error) {
 	if w == nil || w.batches == nil {
 		return Outcome{}, ErrFinished
 	}
 	if w.finished {
 		return w.snapshot(), ErrFinished
+	}
+	if w.terminal == nil {
+		if err := w.release.failure(); err != nil {
+			w.terminal = err
+			w.discard()
+		}
 	}
 	if w.terminal != nil {
 		return w.snapshot(), w.terminal
@@ -197,13 +276,29 @@ func (w *Worker) Finish(ctx context.Context, final Finalization) (Outcome, error
 		return w.snapshot(), ErrFinished
 	}
 	err := w.terminal
+	if err == nil {
+		err = w.release.failure()
+	}
 	if err == nil && final.Withdrawn && final.Drained {
 		err = w.drain(ctx, true)
+		// Every batch waiting on an extension is written once its results
+		// arrive; each call is bounded by its extension's timeout.
+		for err == nil && len(w.waiting) > 0 {
+			select {
+			case <-w.queue.wake:
+				err = w.settle(ctx)
+				if err != nil {
+					w.stop(err)
+				}
+			case <-ctx.Done():
+				err = ctx.Err()
+			}
+		}
 	}
 	// Finish owns the final queue even on cancellation or absent settlement.
-	for e := w.options.Intake.Take(); e != nil; e = w.options.Intake.Take() {
+	for r, ok := w.source.take(); ok; r, ok = w.source.take() {
 		w.withhold(connection.Uncounted("unsettled_input"))
-		e.Release()
+		r.entry.Release()
 	}
 	w.discard()
 	w.finished = true
@@ -226,7 +321,8 @@ func (w *Worker) snapshot() Outcome {
 	if reason := w.options.Gate.Snapshot().Reason; reason != "" {
 		o.GateReason = reason
 	}
-	o.Pending = len(w.batches)
+	o.Pending = len(w.batches) + len(w.waiting)
+	o.ExchangeIDs = w.release.issued.Load()
 	return o
 }
 
@@ -237,27 +333,67 @@ func (w *Worker) discard() {
 		delete(w.batches, id)
 	}
 	w.order = nil
+	for d := range w.waiting {
+		// Its results may still arrive, and are counted; nothing of it is
+		// written.
+		d.dead = true
+		w.withhold(connection.Uncounted("unsettled_input"))
+		d.b.release()
+		delete(w.waiting, d)
+	}
+}
+
+// stop makes err terminal for this worker and every worker of its Run.
+func (w *Worker) stop(err error) {
+	w.terminal = err
+	w.release.fail(err)
+	w.discard()
 }
 
 func (w *Worker) withhold(count connection.Count) {
-	// Both known terms count exchanges and are nonnegative. A sum wrapping
-	// the signed Count representation is unavailable, never a negative count.
-	if w.outcome.Withheld.Known && count.Known && w.outcome.Withheld.Value+count.Value < 0 {
-		count = connection.Uncounted("count_overflow")
+	w.outcome.Withheld = sum(w.outcome.Withheld, count)
+}
+
+// sum adds two counts of exchanges. Both known terms are nonnegative, so a sum
+// wrapping the signed Count representation is unavailable, never a negative
+// count; an unknown term makes the sum unknown.
+func sum(a, b connection.Count) connection.Count {
+	if a.Known && b.Known && a.Value+b.Value < 0 {
+		b = connection.Uncounted("count_overflow")
 	}
-	w.outcome.Withheld = w.outcome.Withheld.Add(count)
+	return a.Add(b)
+}
+
+// plus is the sum of two outcomes. A gate reason is the first one either has.
+// ExchangeIDs and Extensions are a Run's, never summed.
+func (o Outcome) plus(other Outcome) Outcome {
+	o.Batches += other.Batches
+	o.Authorized += other.Authorized
+	o.Written += other.Written
+	o.Withheld = sum(o.Withheld, other.Withheld)
+	o.ProcessingFailures += other.ProcessingFailures
+	o.OutputFailures += other.OutputFailures
+	o.Pending += other.Pending
+	if o.GateReason == "" {
+		o.GateReason = other.GateReason
+	}
+	return o
 }
 
 func (w *Worker) drain(ctx context.Context, final bool) error {
+	if err := w.settle(ctx); err != nil {
+		w.stop(err)
+		return err
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		e := w.options.Intake.Take()
-		if e == nil {
+		r, ok := w.source.take()
+		if !ok {
 			break
 		}
-		w.accept(e)
+		w.accept(r)
 	}
 	// Inspect all callbacks already queued before evaluating completeness.
 	remaining := make([]batchKey, 0, len(w.order))
@@ -274,13 +410,13 @@ func (w *Worker) drain(ctx context.Context, final bool) error {
 			return err
 		}
 		w.outcome.Batches++
-		err := w.process(ctx, b)
-		b.release()
+		held, err := w.process(ctx, b)
+		if !held {
+			b.release()
+		}
 		delete(w.batches, id)
-		w.completed[id] = true
 		if err != nil {
-			w.terminal = err
-			w.discard()
+			w.stop(err)
 			return err
 		}
 	}
