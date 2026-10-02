@@ -12,6 +12,7 @@ import (
 	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/contract/record"
 	"github.com/evandukss/edge-observer/extension"
+	"github.com/evandukss/edge-observer/held"
 )
 
 const (
@@ -266,6 +267,23 @@ func (w *Writer) WriteApproved(ctx context.Context, result Approved) error {
 		return err
 	}
 	return w.queue.Enqueue(ArtifactName, result.line)
+}
+
+// Retained is what this writer holds now: the derived files it has opened,
+// and what its sink queue holds.
+func (w *Writer) Retained() ([]held.Occupancy, error) {
+	if w == nil {
+		return nil, nil
+	}
+	w.mutex.Lock()
+	derived := len(w.derived)
+	w.mutex.Unlock()
+	out := []held.Occupancy{{Store: "processing.derived_files", Held: derived}}
+	queue, err := w.queue.Retained()
+	if err != nil {
+		return nil, err
+	}
+	return append(out, queue...), nil
 }
 
 func (w *Writer) Stats() WriterStats {

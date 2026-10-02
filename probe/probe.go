@@ -17,6 +17,7 @@ import (
 
 	"github.com/evandukss/edge-observer/admission"
 	"github.com/evandukss/edge-observer/fragment"
+	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/process"
 )
 
@@ -94,6 +95,10 @@ type Transfer struct {
 	Measured bool
 
 	At time.Time
+
+	// Slot is the delivery gate's slot for this event, carried to whatever
+	// retains its input; nil where the event was delivered without one.
+	Slot held.Slot
 }
 
 // Connection is one connection ending, letting an endpoint be reused without
@@ -121,6 +126,9 @@ type Connection struct {
 
 	Endpoint uint64
 	At       time.Time
+
+	// Slot is the delivery gate's slot for this event, as on a Transfer.
+	Slot held.Slot
 }
 
 // Sequence is an observation's place in a producer-owned occupancy of a

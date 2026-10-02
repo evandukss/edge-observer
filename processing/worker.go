@@ -14,6 +14,7 @@ import (
 	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/extension"
 	"github.com/evandukss/edge-observer/fragment"
+	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/intake"
 	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/reconstruct"
@@ -72,6 +73,11 @@ type Options struct {
 	// Supervision, where set, receives every step of every extension's
 	// supervision (extension.Event), on the supervisor's goroutine.
 	Supervision func(extension.Event)
+	// ConnectionInput is the most input entries one connection may hold while it
+	// waits to be processed. A connection reaching it is cut: what it holds is
+	// discarded and counted, and the rest of its input is discarded on arrival.
+	// Zero takes half the gate's event allowance; negative refuses.
+	ConnectionInput int
 }
 
 // Outcome is cumulative for one worker, and for a Run the sum over its
@@ -96,6 +102,10 @@ type Options struct {
 // a useful prefix and also count a refusal of its suffix. OutputFailures counts
 // failed approved writes. Neither counts capture loss or policy suppression;
 // internal artifact-serialization defects return a terminal error, not a count.
+// ConnectionsCut counts connections cut at Options.ConnectionInput, and
+// InputCut the input entries discarded for those cuts: what each held when it
+// was cut, and what arrived for it afterwards. A cut connection's exchanges are
+// withheld as unknown.
 // Pending counts connection batches still holding charged intake entries.
 // GateReason reports the gate's capture-wide diagnostic state at return, even
 // when no complete candidate reached authorization. It is never permission;
@@ -108,6 +118,8 @@ type Outcome struct {
 	Withheld           connection.Count
 	ProcessingFailures uint64
 	OutputFailures     uint64
+	ConnectionsCut     uint64
+	InputCut           uint64
 	Pending            int
 	GateReason         probe.GateReason
 	// ExchangeIDs is how many exchange ids the run issued: one per exchange
@@ -313,6 +325,26 @@ func (w *Worker) Close() error {
 	return nil
 }
 
+// Retained is what this worker holds now, store by store: the connections
+// whose input it holds, the order it examines them in, and the connections
+// waiting on an extension's result. Its owner reads it, never while Drain or
+// Finish runs.
+func (w *Worker) Retained() ([]held.Occupancy, error) {
+	if w == nil {
+		return nil, nil
+	}
+	entries := 0
+	for _, b := range w.batches {
+		entries += len(b.entries)
+	}
+	return []held.Occupancy{
+		{Store: "processing.batches", Held: len(w.batches)},
+		{Store: "processing.entries", Held: entries},
+		{Store: "processing.order", Held: len(w.order)},
+		{Store: "processing.waiting", Held: len(w.waiting)},
+	}, nil
+}
+
 func (w *Worker) snapshot() Outcome {
 	o := w.outcome
 	// No-candidate paths still report capture-wide invalidation. Snapshot is
@@ -375,6 +407,8 @@ func (o Outcome) plus(other Outcome) Outcome {
 	o.Withheld = sum(o.Withheld, other.Withheld)
 	o.ProcessingFailures += other.ProcessingFailures
 	o.OutputFailures += other.OutputFailures
+	o.ConnectionsCut += other.ConnectionsCut
+	o.InputCut += other.InputCut
 	o.Pending += other.Pending
 	if o.GateReason == "" {
 		o.GateReason = other.GateReason

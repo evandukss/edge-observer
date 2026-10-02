@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"sync"
+
+	"github.com/evandukss/edge-observer/held"
 )
 
 type destination struct {
@@ -160,6 +162,27 @@ func (q *Queue) run() {
 		st.mutex.Unlock()
 	}
 }
+
+// Retained is what this queue holds now: the lines queued and the one being
+// written, and its destinations. The lines' bound is in bytes (Stats), not
+// lines.
+func (q *Queue) Retained() ([]held.Occupancy, error) {
+	if q == nil || q.state == nil {
+		return nil, nil
+	}
+	st := q.state
+	st.mutex.Lock()
+	defer st.mutex.Unlock()
+	lines := len(st.items)
+	if st.inflight != nil {
+		lines++
+	}
+	return []held.Occupancy{
+		{Store: "sink.lines", Held: lines},
+		{Store: "sink.destinations", Held: len(st.destinations)},
+	}, nil
+}
+
 func (q *Queue) stats(name string) Stats {
 	if q == nil || q.state == nil {
 		return Stats{}

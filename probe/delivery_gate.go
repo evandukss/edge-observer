@@ -3,6 +3,8 @@ package probe
 import (
 	"errors"
 	"sync"
+
+	"github.com/evandukss/edge-observer/held"
 )
 
 // DeliveryWithoutGate is the diagnostic counter in an attachment's Refusals
@@ -51,20 +53,52 @@ type DeliveryGateOptions struct {
 
 // GateSnapshot is diagnostic state, never permission to release payload.
 // Authorize alone grants permission; a snapshot followed by a write races with
-// invalidation. Charged stops at MaxEvents, including the event that invalidates
-// on unknown length or kind. Later refused events reserve nothing.
+// invalidation. Charged counts every slot reserved, including the event that
+// invalidates on unknown length or kind; later refused events reserve nothing.
+// Held is the slots reserved and not yet returned, Refunded the slots returned
+// by path, and DoubleRefunds the refunds of a slot already returned, each of
+// which returned nothing.
 type GateSnapshot struct {
-	MaxEvents uint64
-	Charged   uint64
-	Reason    GateReason
+	MaxEvents     uint64
+	Charged       uint64
+	Held          uint64
+	Refunded      Refunds
+	DoubleRefunds uint64
+	Reason        GateReason
+}
+
+// Refunds is the slots returned, by the path each was returned along.
+type Refunds struct {
+	Unretained uint64
+	Processed  uint64
+	Discarded  uint64
+	Cut        uint64
+}
+
+// Of is the slots returned along path.
+func (r Refunds) Of(path held.Path) uint64 {
+	switch path {
+	case held.Unretained:
+		return r.Unretained
+	case held.Processed:
+		return r.Processed
+	case held.Discarded:
+		return r.Discarded
+	case held.Cut:
+		return r.Cut
+	default:
+		return 0
+	}
 }
 
 // AdmissionDecision is the decision for exactly one decoded event. Charged
-// says it reserved a slot even if uncertainty then refused delivery. Admitted
-// alone permits identity lookup and dispatch to either capture sink.
+// says it reserved a slot even if uncertainty then refused delivery, and Slot
+// is that slot, nil where none was reserved. Admitted alone permits identity
+// lookup and dispatch to either capture sink.
 type AdmissionDecision struct {
 	Admitted bool
 	Charged  bool
+	Slot     held.Slot
 	State    GateSnapshot
 }
 
@@ -136,6 +170,7 @@ func (g *DeliveryGate) Admit(kind DeliveryKind, measured bool) AdmissionDecision
 		return AdmissionDecision{State: g.snapshotLocked()}
 	}
 	g.charged++
+	reserved := &slot{gate: g}
 	switch kind {
 	case DeliveryTransfer:
 		if !measured {
@@ -146,7 +181,7 @@ func (g *DeliveryGate) Admit(kind DeliveryKind, measured bool) AdmissionDecision
 	default:
 		g.invalidateLocked(GateUnknownKind)
 	}
-	return AdmissionDecision{Admitted: g.reason == "", Charged: true, State: g.snapshotLocked()}
+	return AdmissionDecision{Admitted: g.reason == "", Charged: true, Slot: reserved, State: g.snapshotLocked()}
 }
 
 // Authorize checks the supplied evidence and capture eligibility in ONE
@@ -216,8 +251,17 @@ var uninitializedWithdrawal = func() <-chan struct{} {
 }()
 
 func (g *DeliveryGate) snapshotLocked() GateSnapshot {
-	return GateSnapshot{MaxEvents: g.options.MaxEvents, Charged: g.charged, Reason: g.reason}
+	return GateSnapshot{MaxEvents: g.options.MaxEvents, Charged: g.charged, Held: g.charged, Reason: g.reason}
 }
+
+// slot is one event's reservation.
+type slot struct {
+	gate *DeliveryGate
+}
+
+func (s *slot) Keep()                 {}
+func (s *slot) Kept() bool            { return false }
+func (s *slot) Refund(held.Path) bool { return false }
 
 func (g *DeliveryGate) consumeIntakeExhaustionLocked() {
 	if g.reason != "" {

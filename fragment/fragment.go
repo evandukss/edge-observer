@@ -20,6 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/evandukss/edge-observer/held"
 )
 
 // Direction is which way a fragment's bytes crossed the TLS boundary, seen from
@@ -97,6 +99,10 @@ type Record struct {
 	Payload []byte
 
 	At time.Time
+
+	// Slot is the delivery gate's slot for the event this record came from,
+	// handed to the store that retains the record; nil where there was none.
+	Slot held.Slot
 }
 
 // Stream is the stream this record belongs to.

@@ -16,6 +16,7 @@ import (
 	"github.com/evandukss/edge-observer/connection"
 	"github.com/evandukss/edge-observer/ebpf"
 	"github.com/evandukss/edge-observer/fragment"
+	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/probe/openssl"
 	"github.com/evandukss/edge-observer/process"
@@ -729,6 +730,26 @@ func (a *ebpfAttachment) Withdrawals() ([]probe.Withdrawal, error) {
 // Grants is every admission this session recorded and its grant state. An
 // unreadable allowlist makes each grant unknown, so the population is whole.
 func (a *ebpfAttachment) Grants() ([]probe.Grant, error) { return a.session.Grants(), nil }
+
+// Retained is what this placement holds now, store by store: the identities
+// it has read for the pids its events came from, the network namespaces of the
+// processes it admitted, the C libraries it placed on, its refusals by reason,
+// and everything its session holds, kernel tables included.
+func (a *ebpfAttachment) Retained() ([]held.Occupancy, error) {
+	a.mutex.Lock()
+	out := []held.Occupancy{
+		{Store: "attach.identities", Held: len(a.known)},
+		{Store: "attach.networks", Held: len(a.networks)},
+		{Store: "attach.libcs", Held: len(a.libcs)},
+		{Store: "attach.gate_refused", Held: len(a.gateRefused)},
+	}
+	a.mutex.Unlock()
+	session, err := a.session.Retained()
+	if err != nil {
+		return nil, err
+	}
+	return append(out, session...), nil
+}
 
 // networkOf is an observed process's network namespace at admission, or zero
 // where it could not be read.

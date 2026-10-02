@@ -10,6 +10,7 @@ import (
 
 	"github.com/evandukss/edge-observer/connection"
 	"github.com/evandukss/edge-observer/fragment"
+	"github.com/evandukss/edge-observer/held"
 )
 
 var (
@@ -162,9 +163,14 @@ func (e *Entry) Bytes() int64 {
 	return e.bytes
 }
 
-// Release discards the entry and returns its charge. It is idempotent and safe
-// on nil. Only the single owner may access its data while Release runs.
-func (e *Entry) Release() {
+// Release discards the entry and returns its charge, as input given up
+// unprocessed (ReleaseAs, held.Discarded).
+func (e *Entry) Release() { e.ReleaseAs(held.Discarded) }
+
+// ReleaseAs discards the entry and returns its charge, and the slot of the
+// event it came from along path. It is idempotent and safe on nil. Only the
+// single owner may access its data while it runs.
+func (e *Entry) ReleaseAs(path held.Path) {
 	if e == nil || e.owner == nil {
 		return
 	}
@@ -179,6 +185,14 @@ func (e *Entry) Release() {
 	e.Connection = nil
 	s.stats.Bytes -= e.bytes
 	s.stats.Leased--
+}
+
+// Retained is the entries this store holds now: queued for a worker, and
+// leased to one and not yet released. Its bound is in bytes (Stats), not
+// entries.
+func (s *Store) Retained() ([]held.Occupancy, error) {
+	stats := s.Stats()
+	return []held.Occupancy{{Store: "intake.entries", Held: int(stats.Queued + stats.Leased)}}, nil
 }
 
 func (s *Store) Stats() Stats {

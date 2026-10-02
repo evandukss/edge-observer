@@ -23,6 +23,7 @@ import (
 	"github.com/evandukss/edge-observer/admission"
 	"github.com/evandukss/edge-observer/connection"
 	"github.com/evandukss/edge-observer/fragment"
+	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/probe"
 )
 
@@ -1061,6 +1062,20 @@ func (s *Session) Stats() Stats {
 	defer s.mutex.Unlock()
 
 	return s.stats
+}
+
+// Retained is what this session holds now, store by store: the connections it
+// follows, the handle generations it remembers, the connection records it
+// keeps, and the producers it asks to settle.
+func (s *Session) Retained() ([]held.Occupancy, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	return []held.Occupancy{
+		{Store: "capture.streams", Held: len(s.streams)},
+		{Store: "capture.occupancies", Held: len(s.occupancies)},
+		{Store: "capture.closed", Held: len(s.closed)},
+		{Store: "capture.settlers", Held: len(s.settlers)},
+	}, nil
 }
 
 // Open is the connections this session is still following.

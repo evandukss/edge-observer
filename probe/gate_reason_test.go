@@ -140,7 +140,7 @@ func TestDeliveryGateUninitializedRefusesEveryEntry(t *testing.T) {
 			initialized := tc.name == "initialized_control"
 			want := probe.GateSnapshot{Reason: probe.GateUninitialized}
 			if initialized {
-				want = probe.GateSnapshot{MaxEvents: 2, Charged: 1}
+				want = probe.GateSnapshot{MaxEvents: 2, Charged: 1, Held: 1}
 			}
 			g := tc.gate
 			t.Run("admit", func(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/evandukss/edge-observer/admission"
 	"github.com/evandukss/edge-observer/connection"
+	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/probe/openssl"
 )
@@ -82,6 +83,51 @@ func (s *set) placed() int {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	return len(s.members)
+}
+
+// Retained is what this set holds now, and what each of its placements holds,
+// store by store, summed over the placements. One placement unable to read its
+// stores fails the reading.
+func (s *set) Retained() ([]held.Occupancy, error) {
+	s.mutex.Lock()
+	members := s.members
+	covered := 0
+	for _, at := range members {
+		covered += len(at.covers)
+	}
+	out := []held.Occupancy{
+		{Store: "attach.members", Held: len(members)},
+		{Store: "attach.covers", Held: covered},
+		{Store: "attach.refusals", Held: len(s.refusals)},
+		{Store: "attach.routed", Held: len(s.routed)},
+	}
+	s.mutex.Unlock()
+
+	at := make(map[string]int, len(out))
+	for i, one := range out {
+		at[one.Store] = i
+	}
+	for _, member := range members {
+		reader, can := member.live.(held.Reader)
+		if !can {
+			continue
+		}
+		stores, err := reader.Retained()
+		if err != nil {
+			return nil, err
+		}
+		for _, one := range stores {
+			i, seen := at[one.Store]
+			if !seen {
+				at[one.Store] = len(out)
+				out = append(out, one)
+				continue
+			}
+			out[i].Held += one.Held
+			out[i].Bound += one.Bound
+		}
+	}
+	return out, nil
 }
 
 // Capability is what the whole set can report: probe.Weakest over its members.

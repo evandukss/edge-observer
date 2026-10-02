@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/evandukss/edge-observer/held"
 )
 
 // Config is one extension as a Supervisor runs it.
@@ -292,6 +294,26 @@ func (s *Supervisor) Close() {
 	s.mutex.Unlock()
 	s.teardowns.Wait()
 	s.finish()
+}
+
+// Retained is what this supervisor holds now, store by store: the calls its
+// current generation has outstanding and the messages queued for it, the
+// spans of ids it has answered, the derived lines waiting to be written, and
+// the callbacks waiting for the mutex to be released.
+func (s *Supervisor) Retained() ([]held.Occupancy, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	outstanding, queued, answered := 0, 0, 0
+	if g := s.current; g != nil {
+		outstanding, queued, answered = len(g.outstanding), len(g.queue), len(g.answered.spans)
+	}
+	return []held.Occupancy{
+		{Store: "extension.outstanding", Held: outstanding},
+		{Store: "extension.queue", Held: queued},
+		{Store: "extension.answered", Held: answered, Bound: spanBound},
+		{Store: "extension.derived", Held: len(s.derived)},
+		{Store: "extension.after", Held: len(s.after)},
+	}, nil
 }
 
 // Counts is the supervisor's counts now.

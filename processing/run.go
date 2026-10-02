@@ -9,6 +9,7 @@ import (
 	"github.com/evandukss/edge-observer/account"
 	"github.com/evandukss/edge-observer/connection"
 	"github.com/evandukss/edge-observer/contract/config"
+	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/intake"
 )
 
@@ -34,6 +35,10 @@ type Run struct {
 	err      error
 	ended    bool
 	closed   bool
+	// retained is each worker's stores as it last left them, and unrouted the
+	// router's spans as Route last left them (Retained).
+	retained [][]held.Occupancy
+	unrouted int
 }
 
 type running struct {
@@ -120,6 +125,58 @@ func (r *Run) Route() {
 			r.pending[i] = items[:0]
 		}
 	}
+	r.mutex.Lock()
+	r.unrouted = len(r.router.gaps)
+	r.mutex.Unlock()
+}
+
+// Retained is what this run holds now, store by store, summed over its
+// workers: what each held when it last finished a drain, the entries queued
+// for each, the spans of connection ids not yet routed as Route last left
+// them, and what each extension's supervisor holds.
+func (r *Run) Retained() ([]held.Occupancy, error) {
+	if r == nil {
+		return nil, nil
+	}
+	r.mutex.Lock()
+	var out []held.Occupancy
+	at := map[string]int{}
+	add := func(one held.Occupancy) {
+		i, seen := at[one.Store]
+		if !seen {
+			at[one.Store] = len(out)
+			out = append(out, one)
+			return
+		}
+		out[i].Held += one.Held
+		out[i].Bound += one.Bound
+	}
+	for _, stores := range r.retained {
+		for _, one := range stores {
+			add(one)
+		}
+	}
+	add(held.Occupancy{Store: "processing.router", Held: r.unrouted, Bound: unroutedBound})
+	r.mutex.Unlock()
+	queued := 0
+	for _, one := range r.workers {
+		one.queue.mutex.Lock()
+		queued += len(one.queue.items) + len(one.queue.done)
+		one.queue.mutex.Unlock()
+	}
+	add(held.Occupancy{Store: "processing.queue", Held: queued})
+	if r.extensions != nil {
+		for _, supervisor := range r.extensions.supervisors {
+			stores, err := supervisor.Retained()
+			if err != nil {
+				return nil, err
+			}
+			for _, one := range stores {
+				add(one)
+			}
+		}
+	}
+	return out, nil
 }
 
 // Snapshot is the workers' last returned outcomes, summed, with the gate's
@@ -223,9 +280,14 @@ func (r *Run) serve(i int) {
 }
 
 func (r *Run) record(i int, o Outcome, err error) {
+	stores, _ := r.workers[i].worker.Retained()
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	r.outcomes[i] = o
+	if r.retained == nil {
+		r.retained = make([][]held.Occupancy, len(r.workers))
+	}
+	r.retained[i] = stores
 	if err != nil && r.err == nil {
 		r.err = err
 		close(r.failed)
