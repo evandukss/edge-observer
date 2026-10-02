@@ -1074,3 +1074,66 @@ func TestABirthBeforeCaptureIsLiveFormsNoOccupancy(t *testing.T) {
 		}
 	}
 }
+
+// C9 repair (decision 473): a byte-moving entry point whose probe the attachment
+// could not place leaves capture not live, so no occupancy forms and no exchange
+// is ever certified across bytes those invisible calls move. The session still
+// attaches and runs. This is T8's case: SSL_write unplaced, then a held
+// SSL_write_ex2, must not leave the sent direction whole. The seam forces the
+// probe unplaced (FailEntry), as the kernel would; the control, nothing forced,
+// is capture-live and whole.
+func TestAnUnplacedByteMoverLeavesCaptureNotLiveAndCertifiesNothing(t *testing.T) {
+	for name, symbol := range map[string]string{
+		"a transfer function unplaced":    "SSL_write",
+		"the uncatalogued route unplaced": "SSL_sendfile",
+	} {
+		t.Run(name, func(t *testing.T) {
+			port := sequencePeer(t, nil)
+			actor := independentActor(t, sequenceActorSource, port)
+			run := deliverHeldWith(t, actor, ebpf.Options{FailEntry: []string{symbol}})
+
+			if named := run.session.UnprobedByteMovers(); len(named) == 0 {
+				t.Fatalf("wiring, not the property: %s was not recorded unplaced", symbol)
+			}
+			command(t, actor, "O 1", "O 0")
+			// A send through the held SSL_write_ex2 path and a receive. With a sent
+			// byte mover unplaced, the sent direction must not be certified whole.
+			command(t, actor, "X 0 partial", "X 0")
+			records := run.seal(t)
+			if len(records) == 0 {
+				t.Fatal("the session did not run: a partial placement must keep monitoring, not refuse")
+			}
+			for _, record := range records {
+				for _, direction := range []fragment.Direction{fragment.Sent, fragment.Received} {
+					if placement, ok := record.Placement(direction); ok && placement.Whole() {
+						t.Errorf("connection %d %s is whole while a byte mover was unplaced, so an exchange "+
+							"could be written across the invisible bytes: %s", record.ID, direction, placement)
+					}
+				}
+			}
+			if born := counter(t, run.session.Born); born != 0 {
+				t.Errorf("%d occupancies were Born while capture was not live", born)
+			}
+		})
+	}
+	t.Run("the control, nothing forced, is whole", func(t *testing.T) {
+		port := sequencePeer(t, nil)
+		actor := independentActor(t, sequenceActorSource, port)
+		run := deliverHeld(t, actor, nil, 0)
+		if named := run.session.UnprobedByteMovers(); len(named) != 0 {
+			t.Fatalf("the control has unplaced byte movers %v", named)
+		}
+		command(t, actor, "O 1", "O 0")
+		command(t, actor, "X 0 whole", "X 0")
+		records := run.seal(t)
+		whole := false
+		for _, record := range records {
+			if placement, ok := record.Placement(fragment.Sent); ok && placement.Whole() {
+				whole = true
+			}
+		}
+		if !whole {
+			t.Error("the control, every probe placed, certified no whole sent direction")
+		}
+	})
+}

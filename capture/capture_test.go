@@ -645,17 +645,19 @@ func TestATransferRefusedWhenProductionStoppedLeavesItsStreamUnplaceable(t *test
 		t.Fatal("the interrupted connection carries no placement")
 	}
 	if held.Positions != connection.PositionsUnknownFrom {
-		t.Fatalf("its positions are %s, and a refused transfer's bytes are missing from it",
+		t.Fatalf("its positions are %s, and the refused transfer's bytes are missing from it",
 			held.Positions)
 	}
 	if held.From != 10 {
 		t.Errorf("its positions are unknown from offset %d, and it had captured 10 bytes", held.From)
 	}
-	if held.Because != connection.ObservationLost {
+	// An open connection's undelivered tail at the stop is unsettled, not a located
+	// capture loss: the refused call is counted on its own counter, not here.
+	if held.Because != connection.TerminalUnsettled {
 		t.Errorf("it says its positions went because %s", held.Because)
 	}
-	if !held.Lost.Known || held.Lost.Value != 1 {
-		t.Errorf("it counts %v transfers lost, and one was refused", held.Lost)
+	if held.Lost.Known {
+		t.Errorf("it counts %v transfers lost, and an undelivered tail at a stop is counted elsewhere", held.Lost)
 	}
 	if records[1].Placeable(fragment.Sent) {
 		t.Error("the interrupted connection reports itself placeable")

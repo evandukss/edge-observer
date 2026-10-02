@@ -113,6 +113,11 @@ type Options struct {
 	// so its entry takes a number that nothing fills, a gap. Production callers
 	// leave it empty.
 	SkipReturn []string
+
+	// FailEntry names functions whose probe is recorded as refused without being
+	// placed, reproducing a kernel-refused probe, for a test of the partial-
+	// placement refusal. Production callers leave it empty.
+	FailEntry []string
 }
 
 // MinimumKernel is the oldest kernel this package will attach on, published
@@ -395,6 +400,14 @@ type Session struct {
 	// test seam for a return that never fires (Options.SkipReturn).
 	skipReturn map[string]bool
 
+	// unprobed is the byte-moving entry points whose entry probe could not be
+	// placed; while it is non-empty capture is not live and nothing is sequenced.
+	unprobed []string
+
+	// failEntry names functions whose probe is recorded as refused without being
+	// placed, a test seam for the partial-placement refusal (Options.FailEntry).
+	failEntry map[string]bool
+
 	// namedBy is every target that named an instance; the allowlist holds one.
 	namedBy map[instanceKey][]admission.Provenance
 
@@ -572,6 +585,10 @@ func Attach(options Options) (*Session, error) {
 	for _, symbol := range options.SkipReturn {
 		session.skipReturn[symbol] = true
 	}
+	session.failEntry = make(map[string]bool, len(options.FailEntry))
+	for _, symbol := range options.FailEntry {
+		session.failEntry[symbol] = true
+	}
 
 	if err := session.authorise(options.Admit); err != nil {
 		_ = session.Close()
@@ -606,9 +623,16 @@ func Attach(options Options) (*Session, error) {
 		return nil, err
 	}
 
-	// Every transfer probe is placed and confirmed now, so an occupancy formed from
-	// here is numbered from a true origin: the capture-live flag is set (Born).
-	if !options.DeferCaptureLive {
+	// Capture goes live only when every byte-moving entry point is placed. An entry
+	// probe the attachment could not place leaves its calls invisible: they move
+	// bytes nothing numbers, and a held neighbour in the same direction would then
+	// number from one as if they never happened, so an exchange could be written
+	// across them (C9). While any byte-moving entry is unplaced, capture is left not
+	// live: no occupancy forms, every connection is unsequenced, and nothing is
+	// certified. The session still runs and reports the unplaced points through
+	// coverage; the unplaced ones are named here for the account.
+	session.unprobed = session.unprobedByteMovers()
+	if !options.DeferCaptureLive && len(session.unprobed) == 0 {
 		if err := session.markCaptureLive(); err != nil {
 			_ = session.Close()
 			return nil, err
@@ -1109,6 +1133,12 @@ func (s *Session) markCaptureLive() error {
 // that first drives the window in which no occupancy may form.
 func (s *Session) MarkCaptureLive() error { return s.markCaptureLive() }
 
+// UnprobedByteMovers is the byte-moving entry points whose entry probe could not
+// be placed. While it is non-empty the session is not capture-live: nothing is
+// sequenced and no exchange is certified, so no exchange is written across the
+// bytes those unplaced functions move. Empty on a full placement.
+func (s *Session) UnprobedByteMovers() []string { return s.unprobed }
+
 // Declined is what this session would not authorise, and why.
 func (s *Session) Declined() []Declined { return s.declined }
 
@@ -1432,7 +1462,12 @@ func (s *Session) place(points []Point) error {
 
 	for _, point := range points {
 		put := placed{point: point}
-		if err := s.put(&put); err != nil {
+		if s.failEntry[point.Symbol] {
+			// A test seam: record the probe as refused without placing it, exactly as a
+			// kernel refusal leaves it (no entry link, a refusal reason).
+			put.refusal = "forced refusal (test seam)"
+			refused = append(refused, point.Symbol+": "+put.refusal)
+		} else if err := s.put(&put); err != nil {
 			put.refusal = err.Error()
 			refused = append(refused, point.Symbol+": "+err.Error())
 		}
@@ -1485,6 +1520,31 @@ func (s *Session) measurable() error {
 // ErrRefused is what attaching fails with when the kernel refused every probe:
 // a host that can attach, and would not place these (unlike ErrUnavailable).
 var ErrRefused = errors.New("the kernel placed none of the probes it was asked for")
+
+// unprobedByteMovers is the byte-moving entry points whose entry probe this
+// session could not place: the catalogued transfer functions and the
+// uncatalogued routes (SSL_sendfile). It keys on the ENTRY probe being absent,
+// not on confirmation: a function whose entry is placed but whose return is not
+// is measurable-only (its calls are gaps, which is sound), while one whose entry
+// is absent is invisible, which is what keeps capture from going live.
+func (s *Session) unprobedByteMovers() []string {
+	var unprobed []string
+	for _, put := range s.placed {
+		if byteMovingEntry(put.point.Entry) && put.entry == nil {
+			unprobed = append(unprobed, put.point.Symbol)
+		}
+	}
+	return unprobed
+}
+
+// byteMovingEntry reports whether an entry program moves plaintext: a
+// catalogued transfer entry, or an uncatalogued route (obs_sendfile).
+func byteMovingEntry(entry string) bool {
+	if _, ok := obpf.EntryPrograms[entry]; ok {
+		return true
+	}
+	return entry == progSendfile
+}
 
 // ErrNotAuthorised is what attaching fails with when a process to authorise is
 // not the approved process. It says nothing about the host, and a caller must

@@ -248,3 +248,24 @@ func TestNarrowingNeverWidensWhatTheBuildCanDo(t *testing.T) {
 		t.Errorf("a build that claims none of these acquired them from its placements: %+v", narrowed)
 	}
 }
+
+// A byte-moving entry point the kernel did not confirm is reported in
+// Unobserved, so its absence is not silent: the catalogued transfer functions
+// and the uncatalogued route (SSL_sendfile). A control confirmed point is not
+// listed.
+func TestAnUnconfirmedByteMovingRouteIsReportedUnobserved(t *testing.T) {
+	answered := []ebpf.Placed{
+		{Point: ebpf.Point{Symbol: "SSL_write", Entry: "obs_write_entry", Return: "obs_write_return"}, Confirmed: false},
+		{Point: ebpf.Point{Symbol: "SSL_sendfile", Entry: "obs_sendfile"}, Confirmed: false},
+		{Point: ebpf.Point{Symbol: "SSL_read", Entry: "obs_read_entry", Return: "obs_read_return"}, Confirmed: true},
+	}
+	coverage := ebpf.CoverageOf(answered)
+	for _, want := range []string{"SSL_write", "SSL_sendfile"} {
+		if !slices.Contains(coverage.Unobserved, want) {
+			t.Errorf("an unconfirmed %s is not reported unobserved: %v", want, coverage.Unobserved)
+		}
+	}
+	if slices.Contains(coverage.Unobserved, "SSL_read") {
+		t.Errorf("a confirmed SSL_read is reported unobserved: %v", coverage.Unobserved)
+	}
+}

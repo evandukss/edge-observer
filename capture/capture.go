@@ -391,9 +391,15 @@ func (s *Session) Refused(t probe.Transfer) {
 		return
 	}
 	if t.Sequence.Number > last+1 {
-		missing := int64(t.Sequence.Number - last - 1)
-		s.stats.Lost += missing
-		s.cutLocked(found, t.Direction, found.offsets[t.Direction], connection.ObservationLost, missing, "")
+		// A gap below a refused transfer's number is not the refusal's loss: the gate
+		// refused this one deliberately and supplied its number, and the missing ones
+		// are events admitted but not delivered, counted as abandoned (the kernel's
+		// LostAfterSubmission), not here. The direction is cut so no exchange is
+		// written across the gap (C9), but the refusal adds nothing to the located
+		// loss count.
+		s.cutLocked(found, t.Direction, found.offsets[t.Direction], connection.ObservationLost, 0,
+			"a transfer the delivery gate refused numbered past the last delivered; the transfers "+
+				"between are counted as abandoned, not here")
 	}
 	found.numbered[t.Direction] = t.Sequence.Number
 }
@@ -609,10 +615,22 @@ func (s *Session) settleLocked(found *stream, final probe.Final, ending bool) {
 			terminal--
 		}
 		switch {
-		case terminal > last:
+		case terminal > last && ending:
+			// A connection the producer saw end (a release): its last numbers are
+			// settled, so a number past the last delivered is a lost last transfer,
+			// located and counted.
 			missing := int64(terminal - last)
 			s.stats.Lost += missing
 			s.cutLocked(found, one.direction, at, connection.ObservationLost, missing, "")
+		case terminal > last:
+			// An open connection settled at session end: a number past the last
+			// delivered is an undelivered tail, not a located capture loss. The session
+			// ended before it arrived; whether it was dropped by the ring, refused at
+			// the gate, or admitted and not drained is counted on its own counter, not
+			// a second time here. The tail is cut so no exchange spans it, uncounted.
+			s.cutLocked(found, one.direction, at, connection.TerminalUnsettled, 0,
+				"the producer numbered transfers past the last delivered that the session end did not "+
+					"deliver; whether they were lost, refused or undrained is counted elsewhere")
 		case terminal < last:
 			s.cutLocked(found, one.direction, at, connection.TerminalUnsettled, 0,
 				"the producer's last number is behind one delivered, so the direction's evidence disagrees")

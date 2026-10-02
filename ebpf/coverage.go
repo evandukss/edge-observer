@@ -70,7 +70,11 @@ func CoverageOf(answered []Placed) Coverage {
 	var coverage Coverage
 	for _, one := range answered {
 		if !one.Confirmed {
-			if catalogued(one.Point) {
+			// A catalogued entry point, or an uncatalogued byte-moving route, that the
+			// kernel did not confirm is reported, so its absence is not silent. (The
+			// attachment also refuses outright when a byte-moving probe is unconfirmed;
+			// this is what a reader of coverage sees.)
+			if catalogued(one.Point) || one.Point.Entry == progSendfile {
 				coverage.Unobserved = append(coverage.Unobserved, one.Point.Symbol)
 			}
 			continue

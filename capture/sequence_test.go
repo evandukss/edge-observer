@@ -205,9 +205,12 @@ func TestAConnectionOpenWhenProductionStopsIsSettledByWhatTheProducerHolds(t *te
 		"a call in flight when production stopped": {settlers: []probe.Settler{settler{held: probe.Settlement{Occupancy: 7,
 			Final: probe.Final{Known: true, Sent: probe.Terminal{Last: 3, InFlight: true}}}}},
 			want: connection.PositionsEstablished},
+		// An open connection at session end whose producer numbered a transfer that
+		// never arrived: an undelivered tail, unsettled and uncounted (decision 475),
+		// not a located loss.
 		"the producer took a number that never arrived": {settlers: []probe.Settler{settler{held: probe.Settlement{Occupancy: 7,
 			Final: probe.Final{Known: true, Sent: probe.Terminal{Last: 3}}}}},
-			want: connection.PositionsUnknownFrom, because: connection.ObservationLost, lost: 1},
+			want: connection.PositionsUnknownFrom, because: connection.TerminalUnsettled, lost: -1},
 		"no producer to ask": {want: connection.PositionsUnknownFrom, because: connection.TerminalUnsettled, lost: -1},
 		"a producer that cannot be read": {settlers: []probe.Settler{settler{err: errors.New("unreadable")}},
 			want: connection.PositionsUnknownFrom, because: connection.TerminalUnsettled, lost: -1},
@@ -446,13 +449,20 @@ func TestARefusedTransferIsNeverCountedAsALoss(t *testing.T) {
 			s.numbers[numbered{handle: handleOf(refused), direction: fragment.Sent}] = 2
 			s.Finish(at)
 
-			lost := s.Stats().Lost
-			if handed && lost != 0 {
+			// A refusal is never a located loss, handed or not: the count is zero in
+			// both. What the handed refusal changes is that it SUPPLIES the number, so
+			// the direction settles whole; without it the undelivered tail is unsettled.
+			// That placement difference is the wiring guard the count no longer gives.
+			if lost := s.Stats().Lost; lost != 0 {
 				t.Errorf("a refusal was counted as %d transfers lost", lost)
 			}
-			if !handed && lost != 1 {
-				t.Errorf("wiring, not the property: the control counts %d lost, so the refused number never "+
-					"reached the settlement", lost)
+			held := placementOf(t, s.Records(), 1, fragment.Sent)
+			if handed && !held.Whole() {
+				t.Errorf("the handed refusal supplied its number but the direction is %s, not whole", held)
+			}
+			if !handed && (held.Whole() || held.Because != connection.TerminalUnsettled) {
+				t.Errorf("wiring, not the property: without the refusal handed over the tail is %s, so the "+
+					"refused number never reached the settlement", held)
 			}
 			if got := len(s.Records()); got != 1 {
 				t.Errorf("%d connection records, and the refused handle nothing followed begins none", got)
@@ -500,5 +510,30 @@ func TestACallInFlightAtTheReleaseLeavesItsDirectionUnsettled(t *testing.T) {
 				t.Errorf("the in-flight call's entry number was counted as %d lost", held.Lost.Value)
 			}
 		})
+	}
+}
+
+// A refused transfer numbered past the last delivered cuts its direction, so no
+// exchange is written across the gap, but the refusal counts no located loss:
+// the missing transfers are counted as abandoned, elsewhere. This is the
+// admission-limit shape (an event admitted but not delivered, then a later
+// refusal supplying a higher number).
+func TestARefusedTransferNumberedPastTheLastCutsWithoutCountingALoss(t *testing.T) {
+	s := produced(&collected{}, nil)
+	s.Transfer(numberedAs(worker, 0x18, fragment.Sent, 10, 7, 1))
+	// Number 2 never arrives (admitted but abandoned); number 3 is refused.
+	s.Refused(numberedAs(worker, 0x18, fragment.Sent, 6, 7, 3))
+	s.numbers[numbered{handle: handleOf(numberedAs(worker, 0x18, fragment.Sent, 0, 7, 0)), direction: fragment.Sent}] = 3
+	s.Finish(at)
+
+	if got := s.Stats().Lost; got != 0 {
+		t.Errorf("a refused transfer past the last counted %d located losses, and a refusal counts none", got)
+	}
+	held := placementOf(t, s.Records(), 1, fragment.Sent)
+	if held.Whole() || held.Because != connection.ObservationLost {
+		t.Errorf("the direction with a gap below a refused number is %s, want cut so no exchange spans it", held)
+	}
+	if held.Lost.Known {
+		t.Errorf("the cut counts %v lost, and the missing transfers are counted as abandoned, not here", held.Lost)
 	}
 }
