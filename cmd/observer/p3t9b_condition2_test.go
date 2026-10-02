@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -459,7 +460,7 @@ func p3t9bProduce(t *testing.T, destination, name string) {
 	if name == "truncated" {
 		implementation, arguments = config.TruncateHeaderValues, `{"headers":["x-transform"],"length":4}`
 	}
-	f := p3t9bController(t, p3t9bConfiguration(t, implementation, arguments))
+	f, settler := p3t9bController(t, p3t9bConfiguration(t, implementation, arguments))
 	request := p3t9bRequest("")
 	response := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s", len(p3t9bBody), p3t9bBody)
 	switch name {
@@ -502,6 +503,13 @@ func p3t9bProduce(t *testing.T, destination, name string) {
 	if got := f.d.capture.Stats(); got.Transfers != 2 || got.Rejected != 0 {
 		t.Fatalf("apparatus: capture did not accept both supplied transfers: %+v", got)
 	}
+	// A connection left open is settled at finish against the producer's
+	// numbers. Where the settler was never asked, a cut tail is the fixture's,
+	// not the product's.
+	if strings.HasPrefix(name, "suffix_") && settler.consulted() == 0 {
+		t.Fatalf("wiring, not the property: the capture never asked the settler for the open connection's " +
+			"occupancy, so any truncation below was made by the fixture")
+	}
 	if got := f.d.output.Stats(); !got.Closed {
 		t.Fatalf("apparatus: useful output not sealed: %+v", got)
 	}
@@ -519,7 +527,7 @@ func p3t9bProduce(t *testing.T, destination, name string) {
 			t.Fatal(err)
 		}
 	}
-	fmt.Printf("REACHED case=%s transfers=2 rejected=0 request_bytes=%d response_bytes=%d protected_input=%t suffix_input=%t exchanges_records=%d connections_records=1 sealed=true\n", name, len(request), len(response), strings.Contains(request, p3t9bSecret), strings.Contains(request, p3t9bSuffix), p3t9bExchanges(name))
+	fmt.Printf("REACHED case=%s transfers=2 rejected=0 request_bytes=%d response_bytes=%d protected_input=%t suffix_input=%t exchanges_records=%d connections_records=1 sealed=true settled=%d\n", name, len(request), len(response), strings.Contains(request, p3t9bSecret), strings.Contains(request, p3t9bSuffix), p3t9bExchanges(name), settler.consulted())
 }
 
 func p3t9bConfiguration(t *testing.T, implementation, arguments string) []byte {
@@ -565,10 +573,42 @@ func p3t9bConfiguration(t *testing.T, implementation, arguments string) []byte {
 	return raw
 }
 
+// p3t9bSettler answers, as the kernel producer does once production stops,
+// the occupancy and last numbers the fixture's stand-in producer gave a
+// handle. That producer keys a handle's occupancy by its endpoint and numbers
+// each direction from 1, keeping the numbers it took; the answer is read from
+// that record. It counts the handles it is asked about.
+type p3t9bSettler struct {
+	fixture *processingControllerFixture
+	mutex   sync.Mutex
+	asked   int
+}
+
+func (s *p3t9bSettler) Settled(handle probe.Handle) (probe.Settlement, error) {
+	s.mutex.Lock()
+	s.asked++
+	s.mutex.Unlock()
+	sent := s.fixture.numbers[fragmentKey{handle.Endpoint, fragment.Sent}]
+	received := s.fixture.numbers[fragmentKey{handle.Endpoint, fragment.Received}]
+	if sent == 0 && received == 0 {
+		return probe.Settlement{}, nil
+	}
+	return probe.Settlement{Occupancy: handle.Endpoint, Final: probe.Final{Known: true,
+		Sent: probe.Terminal{Last: sent}, Received: probe.Terminal{Last: received}}}, nil
+}
+
+func (*p3t9bSettler) Unlocated() (uint64, error) { return 0, nil }
+
+func (s *p3t9bSettler) consulted() int {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	return s.asked
+}
+
 // Reuse only the existing synthetic producer's mechanical transfer/lifecycle
 // helpers. Configuration, witnesses and every acceptance assertion are owned
 // by this file; no implementer's condition-2 assertion is invoked or edited.
-func p3t9bController(t *testing.T, configuration []byte) *processingControllerFixture {
+func p3t9bController(t *testing.T, configuration []byte) (*processingControllerFixture, *p3t9bSettler) {
 	t.Helper()
 	read := loaded(t, string(configuration))
 	read.Settings.Directory = t.TempDir()
@@ -587,6 +627,8 @@ func p3t9bController(t *testing.T, configuration []byte) *processingControllerFi
 	}
 	f := &processingControllerFixture{stop: make(chan os.Signal, 1), done: make(chan struct{})}
 	f.producer = &processingProducer{withdrawn: true, drained: true, stamp: &f.stamp}
+	settler := &p3t9bSettler{fixture: f}
+	recording.Settling(settler)
 	f.d = &daemon{policy: read, session: "condition2", directory: directory, capture: recording,
 		intake: store, gate: gate, output: output, attached: f.producer,
 		plan: account.Account{Version: account.Version, Session: "condition2", Policy: account.Policy{Revision: read.Revision, Generation: 1}},
@@ -602,5 +644,5 @@ func p3t9bController(t *testing.T, configuration []byte) *processingControllerFi
 		_ = output.Close()
 		_ = store.Close()
 	})
-	return f
+	return f, settler
 }
