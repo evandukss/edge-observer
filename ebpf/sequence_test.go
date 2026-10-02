@@ -794,9 +794,10 @@ func TestAHandleReusedAfterALostEndingIsANewOccupancy(t *testing.T) {
 		if records[i].Handle.Address != freed {
 			continue
 		}
-		if records[i].How == connection.EndingUnobserved {
+		switch records[i].How {
+		case connection.EndingUnobserved:
 			old = &records[i]
-		} else if records[i].How == connection.StillOpen {
+		case connection.StillOpen:
 			next = &records[i]
 		}
 	}
