@@ -564,7 +564,7 @@ func captureOf(source observed.Account) (Capture, error) {
 			ConnectionsUnrecorded: decimalOf(seen.ConnectionsUnrecorded)},
 		Ordering: Ordering{Block: Block{State: Carried}, Lost: decimalOf(seen.Lost), Cut: decimalOf(seen.Cut),
 			Retired: decimalOf(seen.Retired), Unsequenced: decimalOf(seen.Unsequenced),
-			Unlocated: decimalOf(seen.Unlocated)},
+			Unlocated: decimalOf(seen.Unlocated), GateRefused: decimalOf(seen.GateRefused), IntakeRefused: decimalOf(seen.IntakeRefused)},
 	}
 	if loss := source.Loss; loss.Known {
 		capture.Loss = Loss{Block: Block{State: Carried}, Dropped: decimalOf(loss.Dropped),

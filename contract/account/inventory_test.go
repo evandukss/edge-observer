@@ -73,7 +73,9 @@ var represented = map[string]string{
 	".seen.connections_unrecorded": "capture.seen.connections_unrecorded",
 	".seen.lost":                   "capture.ordering.lost", ".seen.cut": "capture.ordering.cut",
 	".seen.retired": "capture.ordering.retired", ".seen.unsequenced": "capture.ordering.unsequenced",
-	".seen.unlocated": "capture.ordering.unlocated",
+	".seen.unlocated":      "capture.ordering.unlocated",
+	".seen.gate_refused":   "capture.ordering.gate_refused",
+	".seen.intake_refused": "capture.ordering.intake_refused",
 
 	".loss.known": "capture.loss.state", ".loss.why": "capture.loss.why",
 	".loss.dropped": "capture.loss.dropped", ".loss.unmatched": "capture.loss.unmatched",

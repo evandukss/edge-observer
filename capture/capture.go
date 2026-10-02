@@ -34,6 +34,13 @@ type Sink interface {
 
 // Stats is what a session has seen.
 type Stats struct {
+	// GateRefused counts transfers discarded at the held-event bound. IntakeRefused
+	// counts fragments discarded at the volatile byte bound. Neither is a producer
+	// loss: Lost counts missing producer transfers separately. Cut counts the
+	// affected directions once, including directions cut by either refusal.
+	GateRefused   int64 `json:"gate_refused"`
+	IntakeRefused int64 `json:"intake_refused"`
+
 	// Transfers is what adapters reported.
 	Transfers int64 `json:"transfers"`
 

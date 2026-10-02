@@ -66,7 +66,10 @@ type GateSnapshot struct {
 	Held          uint64
 	Refunded      Refunds
 	DoubleRefunds uint64
-	Reason        GateReason
+
+	// InputRefused counts events refused because every held-event slot was in use.
+	InputRefused uint64
+	Reason       GateReason
 }
 
 // Refunds is the slots returned, by the path each was returned along.

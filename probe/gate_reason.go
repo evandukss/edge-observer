@@ -1,5 +1,9 @@
 package probe
 
+// CaptureFailureExitStatus is the command's nonzero status after a terminal
+// capture fault. Graceful operator stops use zero.
+const CaptureFailureExitStatus = 1
+
 // GateReason identifies a gate refusal. GateInputLimit,
 // GateIntakeExhausted, GateUnknownLength and GateUnknownKind invalidate the
 // entire capture; the first such reason is retained until session end. GateUnsettled refuses one candidate

@@ -482,11 +482,13 @@ type Admitted struct {
 // producer's sequence, and what a break cost. Never folded into Loss.
 type Ordering struct {
 	Block
-	Lost        string `json:"lost,omitempty" account:"count"`
-	Cut         string `json:"cut,omitempty" account:"count"`
-	Retired     string `json:"retired,omitempty" account:"count"`
-	Unsequenced string `json:"unsequenced,omitempty" account:"count"`
-	Unlocated   string `json:"unlocated,omitempty" account:"count"`
+	Lost          string `json:"lost,omitempty" account:"count"`
+	Cut           string `json:"cut,omitempty" account:"count"`
+	Retired       string `json:"retired,omitempty" account:"count"`
+	Unsequenced   string `json:"unsequenced,omitempty" account:"count"`
+	Unlocated     string `json:"unlocated,omitempty" account:"count"`
+	GateRefused   string `json:"gate_refused" account:"count"`
+	IntakeRefused string `json:"intake_refused" account:"count"`
 }
 
 // Refusals is what the kernel program refused, by reason.
