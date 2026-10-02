@@ -20,7 +20,7 @@ func outcome(direction fragment.Direction, came probe.SocketOutcome) probe.Trans
 // reasons is what one unbound transfer's association says.
 func reason(t *testing.T, came probe.SocketOutcome) connection.Reason {
 	t.Helper()
-	s := capture.Recording(&collected{}, nil)
+	s := produced(&collected{}, nil)
 	s.Transfer(outcome(fragment.Sent, came))
 
 	records := finished(s)
@@ -80,7 +80,7 @@ func TestSocketIOWithNoBindingIsNotExplainedByItsOutcome(t *testing.T) {
 // What a connection says while open, which conditions about mid-call state
 // must read. Records reports only what has stopped changing.
 func TestAConnectionStillOpenSaysWhatItHasEstablishedSoFar(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
+	s := produced(&collected{}, nil)
 	s.Transfer(outcome(fragment.Sent, probe.FileIO))
 
 	if held := s.Records(); len(held) != 0 {
@@ -105,7 +105,7 @@ func TestAConnectionStillOpenSaysWhatItHasEstablishedSoFar(t *testing.T) {
 
 // Reading the live view takes nothing away.
 func TestReadingTheLiveViewRetiresNothing(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
+	s := produced(&collected{}, nil)
 	s.Transfer(outcome(fragment.Sent, probe.FileIO))
 
 	before := s.Open()

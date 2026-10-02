@@ -137,9 +137,8 @@ func TestDeliveryGateEntryClassifiesUncertaintyBeforeEitherSink(t *testing.T) {
 			if captured.Stats() != before || len(records.records) != 1 {
 				t.Fatal("invalidation did not cover the other placement")
 			}
-			if after := captured.Stats(); after.Lost != 0 || after.Unexplained != 0 {
-				t.Fatalf("the capture located a gap across stamps 1, 2 and 3: lost %d, unexplained %d",
-					after.Lost, after.Unexplained)
+			if after := captured.Stats(); after.Lost != 0 {
+				t.Fatalf("the capture counted %d transfers lost across stamps 1, 2 and 3", after.Lost)
 			}
 			if got := g.Authorize(probe.ReleaseEvidence{InputsSettled: true, LifecycleSettled: true}); got.Authorized || got.Reason != tc.reason {
 				t.Fatalf("another placement's pending payload remained eligible: %+v", got)

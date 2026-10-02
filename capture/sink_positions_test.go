@@ -43,16 +43,18 @@ func TestFragmentOutsideAndRetirementUnderCaptureMutex(t *testing.T) {
 		Process:  fragment.Process{PID: 42, StartTime: 3},
 		Instance: admission.Instance{Namespace: admission.Namespace{Inode: 1}, PID: 42, Generation: 1},
 		Endpoint: 7, Direction: fragment.Sent, Measured: true, Length: 1,
-		Payload: []byte("x"), At: at, Stamp: 1,
+		Payload: []byte("x"), At: at, Stamp: 1, Sequence: probe.Sequence{Occupancy: 1, Number: 1},
 	}
 	s.Transfer(one)
 	if len(sink.fragmentUnlocked) != 1 || !sink.fragmentUnlocked[0] {
 		t.Fatal("fragment callback did not run outside capture mutex")
 	}
-	// Missing stamp 2 retires the already witnessed stream under the mutex.
+	// The producer's next occupancy of the handle retires the already witnessed
+	// stream under the mutex.
 	one.Stamp = 3
+	one.Sequence.Occupancy = 2
 	s.Transfer(one)
-	if st := s.Stats(); st.Transfers != 2 || st.Interrupted != 1 || st.Lost != 1 {
+	if st := s.Stats(); st.Transfers != 2 || st.Retired != 1 {
 		t.Fatalf("retirement fault was not reached: %+v", st)
 	}
 	if len(sink.retirementLocked) != 1 || !sink.retirementLocked[0] {

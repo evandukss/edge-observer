@@ -129,9 +129,15 @@ func (p batchPrefix) truncated() bool {
 // and the location and reason of any cutoff. It never resumes after a hole or
 // an unplaced span, even if later bytes resemble a start line. Overlapping
 // offsets are conflicting evidence, not a choice between callback orderings.
+//
+// A producer number skipped between two fragments of a direction is a
+// transfer produced and never delivered, whatever the offsets say: capture
+// advances offsets by what arrived, so contiguous offsets alone cannot show
+// the hole. The direction stops where the missing transfer would have begun.
 func (b *batch) placed() ([]fragment.Record, batchPrefix, bool) {
 	var out []fragment.Record
 	var end [3]uint64
+	var produced [3]uint64
 	var prefix batchPrefix
 	// A placement cutoff remains evidence of an indeterminate suffix even
 	// when no later fragment was observed. Absence of later input is not zero.
@@ -151,6 +157,12 @@ func (b *batch) placed() ([]fragment.Record, batchPrefix, bool) {
 		}
 		if f.Offset > end[f.Direction] {
 			prefix.stop(f.Direction, end[f.Direction], "capture_hole")
+		}
+		if f.Produced != 0 {
+			if f.Produced != produced[f.Direction]+1 {
+				prefix.stop(f.Direction, end[f.Direction], "capture_hole")
+			}
+			produced[f.Direction] = f.Produced
 		}
 		end[f.Direction] = f.End()
 		if f.Truncated() {

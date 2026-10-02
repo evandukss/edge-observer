@@ -106,7 +106,8 @@ const (
 	SocketClosed
 
 	// EndingUnobserved is an end not seen but known to have happened (the
-	// execution exited holding it, or an observation was lost).
+	// execution exited holding it, or the producer began another occupancy of the
+	// handle while its ending was never delivered).
 	EndingUnobserved
 
 	// EndingUnestablished is a connection whose end no placed probe could report:

@@ -50,10 +50,19 @@ func (p *processingProducer) Account() (connection.Counters, error) {
 	return connection.Counters{ReservationAttempts: connection.Counted(int64(*p.stamp))}, nil
 }
 
+// fragmentKey is one handle's direction.
+type fragmentKey struct {
+	endpoint  uint64
+	direction fragment.Direction
+}
+
 type processingControllerFixture struct {
 	d         *daemon
 	producer  *processingProducer
 	stamp     uint64
+	// numbers is the last number each handle's occupancy took per direction, as
+	// the kernel producer numbers them; a handle's occupancy is its endpoint.
+	numbers map[fragmentKey]uint64
 	stop      chan os.Signal
 	done      chan struct{}
 	ended     bool
@@ -183,9 +192,14 @@ func (f *processingControllerFixture) transfer(t *testing.T, endpoint uint64, di
 		t.Fatalf("fixture transfer refused before capture: %+v", got)
 	}
 	f.stamp++
+	if f.numbers == nil {
+		f.numbers = make(map[fragmentKey]uint64)
+	}
+	f.numbers[fragmentKey{endpoint, direction}]++
 	f.d.capture.Transfer(probe.Transfer{Process: fragment.Process{PID: 42, StartTime: 7},
 		Instance: admission.Instance{Namespace: admission.Namespace{Device: 1, Inode: 2}, PID: 42, Start: admission.Determinate(7), Generation: 1},
-		Endpoint: endpoint, Direction: direction, Measured: true, Length: uint32(len(text)), Payload: []byte(text), Stamp: f.stamp, At: time.Now()})
+		Endpoint: endpoint, Direction: direction, Measured: true, Length: uint32(len(text)), Payload: []byte(text), Stamp: f.stamp,
+		Sequence: probe.Sequence{Occupancy: endpoint, Number: f.numbers[fragmentKey{endpoint, direction}], Born: true}, At: time.Now()})
 }
 
 func (f *processingControllerFixture) closed(t *testing.T, endpoint uint64) {
@@ -196,7 +210,10 @@ func (f *processingControllerFixture) closed(t *testing.T, endpoint uint64) {
 	f.stamp++
 	f.d.capture.Closed(probe.Connection{Process: fragment.Process{PID: 42, StartTime: 7},
 		Instance: admission.Instance{Namespace: admission.Namespace{Device: 1, Inode: 2}, PID: 42, Start: admission.Determinate(7), Generation: 1},
-		Endpoint: endpoint, Stamp: f.stamp, At: time.Now()})
+		Endpoint: endpoint, Stamp: f.stamp, Sequence: probe.Sequence{Occupancy: endpoint, Born: true},
+		Final: probe.Final{Known: true, Sent: probe.Terminal{Last: f.numbers[fragmentKey{endpoint, fragment.Sent}]},
+			Received: probe.Terminal{Last: f.numbers[fragmentKey{endpoint, fragment.Received}]}},
+		At: time.Now()})
 }
 
 func (f *processingControllerFixture) halt(t *testing.T) {

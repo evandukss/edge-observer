@@ -10,7 +10,7 @@ import (
 )
 
 func TestLiveViewPreservesAmbiguityAndBindingOwnership(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
+	s := produced(&collected{}, nil)
 	s.Transfer(bound(worker, 0x31, fragment.Sent, 4, 7, 3))
 	ambiguous := transfer(worker, 0x31, fragment.Sent, 4)
 	ambiguous.Descriptor = 7
@@ -30,7 +30,7 @@ func TestLiveViewPreservesAmbiguityAndBindingOwnership(t *testing.T) {
 }
 
 func TestLiveViewExposesContinuityBasisDebt(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
+	s := produced(&collected{}, nil)
 	s.Transfer(bound(worker, 0x32, fragment.Sent, 4, 8, 4))
 	buffered := transfer(worker, 0x32, fragment.Sent, 2)
 	buffered.Bound = probe.NotBound
@@ -50,7 +50,7 @@ func TestLiveViewExposesContinuityBasisDebt(t *testing.T) {
 }
 
 func TestShortTransfersConserveOnlyReportedBytes(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
+	s := produced(&collected{}, nil)
 	first := bound(worker, 0x33, fragment.Sent, 3, 9, 5)
 	second := bound(worker, 0x33, fragment.Sent, 2, 9, 5)
 	s.Transfer(first)
@@ -69,7 +69,7 @@ func TestShortTransfersConserveOnlyReportedBytes(t *testing.T) {
 }
 
 func TestReverseFileThenSocketEvidenceDoesNotOverwriteEitherOutcome(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
+	s := produced(&collected{}, nil)
 	file := transfer(worker, 0x34, fragment.Sent, 2)
 	file.Bound = probe.NotBound
 	file.Outcome = probe.FileIO
@@ -88,7 +88,7 @@ func TestReverseFileThenSocketEvidenceDoesNotOverwriteEitherOutcome(t *testing.T
 }
 
 func TestSameDescriptorAcrossExecutionsKeepsBindingsSeparate(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
+	s := produced(&collected{}, nil)
 	left := bound(worker, 0x35, fragment.Sent, 4, 12, 7)
 	right := bound(gateway, 0x35, fragment.Sent, 4, 13, 8)
 	s.Transfer(left)

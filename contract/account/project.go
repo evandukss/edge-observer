@@ -549,9 +549,9 @@ func captureOf(source observed.Account) (Capture, error) {
 			Closed: decimalOf(seen.Closed), Early: decimalOf(seen.Early), Rejected: decimalOf(seen.Rejected),
 			Unattributed: decimalOf(seen.Unattributed), EndingsUnmatched: decimalOf(seen.EndingsUnmatched),
 			ConnectionsUnrecorded: decimalOf(seen.ConnectionsUnrecorded)},
-		Ordering: Ordering{Block: Block{State: Carried}, Disordered: decimalOf(seen.Disordered),
-			Unstamped: decimalOf(seen.Unstamped), Tolerated: decimalOf(seen.Tolerated), Lost: decimalOf(seen.Lost),
-			Retired: decimalOf(seen.Interrupted), Unexplained: decimalOf(seen.Unexplained)},
+		Ordering: Ordering{Block: Block{State: Carried}, Lost: decimalOf(seen.Lost), Cut: decimalOf(seen.Cut),
+			Retired: decimalOf(seen.Retired), Unsequenced: decimalOf(seen.Unsequenced),
+			Unlocated: decimalOf(seen.Unlocated)},
 	}
 	if loss := source.Loss; loss.Known {
 		capture.Loss = Loss{Block: Block{State: Carried}, Dropped: decimalOf(loss.Dropped),

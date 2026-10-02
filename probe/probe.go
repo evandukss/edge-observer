@@ -59,11 +59,10 @@ type Transfer struct {
 	// different facts, and only the last may use the handle's earlier binding.
 	Outcome SocketOutcome
 
-	// Stamp is this observation's place in the backend's production order: the
-	// only thing that locates a loss. Stamps are consecutive, so a missing number
-	// is an observation produced and not delivered, which says which streams were
-	// live across the gap. Zero means the backend does not stamp: ordering
-	// evidence absent, not a lossless run.
+	// Stamp is this observation's place in the backend's session-wide production
+	// order, which counts what was produced. It does not locate a loss to a
+	// connection: two producers can take stamps in one order and deliver in the
+	// other. Sequence does. Zero means the backend does not stamp.
 	Stamp uint64
 
 	// Sequence is this transfer's place in its own occupancy of the handle, the
@@ -910,24 +909,6 @@ type Admitting interface {
 	// Retract takes back grants Admit wrote, for a program found not to be the
 	// one resolved.
 	Retract(granted []admission.Selection)
-}
-
-// Consumed is how many production-order places an attachment took and
-// delivered nothing for. ReserveFailed is an event produced and lost; Refused
-// is a transfer refused deliberately so its gap invalidates. Watching only the
-// first would suppress an intended invalidation.
-type Consumed struct {
-	ReserveFailed int64
-	Refused       int64
-}
-
-// Consuming is an attachment that can say what it took out of the production
-// order; which refusal paths take a number is the backend's knowledge alone.
-// Without it the consumer confirms every gap.
-type Consuming interface {
-	Attachment
-
-	Consumed() (Consumed, error)
 }
 
 // Counting is an attachment that can say what its capture lost. One that

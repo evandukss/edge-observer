@@ -48,8 +48,9 @@ func TestRecordingIntakeUsesBothSinkInterfaces(t *testing.T) {
 	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	instance := admission.Instance{Namespace: admission.Namespace{Inode: 1}, PID: 42, Generation: 1}
 	process := fragment.Process{PID: 42, StartTime: 3}
-	recording.Transfer(probe.Transfer{Process: process, Instance: instance, Endpoint: 7, Direction: fragment.Sent, Measured: true, Length: 5, Payload: []byte("hello"), Stamp: 1, At: at})
-	recording.Closed(probe.Connection{Process: process, Instance: instance, Endpoint: 7, Stamp: 2, At: at})
+	recording.Transfer(probe.Transfer{Process: process, Instance: instance, Endpoint: 7, Direction: fragment.Sent, Measured: true, Length: 5, Payload: []byte("hello"), Stamp: 1, Sequence: probe.Sequence{Occupancy: 1, Number: 1}, At: at})
+	recording.Closed(probe.Connection{Process: process, Instance: instance, Endpoint: 7, Stamp: 2, Sequence: probe.Sequence{Occupancy: 1},
+		Final: probe.Final{Known: true, Sent: probe.Terminal{Last: 1}}, At: at})
 	if seen := recording.Stats(); seen.Transfers != 1 || seen.Closed != 1 || seen.Rejected != 0 || seen.ConnectionsUnrecorded != 0 {
 		t.Fatalf("both callbacks were not reached: %+v", seen)
 	}

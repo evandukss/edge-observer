@@ -1,6 +1,17 @@
 // Package capture turns what an adapter reports into fragment records: which
 // connection a transfer belongs to, where its bytes sit in that connection's
 // stream, and in what order they were seen.
+//
+// A transfer's place is checked against its producer's numbering of the
+// handle's occupancy before its bytes are placed (probe.Sequence). A number
+// missing on arrival is a transfer produced and not delivered, located to its
+// connection and direction: that direction's positions stop being established
+// where the missing bytes would have begun, and no other connection is
+// touched. A connection's tail is settled by the last numbers its ending
+// carries, or, for one still open when production stops, by what the producer
+// still holds (probe.Settler); otherwise it is explicitly unsettled. A loss the
+// producer could place in no occupancy costs every connection live across it,
+// and every connection begun after it, their positions from where each stood.
 package capture
 
 import (
@@ -59,32 +70,30 @@ type Stats struct {
 	// because an unmatched ending and a missing one otherwise look alike.
 	EndingsUnmatched int64 `json:"endings_unmatched"`
 
-	// Lost is the observations missing from the backend's production order. It
-	// counts observations, not bytes: a lost observation's length went with it,
-	// so later offsets cannot be recovered.
+	// Lost is the transfers missing from their own connection's sequence: numbers
+	// the producer took and never delivered, each located to one connection and
+	// direction. It counts transfers, not bytes: a lost transfer's length went
+	// with it.
 	Lost int64 `json:"lost"`
 
-	// Interrupted is the connections retired because a loss fell while they were
-	// live; each record says where its positions stop being established. Not
-	// connection.Seal.Interrupted, which counts transfers refused at the read
-	// boundary; reports call this one "retired".
-	Interrupted int64 `json:"interrupted"`
+	// Cut is the directions whose positions stopped being established while their
+	// connection was followed, for any reason a placement names.
+	Cut int64 `json:"cut"`
 
-	// Unstamped is observations with no place in the production order;
-	// Disordered is those behind one already seen. Either costs the run its
-	// ordering, and neither is Lost or Tolerated.
-	Unstamped  int64 `json:"unstamped"`
-	Disordered int64 `json:"disordered"`
+	// Retired is the connections ended because the producer began another
+	// occupancy of their handle: their own ending was never delivered, so their
+	// tails are unsettled.
+	Retired int64 `json:"retired"`
 
-	// Tolerated is gaps the backend accounted for as the producer's own
-	// stamp-then-reserve race, costing no stream its positions. Zero is not a
-	// pass: it may mean no race happened.
-	Tolerated int64 `json:"tolerated"`
+	// Unsequenced is the transfers the producer kept no sequence for, whose
+	// connections' positions nothing can check.
+	Unsequenced int64 `json:"unsequenced"`
 
-	// Unexplained is gaps confirmed because nothing could say whether anything
-	// was taken from the order: the backend had not answered, or its read failed.
-	// It separates those from gaps the backend confirmed.
-	Unexplained int64 `json:"unexplained"`
+	// Unlocated is the producer's count of losses it could place in no
+	// occupancy, the highest any observation carried. Above zero, every
+	// connection live across one of them and every connection begun after it
+	// lost its positions from where it stood.
+	Unlocated int64 `json:"unlocated"`
 
 	// ConnectionsUnrecorded is connection records the sink refused,
 	// never folded into Rejected.
@@ -132,9 +141,20 @@ type stream struct {
 	association map[fragment.Direction]*binding
 
 	// begun is why this stream's associations are unknown. A stream begun after a
-	// located loss may have lost the observation that would have named its
-	// binding, which differs from nothing having been observed.
+	// loss no occupancy could take may have lost the observation that would have
+	// named its binding, which differs from nothing having been observed.
 	begun connection.Reason
+
+	// occupancy is the producer's occupancy of the handle this stream follows;
+	// zero for a stream begun by a transfer the producer numbered nothing for.
+	occupancy uint64
+
+	// numbered is the last producer number seen in each direction.
+	numbered map[fragment.Direction]uint64
+
+	// unlocated is the producer's count of losses no occupancy could take, as of
+	// this stream's last observation.
+	unlocated uint64
 }
 
 // binding is what a direction's transfers established about their socket.
@@ -176,12 +196,15 @@ type binding struct {
 	outcome probe.SocketOutcome
 }
 
-// placement is one direction's answer to whether its bytes can be placed,
-// kept here so a loss can invalidate live streams as it is learned.
+// placement is one direction's answer to whether its bytes can be placed: the
+// first offset not established and why. lost is the transfers known missing
+// from the direction, and uncounted, where set, why that count is not the
+// whole of it.
 type placement struct {
-	positions connection.Positions
 	from      uint64
 	because   connection.Reason
+	lost      int64
+	uncounted string
 }
 
 // key is one open connection: the admission key and the library's handle.
@@ -206,28 +229,10 @@ type Session struct {
 	next        fragment.ConnectionID
 	stats       Stats
 
-	// stamp is the highest production-order position handed to this session. A
-	// jump is a loss, and where it falls says which streams were live across it.
-	stamp uint64
-
-	// consumed asks the backend what it took out of the order and delivered
-	// nothing for; taken is its last answer. Without a reader every gap is
-	// confirmed.
-	consumed func() (probe.Consumed, error)
-	taken    probe.Consumed
-
 	// settlers answer, once production has stopped, what each producer still
 	// holds for a connection whose ending never arrived. Several, because one
 	// capture can be fed by several producers.
 	settlers []probe.Settler
-
-	// interrupted is whether any loss has been located, which marks a stream
-	// begun afterwards as one whose binding evidence may be lost.
-	interrupted bool
-
-	// ordered is whether this run has usable ordering evidence. It goes false at
-	// the first unstamped or backward observation and stays false.
-	ordered bool
 
 	// observing is what the attachment feeding this session can establish, as
 	// the kernel confirmed it. It decides what an absence means: no binding source
@@ -235,15 +240,6 @@ type Session struct {
 	// lifetime is bounded. Its zero value is a capability nobody supplied, not one
 	// that can do nothing.
 	observing probe.Capability
-}
-
-// Consuming gives a running session its backend's answer, once the attachment
-// that can give it exists. Until then every gap is confirmed, which can
-// over-invalidate but never suppresses a loss.
-func (s *Session) Consuming(read func() (probe.Consumed, error)) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	s.consumed = read
 }
 
 // Settling adds a producer that can say, once production has stopped, what it
@@ -269,12 +265,6 @@ func New(sink Sink) *Session { return Recording(sink, nil) }
 // Option configures a session at construction.
 type Option func(*Session)
 
-// Consumes gives a session a way to ask its backend whether anything was taken
-// out of the order since it last asked. Without one, every gap is confirmed.
-func Consumes(read func() (probe.Consumed, error)) Option {
-	return func(s *Session) { s.consumed = read }
-}
-
 // Settles gives a session a producer that can say, once production has
 // stopped, what it still holds.
 func Settles(settler probe.Settler) Option {
@@ -290,7 +280,6 @@ func Recording(sink Sink, records connection.Sink, options ...Option) *Session {
 		records:     records,
 		streams:     make(map[key]*stream),
 		occupancies: make(map[key]connection.Generation),
-		ordered:     true,
 	}
 	for _, option := range options {
 		option(session)
@@ -306,23 +295,34 @@ func (s *Session) told() bool { return s.observing.Backend != "" }
 func (s *Session) Transfer(t probe.Transfer) {
 	s.mutex.Lock()
 
-	s.observe(t.Stamp, t.At)
 	s.stats.Transfers++
 	if t.Early {
 		s.stats.Early++
 	}
+	// A transfer carrying an occupancy and no number moved nothing: an
+	// out-parameter call that failed or ended. It takes no place.
+	moved := t.Sequence.Occupancy == 0 || t.Sequence.Number != 0
 	if !t.Measured {
-		// How much the call moved is unknowable. Counted, not placed: nothing after
-		// it in the stream has an offset.
+		// How much the call moved is unknowable. Counted, and nothing after it in the
+		// stream has an offset.
 		s.stats.Unmeasured++
-		if t.Early {
-			// Followed anyway, so what it carried early is not lost.
-			s.follow(t).earlySeen++
+		if moved || t.Early {
+			found := s.follow(t)
+			if t.Early {
+				// Followed anyway, so what it carried early is not lost.
+				found.earlySeen++
+			}
+			if moved {
+				s.number(found, t)
+				// The transfer arrived, so nothing is counted missing: what is unknown is
+				// where anything after it sits.
+				s.cutLocked(found, t.Direction, found.offsets[t.Direction], connection.LengthUnmeasured, 0, "")
+			}
 		}
 		s.mutex.Unlock()
 		return
 	}
-	if t.Length == 0 {
+	if t.Length == 0 && t.Sequence.Number == 0 {
 		// No bytes, no hole, nothing to place.
 		s.stats.Empty++
 		s.mutex.Unlock()
@@ -330,6 +330,12 @@ func (s *Session) Transfer(t probe.Transfer) {
 	}
 
 	found := s.follow(t)
+	s.number(found, t)
+	if t.Length == 0 {
+		s.stats.Empty++
+		s.mutex.Unlock()
+		return
+	}
 	found.sequence++
 	record := fragment.Record{
 		Process:    t.Process,
@@ -338,6 +344,7 @@ func (s *Session) Transfer(t probe.Transfer) {
 		Sequence:   found.sequence,
 		Offset:     found.offsets[t.Direction],
 		Length:     t.Length,
+		Produced:   t.Sequence.Number,
 		Payload:    t.Payload,
 		At:         t.At,
 	}
@@ -363,141 +370,129 @@ func (s *Session) Transfer(t probe.Transfer) {
 	s.mutex.Unlock()
 }
 
-// Refused takes the place in the production order of an event the delivery
-// gate refused. It is placed in no stream and ends none: a refusal is not a
-// loss. Without its place, every refused event would read at Finish as an
-// observation missing from the order, counted Lost, and every live stream would
-// be retired as a loss retires them. A gap before it is still a gap.
-func (s *Session) Refused(stamp uint64, at time.Time) {
+// Refused accounts for a transfer the delivery gate refused. Its bytes never
+// reach this session, so its direction stops where it stood; its number is
+// taken as seen, so a refusal is never counted as a transfer lost. A refused
+// call that moved nothing changes nothing.
+func (s *Session) Refused(t probe.Transfer, reason probe.GateReason) {
+	if t.Sequence.Occupancy != 0 && t.Sequence.Number == 0 {
+		return
+	}
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	s.observe(stamp, at)
+	found := s.follow(t)
+	s.number(found, t)
+	because := connection.ObservationLost
+	if reason == probe.GateUnknownLength {
+		because = connection.LengthUnmeasured
+	}
+	s.cutLocked(found, t.Direction, found.offsets[t.Direction], because, 1, "")
 }
 
-// observe reads one observation's place in the backend's production order and
-// acts on what is missing since the last one. The caller holds the lock.
+// number reads one transfer's place in its occupancy before its bytes are
+// placed, and stops the direction's positions where its evidence says they
+// stop. The caller holds the lock.
 //
-// The producer takes its stamp before reserving ring space, so a refused
-// reservation leaves a hole in the numbering; this is the detection itself and
-// must not be reordered (bpf/ssl.bpf.h, obs_emit). The cost: two producers can
-// take numbers in one order and reserve in the other, so a jump is either lost
-// or not yet handed over (reorderedLocked).
-//
-// Where a jump falls locates the loss: a stream that ended before it keeps its
-// offsets; one live across it loses positions. An unstamped observation, a
-// backward one, or a backend that does not stamp costs the run its ordering,
-// and every live stream becomes unplaceable throughout.
-func (s *Session) observe(stamp uint64, at time.Time) {
+// Under OpenSSL's supported use one call at a time is in flight per handle and
+// direction, so the producer reserves a direction's events in the order of
+// their numbers and they arrive in that order (struct occupancy,
+// bpf/ssl.bpf.h). A number past the next is that many transfers lost here,
+// and only here. A number at or behind one already seen, or a direction the
+// producer saw two calls overlap in, is the supported use broken: the order of
+// its bytes is not established from there.
+func (s *Session) number(found *stream, t probe.Transfer) {
+	direction := t.Direction
+	at := found.offsets[direction]
+	sequence := t.Sequence
+
+	s.unlocatedLocked(found, sequence.Unlocated)
+
+	if sequence.Occupancy == 0 {
+		// The handle has no occupancy, so neither direction's numbers are kept.
+		s.stats.Unsequenced++
+		for _, each := range []fragment.Direction{fragment.Sent, fragment.Received} {
+			s.cutLocked(found, each, found.offsets[each], connection.SequenceUnavailable, 0,
+				"the producer kept no sequence for the connection's handle")
+		}
+		return
+	}
+	if sequence.Overlapped {
+		s.cutLocked(found, direction, at, connection.OperationsOverlapped, 0,
+			"two calls in the direction overlapped, so whether any of their bytes is missing is unknown")
+	}
+	last := found.numbered[direction]
 	switch {
-	case stamp == 0:
-		// No place in the order: counted, and located gaps are no longer claimed.
-		s.stats.Unstamped++
-		s.ordered = false
-		return
-	case s.stamp == 0:
-		s.stamp = stamp
-		return
-	case stamp <= s.stamp:
-		s.stats.Disordered++
-		s.ordered = false
-		s.stamp = max(s.stamp, stamp)
-		return
-	case stamp == s.stamp+1:
-		s.stamp = stamp
-		return
+	case sequence.Number == last+1:
+	case sequence.Number > last+1:
+		missing := int64(sequence.Number - last - 1)
+		s.stats.Lost += missing
+		s.cutLocked(found, direction, at, connection.ObservationLost, missing, "")
+	default:
+		s.cutLocked(found, direction, at, connection.OperationsOverlapped, 0,
+			"a transfer arrived behind one already seen, so whether any is missing is unknown")
 	}
-
-	missing := stamp - s.stamp - 1
-	s.stamp = stamp
-	if s.reorderedLocked() {
-		return
-	}
-	s.interruptLocked(missing, at)
-}
-
-// reorderedLocked reports whether a gap is the producer's stamp-then-reserve
-// race rather than a loss, counting it if so, from counters the backend keeps.
-// Both counters are consulted: a refused transfer takes a number deliberately
-// so its gap invalidates.
-//
-// Either counter can move for an unrelated call between gaps, which confirms
-// a gap that was only a reorder: over-invalidation, never a suppressed loss.
-// No reader, or no answer, confirms the gap. The caller holds the lock.
-func (s *Session) reorderedLocked() bool {
-	if s.consumed == nil {
-		s.stats.Unexplained++
-		return false
-	}
-	now, err := s.consumed()
-	if err != nil {
-		s.stats.Unexplained++
-		return false
-	}
-	moved := now.ReserveFailed != s.taken.ReserveFailed || now.Refused != s.taken.Refused
-	s.taken = now
-	if moved {
-		return false
-	}
-	s.stats.Tolerated++
-	return true
-}
-
-// interruptLocked retires every stream live across a located loss. A stamp gap
-// locates a loss in the production order, not in a stream: the lost event
-// named its own connection, so every live stream could be affected, while a
-// stream that already ended keeps every offset.
-//
-// Retired rather than continued because the lost observation may have been
-// the connection's end; the next transfer at that handle begins a new
-// connection whose associations are unknown because an observation was lost.
-// The caller holds the lock.
-func (s *Session) interruptLocked(missing uint64, at time.Time) {
-	s.stats.Lost += int64(missing)
-
-	retired := make([]connection.Record, 0, len(s.streams))
-	for place, found := range s.streams {
-		for direction, offset := range found.offsets {
-			held := placement{positions: connection.PositionsUnknownFrom, from: offset, because: connection.ObservationLost}
-			if !s.ordered {
-				held = placement{positions: connection.PositionsUnknownThroughout, because: connection.ObservationLost}
-			}
-			found.place(direction, held)
-		}
-		retired = append(retired, found.record(connection.EndingUnobserved, at))
-		delete(s.streams, place)
-		s.stats.Interrupted++
-	}
-	slices.SortFunc(retired, func(x, y connection.Record) int { return int(x.ID) - int(y.ID) })
-	s.closed = append(s.closed, retired...)
-	s.interrupted = true
-
-	// Called under the lock: the caller already holds it. The sink must do
-	// bounded storage work, never parsing or durable output.
-	for _, record := range retired {
-		if s.records == nil {
-			continue
-		}
-		if err := s.records.Connection(record); err != nil {
-			s.stats.ConnectionsUnrecorded++
-		}
+	if sequence.Number > last {
+		found.numbered[direction] = sequence.Number
 	}
 }
 
-// place records one direction's positions. The caller holds the lock.
-func (t *stream) place(direction fragment.Direction, held placement) {
-	if t.placement == nil {
-		t.placement = make(map[fragment.Direction]placement, 2)
+// unlocatedLocked applies the conservative rule for a loss the producer could
+// place in no occupancy, counted before this observation was produced: it may
+// have been this connection's, anywhere after where the stream stood at its
+// last observation, so every direction stops there. The caller holds the lock.
+func (s *Session) unlocatedLocked(found *stream, unlocated uint64) {
+	if unlocated > uint64(s.stats.Unlocated) {
+		s.stats.Unlocated = int64(unlocated)
 	}
-	t.placement[direction] = held
+	if unlocated <= found.unlocated {
+		return
+	}
+	found.unlocated = unlocated
+	for _, direction := range []fragment.Direction{fragment.Sent, fragment.Received} {
+		s.cutLocked(found, direction, found.offsets[direction], connection.ObservationLost, 0,
+			"the producer lost a transfer it could place in no connection while this one was live")
+	}
 }
 
-// follow is the stream a transfer belongs to, begun if new. The caller holds
-// the lock.
+// cutLocked stops one direction's established positions at an offset, for a
+// reason. An earlier cut stands: the first is where the positions stopped
+// being established, and its reason the one that stopped them. lost transfers
+// are added to the direction's count; why says why the count is not the whole
+// of it, and is empty where it is. The direction is carried from here, so a
+// direction whose every transfer was lost still has its placement. The caller
+// holds the lock.
+func (s *Session) cutLocked(found *stream, direction fragment.Direction, from uint64, because connection.Reason,
+	lost int64, why string) {
+	if _, carried := found.offsets[direction]; !carried {
+		found.offsets[direction] = 0
+	}
+	if found.placement == nil {
+		found.placement = make(map[fragment.Direction]placement, 2)
+	}
+	held, cut := found.placement[direction]
+	if !cut {
+		held = placement{from: from, because: because}
+		s.stats.Cut++
+	}
+	held.lost += lost
+	if why != "" && held.uncounted == "" {
+		held.uncounted = why
+	}
+	found.placement[direction] = held
+}
+
+// follow is the stream a transfer belongs to, begun if new. A transfer of an
+// occupancy other than the stream's is the producer's word that the handle was
+// released and reused: the stream it found is retired with an unsettled tail,
+// since its own ending never arrived. The caller holds the lock.
 func (s *Session) follow(t probe.Transfer) *stream {
 	place := key{instance: t.Instance.Key(), endpoint: t.Endpoint}
 	found, open := s.streams[place]
 	if open {
-		return found
+		if t.Sequence.Occupancy == 0 || found.occupancy == 0 || found.occupancy == t.Sequence.Occupancy {
+			return found
+		}
+		s.retireLocked(place, found, t.At)
 	}
 
 	if err := t.Instance.Validate(); err != nil {
@@ -507,9 +502,10 @@ func (s *Session) follow(t probe.Transfer) *stream {
 	}
 
 	begun := connection.NoBindingObserved
-	if s.interrupted {
-		// A loss was already located, so this stream's binding evidence may be lost:
-		// a statement about losses, not coverage.
+	if t.Sequence.Unlocated > 0 {
+		// A loss no occupancy could take fell before this stream began, so this
+		// stream's binding evidence, and its first transfers, may be lost: a statement
+		// about losses, not coverage.
 		begun = connection.ObservationLost
 	}
 	if s.told() && !s.observing.Binding {
@@ -531,10 +527,84 @@ func (s *Session) follow(t probe.Transfer) *stream {
 		opened:     t.Ends.OpenedAt,
 		offsets:    make(map[fragment.Direction]uint64, 2),
 		begun:      begun,
+		occupancy:  t.Sequence.Occupancy,
+		numbered:   make(map[fragment.Direction]uint64, 2),
+		unlocated:  t.Sequence.Unlocated,
+	}
+	if t.Sequence.Unlocated > 0 && t.Sequence.Occupancy != 0 {
+		// The conservative rule for a stream begun after a loss nothing located:
+		// its first transfers may be the ones lost, so no offset is established. A
+		// stream with no sequence establishes none anyway, for its own reason.
+		for _, direction := range []fragment.Direction{fragment.Sent, fragment.Received} {
+			s.cutLocked(found, direction, 0, connection.ObservationLost, 0,
+				"the producer lost a transfer it could place in no connection before this one began")
+		}
 	}
 	s.streams[place] = found
 	s.stats.Connections++
 	return found
+}
+
+// retireLocked ends a stream whose occupancy the producer replaced. Its last
+// transfers and its ending were never delivered, so nothing settles its tail.
+// The record goes to the sink under the lock, which must do bounded storage
+// work, never parsing or durable output. The caller holds the lock.
+func (s *Session) retireLocked(place key, found *stream, at time.Time) {
+	s.unsettledLocked(found, "the connection's ending was never delivered, so whether its last transfers "+
+		"arrived is unknown")
+	record := found.record(connection.EndingUnobserved, at)
+	delete(s.streams, place)
+	s.closed = append(s.closed, record)
+	s.stats.Retired++
+	if s.records == nil {
+		return
+	}
+	if err := s.records.Connection(record); err != nil {
+		s.stats.ConnectionsUnrecorded++
+	}
+}
+
+// unsettledLocked cuts both directions where they stand, for want of terminal
+// evidence. The caller holds the lock.
+func (s *Session) unsettledLocked(found *stream, why string) {
+	for _, direction := range []fragment.Direction{fragment.Sent, fragment.Received} {
+		s.cutLocked(found, direction, found.offsets[direction], connection.TerminalUnsettled, 0, why)
+	}
+}
+
+// settleLocked reads a stream's tail against its occupancy's last numbers.
+// A last number past the one seen is that many transfers lost at the end. A
+// call still in flight at a release is the supported use broken: its bytes
+// may belong to the stream. ending says the final came with the connection's
+// ending rather than from the producer once production stopped, where a call
+// in flight has moved nothing yet that belongs before the boundary. The
+// caller holds the lock.
+func (s *Session) settleLocked(found *stream, final probe.Final, ending bool) {
+	if !final.Known {
+		s.unsettledLocked(found, "the producer held no occupancy for the connection when it ended, so "+
+			"whether its last transfers arrived is unknown")
+		return
+	}
+	for _, one := range []struct {
+		direction fragment.Direction
+		terminal  probe.Terminal
+	}{{fragment.Sent, final.Sent}, {fragment.Received, final.Received}} {
+		at := found.offsets[one.direction]
+		last := found.numbered[one.direction]
+		switch {
+		case one.terminal.Last > last:
+			missing := int64(one.terminal.Last - last)
+			s.stats.Lost += missing
+			s.cutLocked(found, one.direction, at, connection.ObservationLost, missing, "")
+		case one.terminal.Last < last:
+			s.cutLocked(found, one.direction, at, connection.TerminalUnsettled, 0,
+				"the producer's last number is behind one delivered, so the direction's evidence disagrees")
+		}
+		if ending && one.terminal.InFlight {
+			s.cutLocked(found, one.direction, at, connection.TerminalUnsettled, 0,
+				"a call in the direction was still in flight when the handle was released")
+		}
+	}
 }
 
 // Closed ends this occupancy of a handle, so the handle can be reused without
@@ -542,8 +612,6 @@ func (s *Session) follow(t probe.Transfer) *stream {
 // reference counted and SSL_clear recycles a handle in place.
 func (s *Session) Closed(c probe.Connection) {
 	s.mutex.Lock()
-
-	s.observe(c.Stamp, c.At)
 
 	place := key{instance: c.Instance.Key(), endpoint: c.Endpoint}
 	found, open := s.streams[place]
@@ -553,6 +621,16 @@ func (s *Session) Closed(c probe.Connection) {
 		s.mutex.Unlock()
 		return
 	}
+	if c.Sequence.Occupancy != 0 && found.occupancy != 0 && c.Sequence.Occupancy != found.occupancy {
+		// The ending of a later occupancy, every transfer of which was lost: this
+		// stream's own ending never arrived.
+		s.retireLocked(place, found, c.At)
+		s.stats.EndingsUnmatched++
+		s.mutex.Unlock()
+		return
+	}
+	s.unlocatedLocked(found, c.Sequence.Unlocated)
+	s.settleLocked(found, c.Final, true)
 	delete(s.streams, place)
 	s.stats.Closed++
 	record := found.record(connection.HandleReleasedEnding, c.At)
@@ -562,27 +640,17 @@ func (s *Session) Closed(c probe.Connection) {
 	s.write(record)
 }
 
-// Finish writes a record for every open connection, and accounts for a loss
-// after the last observation handed over. Called once, by whatever seals the
-// run.
+// Finish writes a record for every open connection, each with its tail
+// settled against what its producer still holds, or explicitly unsettled.
+// Called once, by whatever seals the run, after production has stopped and
+// the producers have drained: then nothing can take a number unseen.
 //
 // Records distinguish a connection the run outlived from one that closed.
-// produced is how many observations the backend says it produced; without it
-// a trailing loss is invisible, so unknown produced makes every open stream
-// unplaceable throughout.
-func (s *Session) Finish(at time.Time, produced connection.Count) {
+func (s *Session) Finish(at time.Time) {
 	s.mutex.Lock()
-	switch {
-	case !produced.Known:
-		// Unknown production: a trailing loss cannot be told from a tidy end.
-		s.ordered = false
-		s.interruptLocked(0, at)
-	case produced.Value > int64(s.stamp):
-		s.interruptLocked(uint64(produced.Value)-s.stamp, at)
-	}
-
 	open := make([]connection.Record, 0, len(s.streams))
 	for place, found := range s.streams {
+		s.finalLocked(found)
 		open = append(open, found.record(connection.StillOpen, at))
 		delete(s.streams, place)
 	}
@@ -593,6 +661,54 @@ func (s *Session) Finish(at time.Time, produced connection.Count) {
 	for _, record := range open {
 		s.write(record)
 	}
+}
+
+// finalLocked settles a stream still open when production stopped, against
+// the one producer holding its occupancy. No producer holding it, two
+// claiming it, one holding another occupancy there, or one that cannot be
+// read leaves the tail unsettled. The caller holds the lock.
+func (s *Session) finalLocked(found *stream) {
+	if found.occupancy == 0 {
+		// Already unplaceable for want of a sequence.
+		return
+	}
+	handle := probe.Handle{Instance: found.instance.Key(), Endpoint: found.endpoint}
+	var holder probe.Settler
+	var held probe.Settlement
+	for _, settler := range s.settlers {
+		one, err := settler.Settled(handle)
+		if err != nil {
+			s.unsettledLocked(found, "the producer's occupancies could not be read when production stopped: "+
+				err.Error())
+			return
+		}
+		if one.Occupancy == 0 {
+			continue
+		}
+		if holder != nil {
+			s.unsettledLocked(found, "two producers hold an occupancy for the connection's handle")
+			return
+		}
+		holder, held = settler, one
+	}
+	switch {
+	case holder == nil:
+		s.unsettledLocked(found, "no producer held the connection's occupancy when production stopped, so "+
+			"its ending, and whether its last transfers arrived, are unknown")
+		return
+	case held.Occupancy != found.occupancy:
+		s.unsettledLocked(found, "the producer had begun another occupancy of the handle, so the "+
+			"connection's ending was never delivered")
+		return
+	}
+	unlocated, err := holder.Unlocated()
+	if err != nil {
+		s.unsettledLocked(found, "the producer's count of losses it could place nowhere could not be read: "+
+			err.Error())
+		return
+	}
+	s.unlocatedLocked(found, unlocated)
+	s.settleLocked(found, held.Final, false)
 }
 
 // write hands on one record, counting a refusal on its own counter.
@@ -800,24 +916,10 @@ func endpointsOf(ends probe.Ends) connection.Endpoints {
 }
 
 // placed is what this stream says about one direction's positions, stated
-// even when whole. The lost count on an invalidated direction is unknown, not
-// zero: a production-order gap does not say how much was this direction's.
+// even when whole. A cut at the direction's first byte establishes no offset.
 func (t *stream) placed(direction fragment.Direction) connection.Placement {
-	held, invalidated := t.placement[direction]
-	if !invalidated {
-		if t.begun == connection.ObservationLost {
-			// A stream begun after a located loss: its offsets are relative to its first
-			// byte, and the lost observation may have been its own beginning. Unknown
-			// throughout, since there is no placeable prefix to name.
-			return connection.Placement{
-				Connection: t.id,
-				Direction:  direction,
-				Positions:  connection.PositionsUnknownThroughout,
-				Because:    connection.ObservationLost,
-				Lost: connection.Uncounted("the gap is located in the session's production order " +
-					"and its observations are not attributed to a stream"),
-			}
-		}
+	held, cut := t.placement[direction]
+	if !cut {
 		return connection.Placement{
 			Connection: t.id,
 			Direction:  direction,
@@ -825,15 +927,21 @@ func (t *stream) placed(direction fragment.Direction) connection.Placement {
 			Lost:       connection.Counted(0),
 		}
 	}
-	return connection.Placement{
+	one := connection.Placement{
 		Connection: t.id,
 		Direction:  direction,
-		Positions:  held.positions,
+		Positions:  connection.PositionsUnknownFrom,
 		From:       held.from,
 		Because:    held.because,
-		Lost: connection.Uncounted("the gap is located in the session's production order and its " +
-			"observations are not attributed to a stream"),
+		Lost:       connection.Counted(held.lost),
 	}
+	if held.from == 0 {
+		one.Positions, one.From = connection.PositionsUnknownThroughout, 0
+	}
+	if held.uncounted != "" {
+		one.Lost = connection.Uncounted(held.uncounted)
+	}
+	return one
 }
 
 // record is this stream as a connection record. The caller holds the lock.

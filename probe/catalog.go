@@ -36,6 +36,10 @@ type Function struct {
 	// Early marks the functions carrying TLS 1.3 early data: ordinary stream
 	// bytes, but replayable and not forward-secret, so worth recording.
 	Early bool `json:"early,omitempty"`
+
+	// Begins marks a lifecycle function returning a new handle: its birth, from
+	// which every transfer of the handle is numbered.
+	Begins bool `json:"begins,omitempty"`
 }
 
 // Count is where a function reports its byte count, which decides whether a
@@ -65,8 +69,10 @@ type Runtime struct {
 
 	Functions []Function
 
-	// Lifecycle is what the runtime calls when a connection ends. Without it a
-	// reused endpoint continues the previous connection's stream, invisibly.
+	// Lifecycle is what the runtime calls when a connection begins and ends.
+	// Without the ending a reused endpoint continues the previous connection's
+	// stream, invisibly; without the beginning a connection's first transfer is
+	// the first one observed, not the first one made.
 	Lifecycle []Function
 }
 
@@ -99,6 +105,9 @@ var OpenSSL = Runtime{
 	Lifecycle: []Function{
 		// The SSL object identifies a connection, and its address is reused.
 		{Symbol: "SSL_free", Since: "0.9.8", Probed: true},
+		// Its birth: a handle's transfers are numbered from here, so the first one
+		// lost is a number missing rather than a later one taken for the first.
+		{Symbol: "SSL_new", Since: "0.9.8", Probed: true, Begins: true},
 	},
 }
 

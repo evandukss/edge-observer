@@ -194,6 +194,12 @@ type script struct {
 	transfers []transfer
 	next      int
 	plan      Connection
+
+	// numbers is the last number this connection's occupancy took in each
+	// direction, as the kernel producer numbers a handle's transfers; the
+	// occupancy is the script's own, from one.
+	occupancy uint64
+	numbers   map[fragment.Direction]uint64
 }
 
 var base = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
@@ -221,7 +227,11 @@ func (g *generator) run() *Workload {
 		}
 		g.stamp++
 		p, instance := identity(s.process)
-		g.session.Closed(probe.Connection{Process: p, Instance: instance, Stamp: g.stamp, Endpoint: s.endpoint, At: g.at()})
+		g.session.Closed(probe.Connection{Process: p, Instance: instance, Stamp: g.stamp, Endpoint: s.endpoint,
+			Sequence: probe.Sequence{Occupancy: s.occupancy, Born: true},
+			Final: probe.Final{Known: true, Sent: probe.Terminal{Last: s.numbers[fragment.Sent]},
+				Received: probe.Terminal{Last: s.numbers[fragment.Received]}},
+			At: g.at()})
 		active = slices.Delete(active, i, i+1)
 	}
 	w := &Workload{Shape: g.shape, Entries: g.entries}
@@ -275,8 +285,10 @@ func (g *generator) at() time.Time { return base.Add(time.Duration(g.stamp) * ti
 func (g *generator) send(s *script, t transfer) {
 	g.stamp++
 	p, instance := identity(s.process)
+	s.numbers[t.direction]++
 	g.session.Transfer(probe.Transfer{Process: p, Instance: instance, Endpoint: s.endpoint, Direction: t.direction,
-		Measured: true, Length: uint32(t.length), Payload: t.payload, Stamp: g.stamp, At: g.at()})
+		Measured: true, Length: uint32(t.length), Payload: t.payload, Stamp: g.stamp,
+		Sequence: probe.Sequence{Occupancy: s.occupancy, Number: s.numbers[t.direction], Born: true}, At: g.at()})
 }
 
 func identity(process int) (fragment.Process, admission.Instance) {
@@ -290,7 +302,8 @@ func identity(process int) (fragment.Process, admission.Instance) {
 // script plans connection c: its exchanges, any defect, and the library calls
 // that carry them, each at most capture's per-event payload ceiling.
 func (g *generator) script(c, process int) *script {
-	s := &script{process: process, endpoint: 0x10000 + uint64(c)*0x100}
+	s := &script{process: process, endpoint: 0x10000 + uint64(c)*0x100, occupancy: uint64(c) + 1,
+		numbers: make(map[fragment.Direction]uint64, 2)}
 	p, _ := identity(process)
 	s.plan.Process = p
 	defectAt := -1

@@ -80,6 +80,9 @@ func CoverageOf(answered []Placed) Coverage {
 		// held through, not whether a descendant is observed.
 		case one.Point.Entry == progFreeEntry:
 			coverage.Lifecycle = true
+		case one.Point.Return == progNewReturn:
+			// A handle's birth moves no plaintext; it only numbers the handle's
+			// transfers from their first.
 		case bindingProgram(one.Point):
 			coverage.Binding = true
 		case socketProgram(one.Point):

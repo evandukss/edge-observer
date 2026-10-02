@@ -87,9 +87,11 @@ func batch(t *testing.T, id fragment.ConnectionID, request, response string) cap
 		if n == 1 {
 			direction = fragment.Received
 		}
-		s.Transfer(probe.Transfer{Process: p, Instance: i, Endpoint: 7, Direction: direction, Measured: true, Length: uint32(len(text)), Payload: []byte(text), Stamp: uint64(n + 1), At: at})
+		s.Transfer(probe.Transfer{Process: p, Instance: i, Endpoint: 7, Direction: direction, Measured: true, Length: uint32(len(text)), Payload: []byte(text), Stamp: uint64(n + 1),
+			Sequence: probe.Sequence{Occupancy: 1, Number: 1, Born: true}, At: at})
 	}
-	s.Closed(probe.Connection{Process: p, Instance: i, Endpoint: 7, Stamp: 3, At: at})
+	s.Closed(probe.Connection{Process: p, Instance: i, Endpoint: 7, Stamp: 3, Sequence: probe.Sequence{Occupancy: 1, Born: true},
+		Final: probe.Final{Known: true, Sent: probe.Terminal{Last: 1}, Received: probe.Terminal{Last: 1}}, At: at})
 	if len(b.fragments) != 2 || len(b.records) != 1 {
 		t.Fatal("fixture did not reach both capture callbacks")
 	}
@@ -301,7 +303,7 @@ func truncationOf(t *testing.T, line []byte) *truncationWire {
 
 func TestWorkerReportsIndeterminateSuffixAfterUsefulPrefix(t *testing.T) {
 	partial := "GET /withheld HTTP/1.1\r\nX-Secret: hidden"
-	for _, name := range []string{"gap-at-boundary", "gap-inside-message", "short-payload", "unterminated-message", "placement-at-boundary"} {
+	for _, name := range []string{"gap-at-boundary", "gap-inside-message", "short-payload", "unterminated-message", "placement-at-boundary", "producer-number-skipped"} {
 		t.Run(name, func(t *testing.T) {
 			out := &outputLog{}
 			plan := rulesPlan(t, "")
@@ -332,6 +334,19 @@ func TestWorkerReportsIndeterminateSuffixAfterUsefulPrefix(t *testing.T) {
 				later.Length = uint32(len(later.Payload))
 				if later.Offset <= b.fragments[0].End() {
 					t.Fatal("constructed hole was not reached")
+				}
+				b.fragments = append(b.fragments, later)
+				b.records[0].Fragments = connection.Counted(3)
+			case "producer-number-skipped":
+				// Contiguous by offset, which is what capture writes when it advances by what
+				// arrived; only the producer number shows transfer two never did.
+				later := b.fragments[0]
+				later.Sequence, later.Offset, later.Produced = 3, uint64(len(request)), 3
+				later.Payload = []byte("GET /after-hole HTTP/1.1\r\nX-Secret: hidden\r\n\r\n")
+				later.Length = uint32(len(later.Payload))
+				if later.Offset != b.fragments[0].End() || b.fragments[0].Produced != 1 {
+					t.Fatal("wiring, not the property: the constructed fragments are not contiguous by offset " +
+						"with a producer number skipped between them")
 				}
 				b.fragments = append(b.fragments, later)
 				b.records[0].Fragments = connection.Counted(3)

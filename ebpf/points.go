@@ -6,8 +6,9 @@ import (
 	"slices"
 )
 
-// The BPF programs, by their names in the object: six transfer pairs and one
-// entry-only close. A function's program is decided by its direction, whether
+// The BPF programs, by their names in the object: seven transfer pairs, one
+// entry-only close and one return-only birth. A function's program is decided
+// by whether it begins a handle, then by its direction, whether
 // its count is a register or an out-parameter, and whether the bytes are early
 // data (package bpf; the catalogue in package probe).
 const (
@@ -26,6 +27,7 @@ const (
 	progWriteEx2Entry    = "obs_write_ex2_entry"
 	progWriteEx2Return   = "obs_write_ex2_return"
 	progFreeEntry        = "obs_free_entry"
+	progNewReturn        = "obs_new_return"
 )
 
 // Discard is one resolved probe no point was made for, and why. The resolver
@@ -54,7 +56,7 @@ func PointsFrom(probes []probe.Probe, runtime probe.Runtime) ([]Point, []Discard
 			continue
 		}
 		entry, back := programsFor(function)
-		if entry == "" {
+		if entry == "" && back == "" {
 			discarded = append(discarded, Discard{
 				Symbol: resolved.Symbol,
 				Reason: "the catalogue names it, and no program observes a function that counts this way",
@@ -141,6 +143,10 @@ func ForkPoint(symbol, path string, offset uint64) Point {
 // programsFor is the mapping from a catalogued function to the BPF programs
 // that observe it. Entry is empty for a function this does not attach to.
 func programsFor(function probe.Function) (entry, back string) {
+	if function.Begins {
+		// A handle's birth: the new handle is the return value.
+		return "", progNewReturn
+	}
 	switch function.Count {
 	case probe.CountNone:
 		// A connection ending. No count and no return.

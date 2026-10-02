@@ -93,6 +93,14 @@ type Options struct {
 	// is withheld by name, exactly as one the kernel refuses; no weaker resolution
 	// is selected quietly.
 	Kernel []KernelPoint
+
+	// Resize sets maps' capacities by name before the program loads, and Staging
+	// the depth of the channel decoded events wait in (zero is the default). They
+	// let a case make the ring refuse reservations, or a table refuse an entry,
+	// after a handful of events rather than the traffic that fills the defaults.
+	// Production callers leave both unset.
+	Resize  map[string]uint32
+	Staging int
 }
 
 // MinimumKernel is the oldest kernel this package will attach on, published
@@ -253,10 +261,10 @@ type Event struct {
 	Kind Kind
 	SSL  uint64
 
-	// Stamp is this event's place in production order, taken before its
-	// reservation. Stamps are consecutive, so a missing number is an event
-	// produced and lost, which says which streams were live across the loss. Zero
-	// means the program could not reach its allocator.
+	// Stamp is this event's place in the session-wide production order, taken
+	// before its reservation; it counts what was produced. Which connection lost
+	// an event is said by Sequence. Zero means the program could not reach its
+	// allocator.
 	Stamp uint64
 
 	// Descriptor is the socket this call's bytes crossed, Bound what is
@@ -288,6 +296,11 @@ type Event struct {
 	// Origin is that admission as the program held it when the firing was
 	// checked against it.
 	Origin Origin
+
+	// Sequence is the firing's place in its occupancy of the handle, and Final an
+	// ending's last numbers (struct occupancy, bpf/ssl.bpf.h).
+	Sequence probe.Sequence
+	Final    probe.Final
 
 	PID       int32
 	TID       int32
@@ -503,10 +516,12 @@ const MaxEventPayloadBytes = 4096
 // the socket's endpoints appended after them (a flag, a padding byte, the
 // network namespace, two 16-byte addresses, two ports, four padding bytes),
 // then the socket's start (144), then the admission's origin (three eight-byte
-// fields, three four-byte, a kind and three padding bytes): 184. The padding
-// is explicit so no offset depends on the compiler, and package bpf's layout
-// guard pins every offset against the source (bpf/ssl.bpf.h).
-const rawHeader = 184
+// fields, three four-byte, a kind and three padding bytes: 184), then the
+// event's place in its occupancy (five eight-byte fields, three flags and five
+// padding bytes): 232. The padding is explicit so no offset depends on the
+// compiler, and package bpf's layout guard pins every offset against the source
+// (bpf/ssl.bpf.h).
+const rawHeader = 232
 
 // Attach loads the program, places the points, fills the allowlist and begins
 // reading. Nothing is captured before this and nothing after Close.
@@ -515,7 +530,7 @@ func Attach(options Options) (*Session, error) {
 		return nil, errors.New("no points to attach to")
 	}
 
-	collection, err := load(options.Program)
+	collection, err := load(options.Program, options.Resize)
 	if err != nil {
 		return nil, err
 	}
@@ -523,10 +538,14 @@ func Attach(options Options) (*Session, error) {
 	// The events channel's capacity is staging depth, while MaxEventPayloadBytes
 	// is a per-event payload maximum. Their values are equal by coincidence;
 	// unifying them would make changing either silently change the other.
+	staging := 4096
+	if options.Staging > 0 {
+		staging = options.Staging
+	}
 	session := &Session{
 		monotonicBase: pairClocks(),
 		collection:    collection,
-		events:        make(chan Event, 4096),
+		events:        make(chan Event, staging),
 		done:          make(chan struct{}),
 		idle:          make(chan struct{}, 1),
 		stopped:       make(chan struct{}),
@@ -598,7 +617,7 @@ func Attach(options Options) (*Session, error) {
 // nothing. It is Attach's own first step, so a kernel it clears is one Attach
 // clears, and a refusal carries Attach's reason.
 func Loads(program obpf.Program) error {
-	collection, err := load(program)
+	collection, err := load(program, nil)
 	if err != nil {
 		return err
 	}
@@ -606,8 +625,9 @@ func Loads(program obpf.Program) error {
 	return nil
 }
 
-// load is the program as this kernel took it, before any probe is placed.
-func load(program obpf.Program) (*ebpf.Collection, error) {
+// load is the program as this kernel took it, before any probe is placed, with
+// the capacities resize names.
+func load(program obpf.Program, resize map[string]uint32) (*ebpf.Collection, error) {
 	// Userspace reads a grant's birth from /proc and the program from the kernel;
 	// they agree only while this reader's time namespace shifts nothing
 	// (process.StartTimesAreOffset). Otherwise every grant would name a number the
@@ -626,6 +646,13 @@ func load(program obpf.Program) (*ebpf.Collection, error) {
 	spec, err := ebpf.LoadCollectionSpecFromReader(newReader(program.Object))
 	if err != nil {
 		return nil, fmt.Errorf("%w: read the program: %v", ErrUnavailable, err)
+	}
+	for name, size := range resize {
+		held, found := spec.Maps[name]
+		if !found {
+			return nil, fmt.Errorf("%w: the program has no %s map to resize", ErrUnavailable, name)
+		}
+		held.MaxEntries = size
 	}
 
 	collection, err := ebpf.NewCollection(spec)
@@ -2129,23 +2156,6 @@ func (s *Session) Unrecorded() (int64, error) { return s.stat(obpf.StatCallUnrec
 // stream.
 func (s *Session) Refused() (int64, error) { return s.stat(obpf.StatRefused) }
 
-// Consumed is the places this program took out of the production order and
-// delivered nothing for. Only two counters do that: a refused reservation (the
-// stamp precedes it) and the two refusal sites at the read boundary. Every
-// other counted refusal returns before stamping and takes no place, so a
-// consumer may not sum the counters it sees (obs_emit, bpf/ssl.bpf.h).
-func (s *Session) Consumed() (probe.Consumed, error) {
-	failed, err := s.stat(obpf.StatReserveFailed)
-	if err != nil {
-		return probe.Consumed{}, err
-	}
-	refused, err := s.stat(obpf.StatRefused)
-	if err != nil {
-		return probe.Consumed{}, err
-	}
-	return probe.Consumed{ReserveFailed: failed, Refused: refused}, nil
-}
-
 // callValue is the in-flight table's value as the program declares it (struct
 // call, bpf/ssl.bpf.h), with explicit padding: reading a wrong byte here would
 // report operations in flight that are not.
@@ -2187,8 +2197,9 @@ type callValue struct {
 	// would read Deferred at the same total size.
 	Deferred    uint8
 	Live        uint8
-	Reserved    [4]uint8
-	LivePadding [3]uint8
+	Nested      uint8
+	LivePadding [6]uint8
+	Occupancy   uint64
 }
 
 // Executing is how many calls are still inside the observed library: live
@@ -2448,6 +2459,39 @@ func originOf(sample []byte) Origin {
 	}
 }
 
+// sequenceOf reads an event's place in its occupancy, appended after the origin.
+func sequenceOf(sample []byte) probe.Sequence {
+	order := binary.LittleEndian
+	return probe.Sequence{
+		Occupancy:  order.Uint64(sample[184:192]),
+		Number:     order.Uint64(sample[192:200]),
+		Unlocated:  order.Uint64(sample[200:208]),
+		Born:       sample[224] != 0,
+		Overlapped: sample[225] != 0,
+	}
+}
+
+// finalOf reads an ending's last numbers. An ending the program held no
+// occupancy for carries none, which is not a final of zero.
+func finalOf(sample []byte) probe.Final {
+	order := binary.LittleEndian
+	if order.Uint64(sample[184:192]) == 0 {
+		return probe.Final{}
+	}
+	return probe.Final{
+		Known:    true,
+		Sent:     probe.Terminal{Last: order.Uint64(sample[208:216]), InFlight: sample[226]&inFlightSent != 0},
+		Received: probe.Terminal{Last: order.Uint64(sample[216:224]), InFlight: sample[226]&inFlightReceived != 0},
+	}
+}
+
+// The bits of an ending's in_flight, the program's direction codes (OBS_SENT,
+// OBS_RECEIVED).
+const (
+	inFlightSent     = 1
+	inFlightReceived = 2
+)
+
 // pairClocks reads the program's clock and the wall clock once and returns the
 // wall instant of the first's zero, bounded by the gap between the readings;
 // taken at Attach so that gap is paid once.
@@ -2494,7 +2538,11 @@ func (s *Session) decode(sample []byte) (Event, bool) {
 		Measured:     sample[82] != 0,
 		Endpoints:    s.endpointsOf(sample),
 		Origin:       originOf(sample),
+		Sequence:     sequenceOf(sample),
 		At:           time.Now(),
+	}
+	if event.Kind == Closed {
+		event.Final = finalOf(sample)
 	}
 	switch sample[80] {
 	case 1:

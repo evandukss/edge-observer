@@ -706,15 +706,13 @@ func Render(to io.Writer, a Account, local bool) {
 	say("placed     %d records over %d connections, %d of them ended", seen.Records, seen.Connections, seen.Closed)
 	say("early      %d transfers arrived before a handshake finished", seen.Early)
 
-	// Ordering is reported apart from loss: a run that cannot order its
-	// observations has not lost them. "retired" differs from the seal's
-	// "interrupted", which counts transfers refused at the read boundary.
-	say("ordering   %d observations behind one already seen, %d with no place in the order, "+
-		"%d gaps tolerated as the producer's race, %d observations the located losses account "+
-		"for, %d streams retired by those losses, %d of those gaps confirmed with nothing able "+
-		"to say",
-		seen.Disordered, seen.Unstamped, seen.Tolerated, seen.Lost, seen.Interrupted,
-		seen.Unexplained)
+	// Ordering is reported apart from loss: what a connection's own sequence
+	// says it lost, and what that cost its positions.
+	say("ordering   %d transfers missing from their connections' sequences, %d directions whose "+
+		"positions stopped being established, %d connections retired with their endings never "+
+		"delivered, %d transfers with no sequence, %d losses the producer could place in no "+
+		"connection",
+		seen.Lost, seen.Cut, seen.Retired, seen.Unsequenced, seen.Unlocated)
 
 	// Losses only. A dropped event leaves no mark in the stream it would have
 	// joined.

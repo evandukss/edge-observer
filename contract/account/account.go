@@ -471,16 +471,15 @@ type Admitted struct {
 	Descendants string `json:"descendants,omitempty" account:"count"`
 }
 
-// Ordering is whether observations could be placed in production order, and
-// what a break cost. Never folded into Loss.
+// Ordering is whether each connection's transfers could be placed in their
+// producer's sequence, and what a break cost. Never folded into Loss.
 type Ordering struct {
 	Block
-	Disordered  string `json:"disordered,omitempty" account:"count"`
-	Unstamped   string `json:"unstamped,omitempty" account:"count"`
-	Tolerated   string `json:"tolerated,omitempty" account:"count"`
 	Lost        string `json:"lost,omitempty" account:"count"`
+	Cut         string `json:"cut,omitempty" account:"count"`
 	Retired     string `json:"retired,omitempty" account:"count"`
-	Unexplained string `json:"unexplained,omitempty" account:"count"`
+	Unsequenced string `json:"unsequenced,omitempty" account:"count"`
+	Unlocated   string `json:"unlocated,omitempty" account:"count"`
 }
 
 // Refusals is what the kernel program refused, by reason.

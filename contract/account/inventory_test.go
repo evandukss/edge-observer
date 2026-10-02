@@ -69,9 +69,9 @@ var represented = map[string]string{
 	".seen.early": "capture.seen.early", ".seen.rejected": "capture.seen.rejected",
 	".seen.unattributed": "capture.seen.unattributed", ".seen.endings_unmatched": "capture.seen.endings_unmatched",
 	".seen.connections_unrecorded": "capture.seen.connections_unrecorded",
-	".seen.disordered":             "capture.ordering.disordered", ".seen.unstamped": "capture.ordering.unstamped",
-	".seen.tolerated": "capture.ordering.tolerated", ".seen.lost": "capture.ordering.lost",
-	".seen.interrupted": "capture.ordering.retired", ".seen.unexplained": "capture.ordering.unexplained",
+	".seen.lost":                   "capture.ordering.lost", ".seen.cut": "capture.ordering.cut",
+	".seen.retired": "capture.ordering.retired", ".seen.unsequenced": "capture.ordering.unsequenced",
+	".seen.unlocated": "capture.ordering.unlocated",
 
 	".loss.known": "capture.loss.state", ".loss.why": "capture.loss.why",
 	".loss.dropped": "capture.loss.dropped", ".loss.unmatched": "capture.loss.unmatched",

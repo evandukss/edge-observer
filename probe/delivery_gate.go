@@ -12,17 +12,12 @@ const DeliveryWithoutGate = "decoded events delivered without an admission gate"
 
 // GateRefusal is the counter in an attachment's Refusals report for decoded
 // events the gate refused under reason. A refusal is accounted as refused and
-// never as capture loss: the event still takes its place in the production
-// order, so no stream is retired for it.
+// never as capture loss: a refused transfer is handed to capture as refused, so
+// its number is not read as missing and only its own connection stops being
+// placeable.
 func GateRefusal(reason GateReason) string {
 	return "an event the delivery gate refused under " + string(reason)
 }
-
-// RefusalUnplaced is the counter for refused events whose place in the
-// production order the capture could not take. Each is then read as an
-// observation missing from the order, a loss, which is the defect GateRefusal
-// exists to prevent; nonzero means the hand-off to capture is not wired.
-const RefusalUnplaced = "a refused event the capture could not place in the production order"
 
 // DeliveryKind classifies a decoded event before any identity lookup. Its
 // values match the producer's transfer and close kinds; every other value is

@@ -350,20 +350,12 @@ func (a EBPF) place(one object, sink probe.Sink, gate *probe.DeliveryGate) (prob
 		known:      make(map[int32]identity),
 		done:       make(chan struct{}),
 	}
-	// The sink is told what the program has taken out of the production order
-	// before any event reaches it (delivery starts in deliver below). Set later,
-	// the first gap of a run is confirmed for want of an answer, and a confirmed
-	// gap retires every live stream.
-	//
-	// This assertion fails open: a sink that stops satisfying it (a wrapper, a
-	// changed signature) installs nothing and the suites stay green, because they
-	// build sessions with the reader directly. The counter "ordering ... confirmed
-	// with nothing able to say" is what shows it; a required constructor argument
-	// would make the case unreachable.
-	if consumer, can := sink.(interface {
-		Consuming(func() (probe.Consumed, error))
-	}); can {
-		consumer.Consuming(session.Consumed)
+	// The sink is given this program as a settler, so a connection still open
+	// when production stops can be settled against what the program numbered. A
+	// sink that cannot take one fails closed: every such connection's tail is
+	// then unsettled, never certified.
+	if settling, can := sink.(interface{ Settling(probe.Settler) }); can {
+		settling.Settling(session)
 	}
 
 	go attached.deliver()
@@ -516,10 +508,6 @@ type ebpfAttachment struct {
 	gate       *probe.DeliveryGate
 	ungated    atomic.Int64
 
-	// unplaced is refused events whose place in the order the sink could not
-	// take (refused).
-	unplaced atomic.Int64
-
 	mutex sync.Mutex
 	known map[int32]identity
 
@@ -556,6 +544,8 @@ func (a *ebpfAttachment) deliverEvent(event ebpf.Event) {
 			Instance: who.instance,
 			Network:  a.networkOf(event.PID),
 			Stamp:    event.Stamp,
+			Sequence: event.Sequence,
+			Final:    event.Final,
 			Endpoint: event.SSL,
 			At:       event.At,
 		})
@@ -565,6 +555,7 @@ func (a *ebpfAttachment) deliverEvent(event ebpf.Event) {
 			Instance:   who.instance,
 			Network:    a.networkOf(event.PID),
 			Stamp:      event.Stamp,
+			Sequence:   event.Sequence,
 			Descriptor: event.Descriptor,
 			Binding:    event.Binding,
 			Bound:      event.Bound,
@@ -582,11 +573,12 @@ func (a *ebpfAttachment) deliverEvent(event ebpf.Event) {
 	}
 }
 
-// refused accounts for an event the gate refused: counted under its reason, and
-// its place in the production order handed to capture, so the refusal is not
-// read as a loss. The hand-off fails open: a sink without it installs nothing
-// and the refusal is again counted as lost, so every refusal it could not
-// place is counted under probe.RefusalUnplaced, which is what catches that.
+// refused accounts for an event the gate refused, counted under its reason,
+// and hands a refused transfer to a sink that can take it, so its number is not
+// read as a transfer lost. A refused event reads no procfs and grows no cache:
+// the transfer is named from the event and from an identity already known. The
+// hand-off fails open, and the refusal then reads as a loss at its connection,
+// which is the over-count, never a hidden loss.
 func (a *ebpfAttachment) refused(event ebpf.Event, reason probe.GateReason) {
 	a.mutex.Lock()
 	if a.gateRefused == nil {
@@ -594,11 +586,35 @@ func (a *ebpfAttachment) refused(event ebpf.Event, reason probe.GateReason) {
 	}
 	a.gateRefused[reason]++
 	a.mutex.Unlock()
-	if placing, can := a.sink.(interface{ Refused(uint64, time.Time) }); can {
-		placing.Refused(event.Stamp, event.At)
+	if event.Kind != ebpf.Transfer {
 		return
 	}
-	a.unplaced.Add(1)
+	placing, can := a.sink.(interface {
+		Refused(probe.Transfer, probe.GateReason)
+	})
+	if !can {
+		return
+	}
+	a.mutex.Lock()
+	known, found := a.known[event.PID]
+	a.mutex.Unlock()
+	if !found {
+		known = identity{process: fragment.Process{PID: event.PID}}
+	}
+	known.instance.Namespace = event.Namespace
+	known.instance.PID = event.NamespacePID
+	known.instance.Generation = event.Generation
+	placing.Refused(probe.Transfer{
+		Process:   known.process,
+		Instance:  known.instance,
+		Stamp:     event.Stamp,
+		Sequence:  event.Sequence,
+		Endpoint:  event.SSL,
+		Direction: event.Direction,
+		Length:    event.Length,
+		Measured:  event.Measured,
+		At:        event.At,
+	}, reason)
 }
 
 // identity is who an event came from: the process a fragment is attributed to,
@@ -808,6 +824,5 @@ func (a *ebpfAttachment) refusals(read func() (ebpf.Refusals, error)) (map[strin
 		}
 	}
 	a.mutex.Unlock()
-	counted[probe.RefusalUnplaced] = a.unplaced.Load()
 	return counted, nil
 }

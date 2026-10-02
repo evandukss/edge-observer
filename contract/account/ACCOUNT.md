@@ -59,8 +59,8 @@ it is - a control's `control` - a member is absent or empty (`""`,
 
 **None of the three absences is zero, and a block missing from the document is none of them.** A reader
 that cannot find a required block REFUSES with `required_block_absent`, naming the block's path. A missing
-`capture.ordering` never reads as nothing disordered, nothing tolerated, nothing retired and nothing
-unexplained: it is a document that does not say, and saying so is the whole of what a reader does with it.
+`capture.ordering` never reads as nothing lost, nothing cut and nothing retired: it is a document that
+does not say, and saying so is the whole of what a reader does with it.
 Presence is checked first; no verdict is read off a block until every required block has been found.
 
 Which states each moment permits:
@@ -225,7 +225,7 @@ Every member is its own block, so one that could not be read is not read as the 
 | `loss` | `dropped`, `unmatched`, `occasion` `{first, last, handle, pid, tid}`: the first and last unmatched return on the monotonic clock, and the first one's handle, process and thread, each undetermined where no occasion was stated; and `under_way`. Losses only |
 | `loss.under_way` | calls that began before the probes were placed, which nothing in the kernel sees: no entry is recorded and their return fires nothing. The approved processes' threads are read before placement and after. `threads` is those blocked inside the same socket system call on the same descriptor in both readings and switched out no further, so the call each is inside began before the probes; it counts socket I/O, not TLS calls. `undetermined` is those that ran meanwhile, whose loss is not known and is never read as none. `first` `{pid, tid, fd, call}` names the first of `threads`, each undetermined where there is none. `unavailable` where a thread could not be read |
 | `admitted` | `descendants`. Not a loss |
-| `ordering` | `disordered`, `unstamped`, `tolerated`, `lost`, `retired`, `unexplained`. Never folded into `loss`: a session that could not order its observations has not lost them |
+| `ordering` | what each connection's own transfer sequence said: `lost`, transfers missing from their connections' sequences; `cut`, directions whose positions stopped being established; `retired`, connections ended because their producer began another occupancy of the handle, their own ending never delivered; `unsequenced`, transfers the producer kept no sequence for; `unlocated`, losses the producer could place in no connection. Never folded into `loss` |
 | `refused` | `reasons` `{reason: count}` |
 | `spool` | `written`, `dropped`, `refused`, `connections`, `connections_dropped`, `connections_refused`, `bytes`, `limit` |
 
@@ -233,8 +233,9 @@ The capability facts, in `provenance.observer` and `capture.capability` alike: `
 `minimum_kernel`, `payload`, `filtered`, `descendants`, `lifecycle`, `binding`, `socket_evidence`, `ipv6`,
 `unobserved[]`, and `withheld[]` `{claim, member, reason}`.
 
-`retired` is the streams a located loss ended. The seal's `interrupted` is a different fact - transfers
-refused at the read boundary - and the two never share a name here.
+`retired` is the connections ended because their producer began another occupancy of the handle. The
+seal's `interrupted` is a different fact - transfers refused at the read boundary - and the two never
+share a name here.
 
 ### reconstruction
 

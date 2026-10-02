@@ -84,10 +84,10 @@ remaining allowance is refused whole, and exhaustion stays set until the session
 only copy and account for storage: neither parses, admits an event, or authorizes a durable write.
 
 The processing worker takes entries without retaining an intake lock. Taken entries remain charged
-until it releases them. Callback arrival order does not establish completeness: an interruption can
-retire a connection while its fragment callback is outstanding. The fragment callback runs outside the
-capture mutex; interruption retirement runs under it. Normal close and ordinary finalization writes
-run outside it.
+until it releases them. Callback arrival order does not establish completeness: a connection can be
+retired, when its producer begins another occupancy of the handle, while its fragment callback is
+outstanding. The fragment callback runs outside the capture mutex; that retirement runs under it.
+Normal close and ordinary finalization writes run outside it.
 
 **`processing`** publishes the worker and approved-output interfaces. Its worker consumes the
 compiled `contract/config.ProcessingPlan` and leased intake entries. `processing.Artifact` defines

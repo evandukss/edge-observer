@@ -18,8 +18,8 @@ func placing() probe.Capability {
 }
 
 // observing is a recording session told what its attachment can do.
-func observing(capability probe.Capability) *capture.Session {
-	s := capture.Recording(&collected{}, nil)
+func observing(capability probe.Capability) *producer {
+	s := produced(&collected{}, nil)
 	s.Observing(capability)
 	return s
 }
@@ -76,7 +76,7 @@ func TestConnectionsWithNoBindingSourceKeepTheirRecordsAndTheirFragments(t *test
 	unbound := placing()
 	unbound.Binding = false
 	sink := &collected{}
-	s := capture.Recording(sink, nil)
+	s := produced(sink, nil)
 	s.Observing(unbound)
 
 	s.Transfer(transfer(worker, 0x18, fragment.Sent, 10))
@@ -161,7 +161,7 @@ func TestAnUnprovenLifetimeKeepsTheBytesAndTheirPositions(t *testing.T) {
 	blind := placing()
 	blind.Lifecycle = false
 	sink := &collected{}
-	s := capture.Recording(sink, nil)
+	s := produced(sink, nil)
 	s.Observing(blind)
 
 	s.Transfer(bound(worker, 0x18, fragment.Sent, 10, 7, 3))
@@ -183,7 +183,7 @@ func TestAnUnprovenLifetimeKeepsTheBytesAndTheirPositions(t *testing.T) {
 // A session told nothing about its attachment reports what it observed and
 // makes neither claim.
 func TestASessionToldNothingAboutItsAttachmentMakesNeitherClaim(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
+	s := produced(&collected{}, nil)
 
 	s.Transfer(transfer(worker, 0x18, fragment.Sent, 10))
 	records := finished(s)

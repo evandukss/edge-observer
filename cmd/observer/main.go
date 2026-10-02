@@ -796,8 +796,8 @@ func (d *daemon) follows(activatedAt time.Time) *follows {
 func (d *daemon) finish(log *logger) error {
 	sealer := &connection.Sealer{Producer: producing(d.attached), Within: drainWithin}
 	seal, sealErr := sealer.Stop()
-	// The backend's production count makes a trailing loss visible.
-	d.capture.Finish(seal.Sealed, seal.Counters.ReservationAttempts)
+	// Every connection still open is settled against what the producer holds.
+	d.capture.Finish(seal.Sealed)
 	seal.Counters = seal.Counters.Join(d.capture.Counted())
 	// Raw fragments are not persisted in this pipeline. Approved route records
 	// have different units and cannot satisfy the legacy spool identity.
