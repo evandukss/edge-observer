@@ -342,10 +342,12 @@ func connectionInput(options Options) int {
 // Retained is what this worker holds now, store by store: the connections
 // whose input it holds, with their entries and the fragments indexed from them,
 // the order it examines them in, and the connections waiting on an extension's
-// result, with the exchanges each keeps as parsed and as processed and what
-// policy did to their bodies. A dispatch that is not waiting is let go of when
-// its lines are written, so nothing else of one is kept. Its owner reads it,
-// never while Drain or Finish runs.
+// result, with the exchanges each keeps as parsed and as processed, the
+// capacity of the slices holding them, and what policy did to their bodies. A
+// dispatch's bodies are a map, which Go gives no capacity for, so only their
+// count is read. A dispatch that is not waiting is let go of when its lines are
+// written, so nothing else of one is kept. Its owner reads it, never while
+// Drain or Finish runs.
 func (w *Worker) Retained() ([]held.Occupancy, error) {
 	if w == nil {
 		return nil, nil
@@ -355,9 +357,10 @@ func (w *Worker) Retained() ([]held.Occupancy, error) {
 		entries += len(b.entries)
 		fragments += len(b.fragments)
 	}
-	exchanges, bodies := 0, 0
+	exchanges, capacity, bodies := 0, 0, 0
 	for d := range w.waiting {
 		exchanges += len(d.source.Exchanges) + len(d.processed.Exchanges)
+		capacity += cap(d.source.Exchanges) + cap(d.processed.Exchanges)
 		if d.run != nil {
 			bodies += len(d.run.bodies)
 		}
@@ -369,6 +372,7 @@ func (w *Worker) Retained() ([]held.Occupancy, error) {
 		{Store: "processing.order", Held: len(w.order)},
 		{Store: "processing.waiting", Held: len(w.waiting)},
 		{Store: "processing.waiting_exchanges", Held: exchanges},
+		{Store: "processing.waiting_exchanges_capacity", Held: capacity},
 		{Store: "processing.waiting_bodies", Held: bodies},
 	}, nil
 }
