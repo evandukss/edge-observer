@@ -28,7 +28,7 @@ type t18Reason struct {
 // t18Reasons is keyed by the reason's string, not its constant, so an entry
 // can exist for a reason this tree does not declare yet.
 var t18Reasons = map[string]t18Reason{
-	"input_limit":      {scenario: t18InputLimit},
+	"input_limit": {scenario: t18InputLimit},
 	"unknown_length": {
 		exception: "the normal SSL_read_ex would-block fixture now produces measured zero bytes; " +
 			"it cannot witness the unreadable or invalid count after a successful out-parameter call. " +
@@ -73,7 +73,9 @@ func t18InputLimit(t *testing.T, binary string) account.Account {
 func t18OpenConnections(t *testing.T, port, count int) []conversation {
 	t.Helper()
 	open := make([]conversation, count)
-	for i := range open { open[i] = speaking(t, port) }
+	for i := range open {
+		open[i] = speaking(t, port)
+	}
 	return open
 }
 

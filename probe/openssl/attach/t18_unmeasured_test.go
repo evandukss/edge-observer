@@ -67,21 +67,37 @@ func TestIndependentWouldBlockReadKeepsLaterExchange(t *testing.T) {
 			c := configuring(t, target("reader", reader.process))
 			t18Edit(t, c, t18Removing)
 			s := t18Started(t, binary, c)
-			if answer := reader.say(t, "G /?asked=t18-before"); answer != "done 200" { t.Fatalf("first exchange: %q", answer) }
+			if answer := reader.say(t, "G /?asked=t18-before"); answer != "done 200" {
+				t.Fatalf("first exchange: %q", answer)
+			}
 			t18Until(t, binary, c, 10*time.Second, "wiring, not the property: first exchange absent",
 				func(a account.Account) bool { return a.Seen != nil && a.Seen.Records >= 2 })
 			if wouldBlock {
-				if answer := reader.say(t, "W"); answer != "would-block 0 2" { t.Fatalf("wiring, not the property: expected WANT_READ, got %q", answer) }
+				if answer := reader.say(t, "W"); answer != "would-block 0 2" {
+					t.Fatalf("wiring, not the property: expected WANT_READ, got %q", answer)
+				}
 			}
-			if answer := reader.say(t, "G /?asked=t18-after"); answer != "done 200" { t.Fatalf("second exchange: %q", answer) }
-			if s.ended() { t.Fatalf("session ended before explicit stop: %s", s.transcript()) }
+			if answer := reader.say(t, "G /?asked=t18-after"); answer != "done 200" {
+				t.Fatalf("second exchange: %q", answer)
+			}
+			if s.ended() {
+				t.Fatalf("session ended before explicit stop: %s", s.transcript())
+			}
 			sealed := s.stop(t, c)
-			if sealed.Processing == nil || sealed.Processing.GateReason != "" || sealed.Processing.ProcessingFailures != 0 { t.Errorf("read invalidated processing: %+v", sealed.Processing) }
-			if sealed.Seen == nil || sealed.Seen.Unmeasured != 0 || sealed.Seen.Lost != 0 { t.Errorf("read became unknown length or lost input: %+v", sealed.Seen) }
-			if sealed.Loss == nil || !sealed.Loss.Known || sealed.Loss.Dropped != 0 { t.Errorf("kernel loss: %+v", sealed.Loss) }
+			if sealed.Processing == nil || sealed.Processing.GateReason != "" || sealed.Processing.ProcessingFailures != 0 {
+				t.Errorf("read invalidated processing: %+v", sealed.Processing)
+			}
+			if sealed.Seen == nil || sealed.Seen.Unmeasured != 0 || sealed.Seen.Lost != 0 {
+				t.Errorf("read became unknown length or lost input: %+v", sealed.Seen)
+			}
+			if sealed.Loss == nil || !sealed.Loss.Known || sealed.Loss.Dropped != 0 {
+				t.Errorf("kernel loss: %+v", sealed.Loss)
+			}
 			targets := t18Targets(t18Approved(t, s.directory(c)))
 			for _, path := range []string{"/?asked=t18-before", "/?asked=t18-after"} {
-				if !slices.Contains(targets, path) { t.Errorf("missing useful exchange %s in %v", path, targets) }
+				if !slices.Contains(targets, path) {
+					t.Errorf("missing useful exchange %s in %v", path, targets)
+				}
 			}
 			t.Logf("PRECONDITIONS would_block=%v real_exchanges=2 processing=%+v seen=%+v", wouldBlock, sealed.Processing, sealed.Seen)
 		})

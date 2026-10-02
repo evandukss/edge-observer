@@ -202,7 +202,9 @@ func p3t9ProtectedWithIntakeLimit(t *testing.T, maxEvents uint64, intakeBytes in
 	t.Cleanup(func() { _ = w.Close() })
 	b := &p3t9ApprovedBoundary{writer: w}
 	bound := 0
-	if len(connectionBound) != 0 { bound = connectionBound[0] }
+	if len(connectionBound) != 0 {
+		bound = connectionBound[0]
+	}
 	worker, err := processing.New(processing.Options{ConnectionInput: bound, Plan: plan, PolicyRevision: "p3t9-policy", Session: "p3t9-session", Intake: s, Gate: g, Output: b})
 	if err != nil {
 		t.Fatalf("real worker unavailable; protected property NOT reached: %v", err)
@@ -471,8 +473,12 @@ func TestP3T9ProtectedDrainedLimitAndPendingFinish(t *testing.T) {
 			// per-connection cut. All admitted fragments remain with the worker.
 			f := p3t9ProtectedWithIntakeLimit(t, 4, 1<<20, nil, 8)
 			parts := []string{"GET /limit HTTP/1.1\r\nHost: test\r\n", "X-public: benign\r\n", "Authorization: " + p3t9ProtectedMarker + "\r\n\r\n"}
-			if count == 3 { parts = []string{parts[0] + parts[1], parts[2]} }
-			for _, part := range parts { f.send(9, fragment.Sent, part, true, false) }
+			if count == 3 {
+				parts = []string{parts[0] + parts[1], parts[2]}
+			}
+			for _, part := range parts {
+				f.send(9, fragment.Sent, part, true, false)
+			}
 			f.send(9, fragment.Received, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK", true, false)
 			if o := f.drain(); o.Pending != 1 || o.ConnectionsCut != 0 || f.t20iPersisted(config.ExchangesPipeline) != 0 {
 				t.Fatalf("complete-but-live batch was not pending without a cut: %+v", o)
@@ -481,7 +487,9 @@ func TestP3T9ProtectedDrainedLimitAndPendingFinish(t *testing.T) {
 				t.Fatalf("wiring, not the property: worker did not retain the input reservations: %+v", f.gate.Snapshot())
 			}
 			f.artifacts(0)
-			if count == 5 { f.send(99, fragment.Sent, "tail", true, false) }
+			if count == 5 {
+				f.send(99, fragment.Sent, "tail", true, false)
+			}
 			reason, charged := probe.GateReason(""), uint64(count)
 			if count == 5 {
 				reason, charged = probe.GateInputLimit, 4

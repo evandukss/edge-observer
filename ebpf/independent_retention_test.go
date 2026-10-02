@@ -145,15 +145,24 @@ func TestIndependentEventStagingFillsAndDrains(t *testing.T) {
 		var full retention.Occupancy
 		for time.Now().Before(deadline) {
 			full = retainedKernel(t, r.session)["ebpf.events"]
-			if full.Held == bound { break }
+			if full.Held == bound {
+				break
+			}
 			time.Sleep(time.Millisecond)
 		}
-		if full.Held != bound || full.Bound != bound { t.Fatalf("wiring, not the property: staging did not fill: %+v", full) }
+		if full.Held != bound || full.Bound != bound {
+			t.Fatalf("wiring, not the property: staging did not fill: %+v", full)
+		}
 		r.consume()
-		if len(r.events)-before != 6 { t.Fatalf("staging lost input: received %d of 6", len(r.events)-before) }
-		if after := retainedKernel(t, r.session)["ebpf.events"]; after.Held != 0 || after.Bound != bound { t.Fatalf("staging did not return to empty bounded channel: %+v", after) }
+		if len(r.events)-before != 6 {
+			t.Fatalf("staging lost input: received %d of 6", len(r.events)-before)
+		}
+		if after := retainedKernel(t, r.session)["ebpf.events"]; after.Held != 0 || after.Bound != bound {
+			t.Fatalf("staging did not return to empty bounded channel: %+v", after)
+		}
 	}
-	if dropped, err := r.session.Dropped(); err != nil || dropped != 0 { t.Errorf("staging churn lost kernel input: %d %v", dropped, err) }
+	if dropped, err := r.session.Dropped(); err != nil || dropped != 0 {
+		t.Errorf("staging churn lost kernel input: %d %v", dropped, err)
+	}
 	t.Log("PRECONDITIONS cycles=40 actual_writes=240 staging_held=4 staging_capacity=4 drained_each_cycle=true")
 }
-

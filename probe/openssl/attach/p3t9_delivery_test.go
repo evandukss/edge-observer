@@ -22,13 +22,17 @@ type p3t9Collected struct {
 }
 
 func (c *p3t9Collected) Write(r fragment.Record) error {
-	if r.Slot != nil { r.Slot.Keep() }
+	if r.Slot != nil {
+		r.Slot.Keep()
+	}
 	c.fragments = append(c.fragments, r)
 	return nil
 }
 
 func (c *p3t9Collected) Connection(r connection.Record) error {
-	if r.Slot != nil { r.Slot.Keep() }
+	if r.Slot != nil {
+		r.Slot.Keep()
+	}
 	c.connections = append(c.connections, r)
 	return nil
 }
@@ -176,7 +180,7 @@ func TestP3T9DrainedAdmissionBoundaryAndPendingRetirement(t *testing.T) {
 			events := make([]ebpf.Event, 5)
 			for i := range events {
 				events[i] = p3t9Event(uint64(i+3), "retained")
-				events[i].Sequence.Number = uint64(i+1)
+				events[i].Sequence.Number = uint64(i + 1)
 			}
 			// A novel identity makes downstream growth observable at N+1.
 			events[4].PID, events[4].NamespacePID, events[4].SSL = 69172, 69172, 456
