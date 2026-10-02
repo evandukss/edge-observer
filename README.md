@@ -96,6 +96,7 @@ No release has been published. A release is an archive, `observer-linux-amd64.ta
 tagged commit. It unpacks into one directory, `observer-linux-amd64`, holding exactly these files:
 
     observer                     the program: one static file, linux/amd64
+    examples/systemd/observer.service  supervised deployment with its own memory envelope
     README.md                    this document
     docs/compatibility.md        what a host must provide, and what the observer has been seen to run on
     docs/extensions.md           how to configure an extension

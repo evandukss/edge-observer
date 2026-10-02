@@ -579,7 +579,7 @@ const MaxEventPayloadBytes = 4096
 // then the socket's start (144), then the admission's origin (three eight-byte
 // fields, three four-byte, a kind and three padding bytes: 184), then the
 // event's place in its occupancy (five eight-byte fields, three flags and five
-// padding bytes, then the dropped count appended after that padding): 240. The
+// padding bytes, then the dropped and occupancy begin counts): 248. The
 // padding is explicit so no offset depends on the compiler, and package bpf's
 // layout guard pins every offset against the source (bpf/ssl.bpf.h).
 const rawHeader = 248

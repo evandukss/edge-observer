@@ -139,6 +139,9 @@ func TestDeliveryGateEntryClassifiesUncertaintyBeforeEitherSink(t *testing.T) {
 			if state := g.Snapshot(); state.Charged != 2 || state.Reason != tc.reason {
 				t.Fatalf("fault not reached: %+v", state)
 			}
+			if tc.kind == ebpf.Transfer {
+				before.GateRefused++
+			}
 			if len(b.known) != 0 || captured.Stats() != before {
 				t.Fatalf("fault reached identity or capture: %d, %+v", len(b.known), captured.Stats())
 			}
