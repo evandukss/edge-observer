@@ -54,6 +54,9 @@ func queuedAdmission(t *testing.T) (*ebpf.Session, *armingProcess, process.Proce
 	if string(event.Payload) != "GET /held-0 HTTP/1.1\r\nHost: localhost\r\n\r\n" {
 		t.Fatalf("wiring, not the property: held transfer payload %q", event.Payload)
 	}
+	if event.Start != p.Start() {
+		t.Errorf("emission birth = %v, want the admitted process birth %v", event.Start, p.Start())
+	}
 	return s, actor, p, event, unblock
 }
 
@@ -79,7 +82,7 @@ func releasedAdmission(t *testing.T, s *ebpf.Session, event ebpf.Event, untilExi
 			}
 			if e.Kind == ebpf.Transfer {
 				transfers++
-				if e.Generation != event.Generation || string(e.Payload) != string(event.Payload) {
+				if e.Generation != event.Generation || e.Start != event.Start || string(e.Payload) != string(event.Payload) {
 					t.Errorf("delivered transfer changed its emission evidence: generation %d, payload %q", e.Generation, e.Payload)
 				}
 				if !untilExit {

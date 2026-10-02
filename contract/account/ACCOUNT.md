@@ -273,6 +273,12 @@ The ordering and capture refusal counts report them separately; they do not set 
 increment `connections_cut` and `input_cut`. Discarded input is released while its connection waits
 for retirement; the metadata line reports the loss with a `positions_unknown` truncation. A connection
 already cut at its input bound keeps its one `connection_cut` line even if it later loses input.
+The capture refusal `a decoded event could not record its withdrawn admission generation` counts
+an event's inventory recording only when its emitted generation is no longer granted and its
+process is established as still running. Ordinary process exit is not this refusal. The event
+carries its admission generation and process birth from emission and is delivered in either case;
+an absent grant never lets a late event recreate a withdrawn inventory row. An indeterminate
+process reading establishes no live withdrawal and is not counted as one.
 When only this aggregate is supplied, `pipelines` is empty because attribution was not supplied;
 that is not a per-pipeline zero. Aggregate counts must never be copied onto a synthetic pipeline
 or onto every pipeline.
