@@ -66,6 +66,10 @@ type Transfer struct {
 	// evidence absent, not a lossless run.
 	Stamp uint64
 
+	// Sequence is this transfer's place in its own occupancy of the handle, the
+	// evidence that locates a loss to this connection and direction.
+	Sequence Sequence
+
 	// Endpoint is the adapter's opaque handle for the connection: unique within a
 	// process while open, reusable afterwards (hence Closed).
 	Endpoint uint64
@@ -108,8 +112,105 @@ type Connection struct {
 	// Stamp is this ending's production-order place: an ending can be lost too.
 	Stamp uint64
 
+	// Sequence is the occupancy this ending closes. Its Number is zero: an ending
+	// takes no place among the transfers.
+	Sequence Sequence
+
+	// Final is what the occupancy had taken in each direction when its handle was
+	// released, which settles whether its last transfers arrived.
+	Final Final
+
 	Endpoint uint64
 	At       time.Time
+}
+
+// Sequence is an observation's place in a producer-owned occupancy of a
+// handle. An occupancy runs from the handle's birth, or from the first call the
+// producer recorded on it, to its release, and the producer numbers it whether
+// or not anything downstream sees the release: a handle address reused after a
+// lost ending is a different occupancy.
+//
+// Numbers are kept per direction and count byte-moving calls from one, so a
+// number missing on arrival is a call that moved bytes and was not delivered,
+// located to this occupancy and direction. A call that moved no bytes takes no
+// number.
+type Sequence struct {
+	// Occupancy is the producer's name for the occupancy, unique within one
+	// producer while the producer runs. Zero is an observation the producer could
+	// keep no occupancy for, whose place nothing can check.
+	Occupancy uint64
+
+	// Number is this transfer's place among its occupancy's transfers in its
+	// direction, from one. Zero on an ending, and on a transfer with no occupancy.
+	Number uint64
+
+	// Born says the occupancy began at its handle's observed birth, so number one
+	// is the handle's first transfer in each direction. Without it the occupancy
+	// began at the first call the producer recorded on an existing handle.
+	Born bool
+
+	// Overlapped says two calls in this direction were in flight on the handle at
+	// once, which OpenSSL's supported use forbids, so the order of their bytes is
+	// not established.
+	Overlapped bool
+
+	// Unlocated is how many losses the producer could not place in any occupancy,
+	// counted when this observation was produced. It only grows, so a rise between
+	// two observations says such a loss fell between them.
+	Unlocated uint64
+}
+
+// Terminal is one direction's last number when an occupancy's numbers were read.
+type Terminal struct {
+	// Last is the last number taken in this direction; zero is none taken.
+	Last uint64
+
+	// InFlight says a call in this direction had not returned when Last was read,
+	// so the call's bytes, if any, are numbered after Last.
+	InFlight bool
+}
+
+// Final is an occupancy's last numbers in each direction. Known is false where
+// the producer held nothing for the occupancy when it was asked.
+type Final struct {
+	Known    bool
+	Sent     Terminal
+	Received Terminal
+}
+
+// Handle names one handle of one admitted execution, which is what a producer
+// keys an occupancy by.
+type Handle struct {
+	Instance admission.Key
+	Endpoint uint64
+}
+
+// Settlement is what a producer holds for one handle when asked: the occupancy
+// it holds there now and that occupancy's last numbers. Occupancy zero is no
+// occupancy held.
+type Settlement struct {
+	Occupancy uint64
+	Final     Final
+}
+
+// Settler answers, once production has stopped, what a producer still holds:
+// the settled terminal evidence for a connection whose ending never arrived.
+type Settler interface {
+	// Settled is the occupancy the producer holds for handle, or an error where
+	// that cannot be read (never a zero Settlement standing in for one).
+	Settled(handle Handle) (Settlement, error)
+
+	// Unlocated is the producer's count of losses it could not place in any
+	// occupancy, read now.
+	Unlocated() (uint64, error)
+}
+
+// Settling is an attachment that is also a Settler. One that cannot answer is
+// honest by not implementing it; every connection still open at the end then
+// has an unsettled tail.
+type Settling interface {
+	Attachment
+	Settler
 }
 
 // Sink is where an attached adapter puts what it sees. Both methods run on the

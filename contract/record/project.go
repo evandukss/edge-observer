@@ -162,6 +162,10 @@ var reasons = map[connection.Reason]string{
 	connection.LifetimeEvidenceEnded:      "lifetime_evidence_ended",
 	connection.HandleReleased:             "handle_released",
 	connection.HandleLifetimeUnobservable: "handle_lifetime_unobservable",
+	connection.TerminalUnsettled:          "terminal_unsettled",
+	connection.SequenceUnavailable:        "sequence_unavailable",
+	connection.OperationsOverlapped:       "operations_overlapped",
+	connection.LengthUnmeasured:           "length_unmeasured",
 }
 
 var joins = map[connection.Joinability]string{

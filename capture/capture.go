@@ -216,6 +216,11 @@ type Session struct {
 	consumed func() (probe.Consumed, error)
 	taken    probe.Consumed
 
+	// settlers answer, once production has stopped, what each producer still
+	// holds for a connection whose ending never arrived. Several, because one
+	// capture can be fed by several producers.
+	settlers []probe.Settler
+
 	// interrupted is whether any loss has been located, which marks a stream
 	// begun afterwards as one whose binding evidence may be lost.
 	interrupted bool
@@ -241,6 +246,14 @@ func (s *Session) Consuming(read func() (probe.Consumed, error)) {
 	s.consumed = read
 }
 
+// Settling adds a producer that can say, once production has stopped, what it
+// still holds. Each producer feeding this session adds itself.
+func (s *Session) Settling(settler probe.Settler) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	s.settlers = append(s.settlers, settler)
+}
+
 // Observing tells this session what its attachment can establish. It is set
 // after the probes are placed, when the kernel's answer exists.
 func (s *Session) Observing(capability probe.Capability) {
@@ -260,6 +273,12 @@ type Option func(*Session)
 // out of the order since it last asked. Without one, every gap is confirmed.
 func Consumes(read func() (probe.Consumed, error)) Option {
 	return func(s *Session) { s.consumed = read }
+}
+
+// Settles gives a session a producer that can say, once production has
+// stopped, what it still holds.
+func Settles(settler probe.Settler) Option {
+	return func(s *Session) { s.settlers = append(s.settlers, settler) }
 }
 
 // Recording starts a session that also hands each connection's record to

@@ -86,6 +86,13 @@ type Record struct {
 	// the length the caller asked for.
 	Length uint32
 
+	// Produced is this fragment's number among its connection's transfers in its
+	// direction, as the producer numbered them (probe.Sequence.Number), from one.
+	// Consecutive fragments of a direction carry consecutive numbers; a number
+	// skipped between two is a transfer produced and never delivered, and the
+	// stream must not be read across it. Zero where the producer numbered nothing.
+	Produced uint64
+
 	// Payload is what capture kept: Length bytes or a leading part of them.
 	Payload []byte
 

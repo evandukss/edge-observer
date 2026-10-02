@@ -196,11 +196,18 @@ Join reasons: `no_binding_to_join`, `endpoint_unreadable`, `no_endpoint_producer
 |---|---|---|
 | `positions` | uncertainty | `established`, `unknown_from`, `unknown_throughout` |
 | `from` | uncertainty | only on `unknown_from`: the first offset whose position is not established |
-| `because` | uncertainty | a reason from the association vocabulary; required unless `established` |
+| `because` | uncertainty | required unless `established`: `observation_lost`, or one of the placement reasons below |
 | `lost` | loss | observations of this direction known to be missing, in `events`; undetermined where no count exists |
 
 A gap located in the session's production order is `unknown_from`; one nothing located is
 `unknown_throughout`. Neither says which stream the missing observation belonged to.
+
+Placement reasons:
+
+    terminal_unsettled      nothing settled whether the direction's last transfers arrived
+    sequence_unavailable    the producer kept no sequence for a transfer of the direction
+    operations_overlapped   two calls in the direction were in flight on the handle at once
+    length_unmeasured       a transfer of the direction moved a length nothing measured
 
 ### One socket, more than one claimant
 
