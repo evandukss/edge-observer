@@ -235,34 +235,56 @@ func TestIndependentBoundCutKeepsItsLineAfterGateLoss(t *testing.T) {
 }
 
 func TestIndependentSeveralBoundCutsEachKeepOneRetirementLine(t *testing.T) {
-	f := cutLinesStarted(t, 32, 3)
-	handles := []uint64{31, 32, 33}
-	for range 4 {
-		for _, handle := range handles {
-			f.transfer(handle, true)
-		}
+	for _, loss := range []bool{false, true} {
+		t.Run("gate_loss="+strconv.FormatBool(loss), func(t *testing.T) {
+			f := cutLinesStarted(t, 32, 3)
+			handles := []uint64{31, 32, 33}
+			for range 4 {
+				for _, handle := range handles {
+					f.transfer(handle, true)
+				}
+			}
+			if f.capture.Open() != len(handles) {
+				t.Fatal("wiring, not the property: simultaneous live connections not reached")
+			}
+			f.drain(12, false)
+			if loss {
+				release := f.pressure(32)
+				for _, handle := range handles {
+					f.transfer(handle, false)
+				}
+				f.reachedLoss(3)
+				release()
+			}
+			for _, handle := range handles {
+				f.retire(handle)
+			}
+			out := f.drain(15, false)
+			f.check(out, handles, 3, 12)
+		})
 	}
-	if f.capture.Open() != len(handles) {
-		t.Fatal("wiring, not the property: simultaneous live connections not reached")
-	}
-	f.drain(12, false)
-	for _, handle := range handles {
-		f.retire(handle)
-	}
-	out := f.drain(15, false)
-	f.check(out, handles, 3, 12)
 }
 
 func TestIndependentBoundCutRetirementSurvivesTheFinalDrain(t *testing.T) {
-	f := cutLinesStarted(t, 8, 3)
-	for range 4 {
-		f.transfer(41, true)
+	for _, loss := range []bool{false, true} {
+		t.Run("gate_loss="+strconv.FormatBool(loss), func(t *testing.T) {
+			f := cutLinesStarted(t, 8, 3)
+			for range 4 {
+				f.transfer(41, true)
+			}
+			f.drain(4, false)
+			if loss {
+				release := f.pressure(8)
+				f.transfer(41, false)
+				f.reachedLoss(1)
+				release()
+			}
+			f.retire(41)
+			if f.store.Stats().Queued != 1 {
+				t.Fatal("wiring, not the property: retirement is not waiting for the final drain")
+			}
+			out := f.drain(5, true)
+			f.check(out, []uint64{41}, 1, 4)
+		})
 	}
-	f.drain(4, false)
-	f.retire(41)
-	if f.store.Stats().Queued != 1 {
-		t.Fatal("wiring, not the property: retirement is not waiting for the final drain")
-	}
-	out := f.drain(5, true)
-	f.check(out, []uint64{41}, 1, 4)
 }
