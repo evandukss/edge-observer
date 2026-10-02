@@ -289,3 +289,47 @@ func TestIndependentAnUnknownLengthEndsTheSessionWithAFailureStatus(t *testing.T
 		t.Errorf("the sealed session states %q as why it ended, want unknown_length", last.Reason)
 	}
 }
+
+// A control command probing whether a session runs never makes a start
+// refuse. The command's probe is held, with the pid file still open, while a
+// start acquires that file; then the started session is visible to a control
+// command.
+func TestIndependentAControlProbeHeldOpenNeverRefusesAStart(t *testing.T) {
+	dir := t.TempDir()
+	// What an ended session leaves: a pid file naming it, held by nothing.
+	if err := os.WriteFile(filepath.Join(dir, pidName), []byte("2147483646 0123456789abcdef\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	probed, release := make(chan struct{}), make(chan struct{})
+	answered := make(chan struct{})
+	go func() {
+		defer close(answered)
+		_, _, _ = holderUsing(dir, func(file *os.File) (bool, error) {
+			held, err := probeHolder(file)
+			close(probed)
+			<-release
+			return held, err
+		})
+	}()
+	select {
+	case <-probed:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("wiring, not the property: the control command's probe never ran")
+	}
+	started, err := acquire(dir)
+	close(release)
+	<-answered
+	if err != nil {
+		t.Fatalf("a start was refused while a control command's probe held the pid file open: %v", err)
+	}
+	defer started.release()
+
+	if err := started.record(os.Getpid(), "fedcba9876543210"); err != nil {
+		t.Fatal(err)
+	}
+	pid, session, err := holder(dir)
+	if err != nil || pid != os.Getpid() || session != "fedcba9876543210" {
+		t.Errorf("a control command does not see the running session: pid %d session %q err %v", pid, session, err)
+	}
+}

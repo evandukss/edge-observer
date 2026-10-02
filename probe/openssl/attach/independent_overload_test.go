@@ -62,6 +62,7 @@ func (o *overloadLines) targets() []string {
 type overloadOccupancy struct {
 	id             uint64
 	born           bool
+	began          uint64
 	sent, received uint64
 }
 
@@ -114,7 +115,7 @@ func overloadNew(t *testing.T, events uint64, intakeBytes int64, connectionInput
 
 func (c *overloadChain) begin(handle uint64, born bool) {
 	c.next++
-	c.open[handle] = &overloadOccupancy{id: c.next, born: born}
+	c.open[handle] = &overloadOccupancy{id: c.next, born: born, began: c.unlocated}
 }
 
 func (c *overloadChain) event(kind ebpf.Kind, handle uint64) ebpf.Event {
@@ -133,7 +134,7 @@ func (c *overloadChain) send(handle uint64, direction fragment.Direction, payloa
 	*number += 1 + skip
 	e := c.event(ebpf.Transfer, handle)
 	e.Direction, e.Measured, e.Length, e.Payload = direction, true, uint32(len(payload)), []byte(payload)
-	e.Sequence = probe.Sequence{Occupancy: o.id, Number: *number, Born: o.born, Unlocated: c.unlocated}
+	e.Sequence = probe.Sequence{Occupancy: o.id, Number: *number, Born: o.born, Unlocated: c.unlocated, BeginUnlocated: o.began}
 	c.attached.deliverEvent(e)
 }
 
@@ -146,7 +147,7 @@ func (c *overloadChain) close(handle uint64) {
 	o := c.open[handle]
 	delete(c.open, handle)
 	e := c.event(ebpf.Closed, handle)
-	e.Sequence = probe.Sequence{Occupancy: o.id, Born: o.born, Unlocated: c.unlocated}
+	e.Sequence = probe.Sequence{Occupancy: o.id, Born: o.born, Unlocated: c.unlocated, BeginUnlocated: o.began}
 	e.Final = probe.Final{Known: true, Sent: probe.Terminal{Last: o.sent}, Received: probe.Terminal{Last: o.received}}
 	c.attached.deliverEvent(e)
 }

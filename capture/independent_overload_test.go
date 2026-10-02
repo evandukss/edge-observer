@@ -35,6 +35,7 @@ func (r *overloadRecords) Connection(c connection.Record) error {
 type overloadOccupancy struct {
 	id             uint64
 	born           bool
+	began          uint64
 	sent, received uint64
 }
 
@@ -62,7 +63,7 @@ func overloadCaptureOn(fragments capture.Sink, records connection.Sink) *overloa
 // at its first recorded call.
 func (c *overloadCapture) begin(handle uint64, born bool) {
 	c.next++
-	c.open[handle] = &overloadOccupancy{id: c.next, born: born}
+	c.open[handle] = &overloadOccupancy{id: c.next, born: born, began: c.unlocated}
 }
 
 // transfer numbers one call in its direction, skip numbers after the last
@@ -77,7 +78,7 @@ func (c *overloadCapture) transfer(handle uint64, direction fragment.Direction, 
 	c.stamp++
 	return probe.Transfer{
 		Process: c.process, Instance: c.instance, Endpoint: handle, Stamp: c.stamp,
-		Sequence:  probe.Sequence{Occupancy: o.id, Number: *number, Born: o.born, Unlocated: c.unlocated},
+		Sequence:  probe.Sequence{Occupancy: o.id, Number: *number, Born: o.born, Unlocated: c.unlocated, BeginUnlocated: o.began},
 		Direction: direction, Length: uint32(len(payload)), Measured: true, Payload: []byte(payload),
 		At: time.Unix(100, int64(c.stamp)),
 	}
@@ -93,7 +94,7 @@ func (c *overloadCapture) close(handle uint64) {
 	c.stamp++
 	c.session.Closed(probe.Connection{
 		Process: c.process, Instance: c.instance, Endpoint: handle, Stamp: c.stamp,
-		Sequence: probe.Sequence{Occupancy: o.id, Born: o.born, Unlocated: c.unlocated},
+		Sequence: probe.Sequence{Occupancy: o.id, Born: o.born, Unlocated: c.unlocated, BeginUnlocated: o.began},
 		Final:    probe.Final{Known: true, Sent: probe.Terminal{Last: o.sent}, Received: probe.Terminal{Last: o.received}},
 		At:       time.Unix(100, int64(c.stamp)),
 	})
@@ -150,9 +151,9 @@ func TestIndependentAGateRefusedTransferCutsItsOwnDirectionAndIsCounted(t *testi
 	c.send(2, fragment.Received, "HTTP/1.1 204 No Content\r\n\r\n")
 	c.close(1)
 	c.close(2)
-	if len(records.fragments) != 5 || len(records.endings) != 2 {
-		t.Fatalf("wiring, not the property: capture handed on %d fragments and %d records, want 5 and 2",
-			len(records.fragments), len(records.endings))
+	if got := c.session.Stats().Transfers; got != 5 || len(records.endings) != 2 {
+		t.Fatalf("wiring, not the property: capture took %d transfers and handed on %d records, want 5 and 2",
+			got, len(records.endings))
 	}
 
 	stats := c.session.Stats()
@@ -181,7 +182,7 @@ func TestIndependentAGateRefusedTransferCutsItsOwnDirectionAndIsCounted(t *testi
 // its connection, counted as such. The intake takes later input once it has
 // room: a later connection's fragments are stored and its positions whole.
 func TestIndependentAnIntakeRefusalCutsItsConnectionAndLaterInputIsStored(t *testing.T) {
-	store, err := intake.New(2048)
+	store, err := intake.New(4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +192,7 @@ func TestIndependentAnIntakeRefusalCutsItsConnectionAndLaterInputIsStored(t *tes
 	c.begin(1, true)
 	c.send(1, fragment.Sent, before)
 	stored := store.Stats().Fragments
-	c.send(1, fragment.Sent, "GET /refused HTTP/1.1\r\nX-Fill: "+string(make([]byte, 3000))+"\r\n\r\n")
+	c.send(1, fragment.Sent, "GET /refused HTTP/1.1\r\nX-Fill: "+string(make([]byte, 3900))+"\r\n\r\n")
 	if refused := store.Stats().FragmentsRefused; stored != 1 || refused != 1 {
 		t.Fatalf("wiring, not the property: the intake stored %d and refused %d fragments, want 1 and 1", stored, refused)
 	}
@@ -217,8 +218,8 @@ func TestIndependentAnIntakeRefusalCutsItsConnectionAndLaterInputIsStored(t *tes
 	if stats.Lost != 0 {
 		t.Errorf("an intake refusal was counted as %d transfers the producer lost", stats.Lost)
 	}
-	if got := store.Stats().Fragments; got < 4 {
-		t.Errorf("the intake stored %d fragments in all; the three sent once it was empty again were refused", got)
+	if got := store.Stats().Fragments; got < 3 {
+		t.Errorf("the intake stored %d fragments in all; the later connection's two, sent once it was empty again, were refused", got)
 	}
 	var endings []connection.Record
 	for e := store.Take(); e != nil; e = store.Take() {
@@ -244,8 +245,10 @@ func TestIndependentAnIntakeRefusalCutsItsConnectionAndLaterInputIsStored(t *tes
 // After a loss the producer could place in no occupancy:
 //   - an occupancy born at an observed birth after it numbers every one of its
 //     transfers, so it is placed whole;
-//   - an occupancy first observed at a call after it may have lost the calls
+//   - an occupancy begun at a first call after it may have lost the calls
 //     before that one, so no offset of it is established;
+//   - an occupancy begun before it is not what it lost, even where its first
+//     event is delivered after it, so it is placed whole;
 //   - a connection live across it keeps the positions it had established.
 func TestIndependentAfterAnUnlocatedLossOnlyAFreshOccupancyIsPlacedWhole(t *testing.T) {
 	records := &overloadRecords{}
@@ -254,9 +257,14 @@ func TestIndependentAfterAnUnlocatedLossOnlyAFreshOccupancyIsPlacedWhole(t *test
 	c.begin(1, true)
 	c.send(1, fragment.Sent, request)
 	c.send(1, fragment.Received, response)
+	// Begun at a first call before the loss, its first event delivered after it.
+	c.begin(4, false)
 
 	c.unlocated = 1
 	c.send(1, fragment.Sent, request)
+	c.send(4, fragment.Sent, "GET /begun-before HTTP/1.1\r\n\r\n")
+	c.send(4, fragment.Received, response)
+	c.close(4)
 	c.begin(2, true)
 	c.send(2, fragment.Sent, "GET /fresh HTTP/1.1\r\n\r\n")
 	c.send(2, fragment.Received, response)
@@ -266,14 +274,17 @@ func TestIndependentAfterAnUnlocatedLossOnlyAFreshOccupancyIsPlacedWhole(t *test
 	c.close(2)
 	c.close(3)
 	c.close(1)
-	if got := c.session.Stats().Unlocated; got != 1 || len(records.endings) != 3 {
-		t.Fatalf("wiring, not the property: capture took the unlocated count as %d with %d records, want 1 and 3",
+	if got := c.session.Stats().Unlocated; got != 1 || len(records.endings) != 4 {
+		t.Fatalf("wiring, not the property: capture took the unlocated count as %d with %d records, want 1 and 4",
 			got, len(records.endings))
 	}
 
 	for _, d := range []fragment.Direction{fragment.Sent, fragment.Received} {
 		if _, whole := overloadUnplacedFrom(overloadPlacement(t, records.endings, 2, d)); !whole {
 			t.Errorf("the occupancy born after the loss is not placed whole in its %v direction", d)
+		}
+		if _, whole := overloadUnplacedFrom(overloadPlacement(t, records.endings, 4, d)); !whole {
+			t.Errorf("the occupancy begun before the loss, first delivered after it, is not placed whole in its %v direction", d)
 		}
 		if p := overloadPlacement(t, records.endings, 3, d); p.Positions != connection.PositionsUnknownThroughout {
 			t.Errorf("the occupancy first observed after the loss establishes %v in its %v direction: its first observation "+
