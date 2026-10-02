@@ -83,16 +83,18 @@ func TestIndependentClearRefusalDisablesCapture(t *testing.T) {
 	for _, e := range r.events {
 		if e.Length == 512 {
 			writes++
-			if e.Sequence.Occupancy != 0 {
-				t.Errorf("capture live with clear unprobed: %+v", e.Sequence)
-			}
 		}
 	}
 	if writes != 1 {
 		t.Fatal("wiring, not the property: byte movers did not deliver actual write")
 	}
 	if requested != 1 {
-		t.Errorf("present SSL_clear not offered as a lifecycle probe: count%d", requested)
+		t.Fatalf("wiring, not the property: present SSL_clear not offered as a lifecycle probe: count%d; refusal safety UNPROVED", requested)
+	}
+	for _, e := range r.events {
+		if e.Length == 512 && e.Sequence.Occupancy != 0 {
+			t.Errorf("capture live with clear unprobed: %+v", e.Sequence)
+		}
 	}
 	if !slices.Contains(r.session.Unprobed(), "SSL_clear") || !slices.Contains(r.session.Coverage().Unprobed, "SSL_clear") {
 		t.Errorf("clear refusal absent from coverage: %+v", r.session.Coverage())

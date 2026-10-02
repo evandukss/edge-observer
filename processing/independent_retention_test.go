@@ -249,3 +249,89 @@ func TestIndependentExtensionChurnReturnsTransientStores(t *testing.T) {
 	}
 	t.Logf("PRECONDITIONS calls=%d live_outstanding=0 waiting_bytes_bound=64 per_call_bytes=8 stores=%+v", completed, independentOccupancy(t, supervisor))
 }
+
+func TestIndependentDerivedChurnReclaimsQueuedLines(t *testing.T) {
+	clock := &independentClock{now: time.Unix(1900000000, 0), armed: make(chan time.Duration, 128)}
+	ready := make(chan struct{}, 1)
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{}, 2)
+	quit := make(chan struct{})
+	supervisor := extension.Start(extension.Config{
+		Name: "derived-retained", Command: []string{independentPeer(t), "--mode", "derived-flood", "--count", "2"},
+		Session: "retained", Revision: "retained", TimeoutMS: 1000, WaitingBytes: 64, Clock: clock,
+		Issued: func() uint64 { return 1280 },
+		Events: func(e extension.Event) {
+			if e.Kind == extension.Ready {
+				ready <- struct{}{}
+			}
+		},
+		Derived: func([]byte) string {
+			entered <- struct{}{}
+			select {
+			case <-release:
+				return ""
+			case <-quit:
+				return extension.DerivedStopped
+			}
+		},
+	})
+	defer func() { close(quit); supervisor.Close() }()
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("wiring, not the property: derived peer never ready")
+	}
+	for i := uint64(1); i <= 1280; i++ {
+		result := make(chan extension.Result, 1)
+		if why := supervisor.Submit(extension.Call{ID: i, Bytes: 8, Message: []byte(fmt.Sprintf("{\"type\":\"exchange\",\"id\":\"%d\"}\n", i)), Done: func(r extension.Result) { result <- r }}); why != "" {
+			t.Fatalf("derived churn refused call: %s", why)
+		}
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("wiring, not the property: derived writer never entered")
+		}
+		deadline := time.Now().Add(time.Second)
+		for independentOccupancy(t, supervisor)["extension.derived"].Held == 0 {
+			if time.Now().After(deadline) {
+				t.Fatal("wiring, not the property: second derived line never queued behind held write")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		release <- struct{}{}
+		release <- struct{}{}
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("wiring, not the property: second derived write absent")
+		}
+		select {
+		case r := <-result:
+			if r.Outcome != extension.Unchanged {
+				t.Fatalf("wiring, not the property: derived peer result %+v", r)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("wiring, not the property: derived peer unanswered")
+		}
+		for supervisor.Counts().DerivedWritten != i*2 {
+			if time.Now().After(deadline) {
+				t.Fatal("wiring, not the property: derived writes never completed")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if n := independentOccupancy(t, supervisor)["extension.derived"].Held; n != 0 {
+			t.Errorf("derived queue retains %d at zero live lines", n)
+		}
+		clock.advance(time.Second)
+	}
+	counts := supervisor.Counts()
+	if counts.DerivedRefused != 0 {
+		t.Errorf("constant-population derived churn refused output: %+v", counts)
+	}
+	for reason, n := range counts.RetiredBy {
+		if n != 0 {
+			t.Errorf("healthy derived churn retired peer: %s=%d", reason, n)
+		}
+	}
+	t.Logf("PRECONDITIONS queued_witnesses=1280 written=%d live_lines=0 stores=%+v", counts.DerivedWritten, independentOccupancy(t, supervisor))
+}
