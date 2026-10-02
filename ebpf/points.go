@@ -28,6 +28,7 @@ const (
 	progWriteEx2Return   = "obs_write_ex2_return"
 	progFreeEntry        = "obs_free_entry"
 	progNewReturn        = "obs_new_return"
+	progSendfile         = "obs_sendfile"
 )
 
 // Discard is one resolved probe no point was made for, and why. The resolver
@@ -143,6 +144,11 @@ func ForkPoint(symbol, path string, offset uint64) Point {
 // programsFor is the mapping from a catalogued function to the BPF programs
 // that observe it. Entry is empty for a function this does not attach to.
 func programsFor(function probe.Function) (entry, back string) {
+	if function.Route {
+		// An uncatalogued byte-moving route: an entry probe that numbers the sent
+		// direction so its use shows as a gap. No return and no count.
+		return progSendfile, ""
+	}
 	if function.Begins {
 		// A handle's birth: the new handle is the return value.
 		return "", progNewReturn

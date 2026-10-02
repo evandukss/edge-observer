@@ -497,10 +497,18 @@ struct call {
 	// asserted against the loaded program.
 	__u8  live_padding[6];
 
-	// occupancy is the occupancy this call's number will be taken in, read at
-	// entry; zero where none could be kept. A return finding another occupancy
-	// held for the handle numbers nothing in it.
+	// occupancy is the occupancy this call's number is taken in, read at entry;
+	// zero where none could be kept. A return finding another occupancy held for
+	// the handle numbers nothing in it.
 	__u64 occupancy;
+
+	// number is this call's place in its occupancy and direction, taken at ENTRY
+	// (obs_take), so a return that never fires leaves this number missing from the
+	// occupancy, which capture reads as a gap. A return that fires fills it: with a
+	// transfer when bytes moved, or a zero-byte resolution when none did, so
+	// "returned with nothing" is told from "never returned". Zero for a deferred
+	// call (no occupancy at entry; numbered at return instead).
+	__u64 number;
 };
 
 // event is one firing delivered to userspace. The metadata-only program
@@ -883,6 +891,22 @@ struct {
 	__type(value, __u64);
 } unlocated SEC(".maps");
 
+// capture_live is zero until userspace has placed and confirmed every transfer
+// probe, then one. An occupancy forms only once it is one, so a handle born, or
+// a call made, in the window after a lifecycle or socket probe is live but
+// before the data probes are cannot be numbered from a false origin: it forms no
+// occupancy, its calls are unsequenced, and its bytes are an unlocated loss.
+// Probes are placed in symbol order, so SSL_new precedes SSL_read and SSL_write;
+// this flag, not the placement order, is what makes Born sound. Userspace seeds
+// it (package ebpf, Session.markCaptureLive); a session that never sets it
+// numbers nothing, the closed direction of the fail.
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u8);
+} capture_live SEC(".maps");
+
 // operation is one syscall the kernel is executing for a live TLS call on this
 // thread: the join between the syscall tracepoints (descriptor, result) and the
 // kernel hooks (the acquired object). It is keyed by thread, never CPU: a
@@ -1163,6 +1187,15 @@ static __always_inline __u64 obs_unlocated_now(void)
 	return *(volatile __u64 *)slot;
 }
 
+// obs_capture_live reports whether every transfer probe is placed, so an
+// occupancy formed now is numbered from a true origin.
+static __always_inline int obs_capture_live(void)
+{
+	__u32 index = 0;
+	__u8 *slot = bpf_map_lookup_elem(&capture_live, &index);
+	return slot && *slot;
+}
+
 // obs_handle_key names a handle of the instance who.
 static __always_inline void obs_handle_key(struct handle_key *hk, const struct instance_key *who, __u64 ssl)
 {
@@ -1183,6 +1216,12 @@ static __always_inline void obs_handle_key(struct handle_key *hk, const struct i
 static __always_inline struct occupancy *obs_occupy(const struct instance_key *who, __u64 ssl,
 						    __u64 generation, __u8 born)
 {
+	// No occupancy forms before every transfer probe is live: an origin taken now
+	// would be false, since bytes may have moved through a data probe not yet
+	// placed. The calls of this window are unsequenced and their bytes unlocated.
+	if (!obs_capture_live())
+		return 0;
+
 	struct handle_key hk = {};
 	obs_handle_key(&hk, who, ssl);
 	struct occupancy *held = bpf_map_lookup_elem(&occupancies, &hk);
@@ -1283,25 +1322,9 @@ static __always_inline void obs_unhold(struct occupancy *occ, __u8 dir, __u64 th
 struct place {
 	__u64 occupancy;
 	__u64 number;
-	__u64 last_sent;
-	__u64 last_received;
 	__u8  born;
 	__u8  overlapped;
-	__u8  in_flight;
-	__u8  bytes;
 };
-
-// obs_place fills a transfer's place from its occupancy and number.
-static __always_inline void obs_place(struct place *at, const struct occupancy *occ, __u8 dir, __u64 number)
-{
-	at->bytes = 1;
-	if (!occ)
-		return;
-	at->occupancy = occ->id;
-	at->number = number;
-	at->born = occ->born;
-	at->overlapped = dir == OBS_SENT ? occ->overlapped_sent : occ->overlapped_received;
-}
 
 // obs_stamp hands out the next kernel-side admission generation.
 static __always_inline __u64 obs_stamp(void)
@@ -1693,7 +1716,8 @@ static __always_inline void obs_emit(const struct instance_key *who, __u64 gener
 				     __u8 early, __u8 measured, __u8 kind,
 				     __u64 buf, __s32 fd, __u64 binding, __u64 socket,
 				     __u8 fd_state, __u8 outcome, const struct ends *ends,
-				     const struct place *at)
+				     const struct place *at,
+				     __u64 last_sent, __u64 last_received, __u8 in_flight)
 {
 	// The stamp is taken before the reservation, so attempts counts every event
 	// tried. A transfer's number was taken before this too: a refused reservation
@@ -1704,19 +1728,20 @@ static __always_inline void obs_emit(const struct instance_key *who, __u64 gener
 	struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
 	if (!e) {
 		obs_count(OBS_STAT_RESERVE_FAILED);
-		// Bytes no occupancy numbered, now lost with nothing to locate them.
-		if (kind == OBS_TRANSFER && at->bytes && !at->occupancy)
+		// A byte-moving transfer no occupancy numbered, now lost with nothing to
+		// locate it. A transfer the occupancy numbered leaves its gap there instead.
+		if (kind == OBS_TRANSFER && length > 0 && !at->occupancy)
 			obs_unlocate();
 		return;
 	}
 	e->occupancy = at->occupancy;
 	e->number = at->number;
 	e->unlocated = unlocated_then;
-	e->last_sent = at->last_sent;
-	e->last_received = at->last_received;
+	e->last_sent = last_sent;
+	e->last_received = last_received;
 	e->born = at->born;
 	e->overlapped = at->overlapped;
-	e->in_flight = at->in_flight;
+	e->in_flight = in_flight;
 	__builtin_memset(e->padding_place, 0, sizeof(e->padding_place));
 	__u64 id = bpf_get_current_pid_tgid();
 	e->stamp = stamp;
@@ -1837,6 +1862,11 @@ static __always_inline int obs_entry(void *ctx, __u32 func, __u8 dir, __u8 count
 	__u32 which = func;
 	__u8 *blind = bpf_map_lookup_elem(&unmeasurable, &which);
 	if (blind && *blind) {
+		// A function whose return probe the kernel did not confirm: its return never
+		// fires for us, so it is recorded nowhere. The entry number is taken all the
+		// same, so the call shows as a gap in its direction rather than vanishing -
+		// this is the return-that-never-fires path, reached deterministically by
+		// leaving a return probe unplaced.
 		if (grant) {
 			obs_count(OBS_STAT_UNMEASURABLE_CALL);
 			obs_lost(occ, dir);
@@ -1890,12 +1920,16 @@ static __always_inline int obs_entry(void *ctx, __u32 func, __u8 dir, __u8 count
 	c.early = early;
 	c.live = 1;
 	c.occupancy = occ ? occ->id : 0;
+	// The number is taken HERE, at entry, so a return that never fires leaves it
+	// missing from the occupancy. A deferred call has no occupancy yet and is
+	// numbered at its return instead.
+	c.number = occ ? obs_take(occ, dir) : 0;
 	// A refused insertion would land on the unmatched counter as a return whose
 	// entry was never seen; it is counted as itself.
 	if (bpf_map_update_elem(&inflight, &id, &c, BPF_ANY) != 0) {
+		// The entry number is taken and no return will complete this call, so it is
+		// already a gap; the unhold releases the direction for the next call.
 		obs_count(OBS_STAT_CALL_UNRECORDED);
-		if (grant)
-			obs_lost(occ, dir);
 		obs_unhold(occ, dir, id);
 	}
 	return 0;
@@ -1953,8 +1987,13 @@ static __always_inline int obs_return(void *ctx, __u32 func)
 		c->nested--;
 		return 0;
 	}
-	struct call call = *c;
+	// No full copy of the entry is taken: this thread owns its in-flight slot, so
+	// the fields are read through the map pointer and only the two the deferred
+	// path reassigns are held in locals. Copying the whole struct onto the stack
+	// put obs_return over the BPF stack limit once the entry grew a number.
 	c->live = 0;
+	__u64 generation = c->generation;
+	__u64 number = c->number;
 
 	// Whether the call moved bytes, from its return alone: one that moved none
 	// takes no number whatever becomes of it. An out-parameter call's status says
@@ -1962,8 +2001,8 @@ static __always_inline int obs_return(void *ctx, __u32 func)
 	// SSL_READ_EARLY_DATA_SUCCESS, the rest with 1); anything else is an error or
 	// an end with no bytes.
 	__s64 rc = (__s64)(__s32)OBS_RC(ctx);
-	int moved = call.count == OBS_COUNT_RETURNED ? rc > 0 : (rc == 1 || rc == 2);
-	struct occupancy *occ = obs_held_occupancy(&key, call.ssl, call.occupancy);
+	int moved = c->count == OBS_COUNT_RETURNED ? rc > 0 : (rc == 1 || rc == 2);
+	struct occupancy *occ = obs_held_occupancy(&key, c->ssl, c->occupancy);
 
 	// The read boundary. Approval at entry is not a lease through return: between
 	// the two the process can lose its grant (exec, exit, withdrawal) or the key
@@ -1972,35 +2011,36 @@ static __always_inline int obs_return(void *ctx, __u32 func)
 	// so a readmission of the number is a different instance. A refusal loses the
 	// transfer and is counted.
 	if (!grant) {
-		// A refusal takes a place in the production order and, where the call moved
-		// bytes, a number in its occupancy: its bytes crossed on a captured stream and
-		// will have no record. A deferred call was never on an approved stream, so it
-		// takes neither (attempts; package connection, Placement).
-		if (call.deferred) {
+		// A refusal takes a place in the production order. Its number was taken at
+		// entry and no event fills it, so it is already a gap in its occupancy,
+		// whether or not it moved bytes (a refused call that moved nothing
+		// over-invalidates its direction, the conservative way). A deferred call was
+		// never on an approved stream and took no number (attempts; package
+		// connection, Placement).
+		if (c->deferred) {
 			obs_count(OBS_STAT_DEFERRED_DISCARDED);
 			return 0;
 		}
 		obs_stamp_event();
 		obs_count(OBS_STAT_REFUSED);
-		if (moved)
-			obs_lost(occ, call.dir);
-		obs_unhold(occ, call.dir, id);
+		obs_unhold(occ, c->dir, id);
 		return 0;
 	}
-	if (call.deferred) {
+	if (c->deferred) {
 		// A call held through a fork window whose admission arrived while in flight:
-		// the read is taken, and the call numbered, under the admission in force now.
-		call.generation = grant->generation;
-		occ = obs_occupy(&key, call.ssl, call.generation, 0);
-	} else if (grant->generation != call.generation) {
+		// it had no occupancy at entry, so it is numbered here, under the admission in
+		// force now. This return-time numbering is the one exception to numbering at
+		// entry, and it is sound because the call's admission did not exist at entry.
+		generation = grant->generation;
+		occ = obs_occupy(&key, c->ssl, generation, 0);
+		number = occ ? obs_take(occ, c->dir) : 0;
+	} else if (grant->generation != generation) {
 		// The call's admission has gone and another is in force; its bytes are absent
-		// from an approved stream, so it takes a place in the order and a number in the
-		// occupancy it was entered in.
+		// from an approved stream. Its entry number stays a gap in the occupancy it
+		// was entered in; nothing new is taken here.
 		obs_stamp_event();
 		obs_count(OBS_STAT_REFUSED);
-		if (moved)
-			obs_lost(occ, call.dir);
-		obs_unhold(occ, call.dir, id);
+		obs_unhold(occ, c->dir, id);
 		return 0;
 	}
 	struct origin origin = {};
@@ -2013,63 +2053,64 @@ static __always_inline int obs_return(void *ctx, __u32 func)
 	__u64 socket = 0;
 	__u8 fd_state = OBS_FD_NONE;
 	struct ends ends = {};
-	obs_associate(&key, &call, &fd, &binding, &socket, &fd_state, &ends);
+	obs_associate(&key, c, &fd, &binding, &socket, &fd_state, &ends);
 
 	struct place at = {};
+	if (occ) {
+		at.occupancy = occ->id;
+		at.number = number;
+		at.born = occ->born;
+		at.overlapped = c->dir == OBS_SENT ? occ->overlapped_sent : occ->overlapped_received;
+	}
 	if (!moved) {
-		// No bytes and no number. An out-parameter status of this kind is emitted as a
-		// transfer nothing measured, as it was before calls were numbered; it carries
-		// its occupancy and number zero, which says it moved nothing.
-		if (call.count != OBS_COUNT_RETURNED) {
-			if (occ) {
-				at.occupancy = occ->id;
-				at.born = occ->born;
-			}
-			obs_emit(&key, call.generation, &origin, call.ssl, 0, call.dir, call.early, 0, OBS_TRANSFER, 0,
-				 fd, binding, socket, fd_state, call.outcome, &ends, &at);
-		}
-		obs_unhold(occ, call.dir, id);
+		// The call returned having moved nothing. Its entry number is filled with a
+		// zero-byte resolution, so it is told from a return that never fires (which
+		// leaves the number a gap). A register call measured that it moved nothing, so
+		// it is measured; an out-parameter call whose status is not success is emitted
+		// measured 0, the shape P4.1-T3 repairs (it is the unknown-length path), and
+		// its number is filled all the same.
+		__u8 measured = c->count == OBS_COUNT_RETURNED ? 1 : 0;
+		obs_emit(&key, generation, &origin, c->ssl, 0, c->dir, c->early, measured, OBS_TRANSFER, 0,
+			 fd, binding, socket, fd_state, c->outcome, &ends, &at, 0, 0, 0);
+		obs_unhold(occ, c->dir, id);
 		return 0;
 	}
 
-	if (call.count == OBS_COUNT_RETURNED) {
-		if ((__u64)rc > call.cap) {
+	if (c->count == OBS_COUNT_RETURNED) {
+		if ((__u64)rc > c->cap) {
 			// A count the buffer could not have held: bytes moved that no offset can
-			// follow.
-			obs_lost(occ, call.dir);
-			obs_unhold(occ, call.dir, id);
+			// follow. The entry number stays a gap; nothing is emitted.
+			obs_unhold(occ, c->dir, id);
 			return 0;
 		}
-		obs_place(&at, occ, call.dir, occ ? obs_take(occ, call.dir) : 0);
-		obs_emit(&key, call.generation, &origin, call.ssl, (__u32)rc, call.dir, call.early, 1,
-			 OBS_TRANSFER, call.buf, fd, binding, socket, fd_state, call.outcome, &ends, &at);
-		obs_unhold(occ, call.dir, id);
+		obs_emit(&key, generation, &origin, c->ssl, (__u32)rc, c->dir, c->early, 1,
+			 OBS_TRANSFER, c->buf, fd, binding, socket, fd_state, c->outcome, &ends, &at, 0, 0, 0);
+		obs_unhold(occ, c->dir, id);
 		return 0;
 	}
 
 	// The out-parameter family writes the count through a caller's pointer, a read
 	// of process memory: only the full program measures it, and the metadata-only
-	// one reports the transfer as seen and not measured. Either way it moved bytes
-	// and takes its number.
-	obs_place(&at, occ, call.dir, occ ? obs_take(occ, call.dir) : 0);
+	// one reports the transfer as seen and not measured. Either way it moved bytes;
+	// its number was taken at entry and is carried in at.
 #if READ_PAYLOAD
 	__u64 count = 0;
-	if (call.pcount) {
+	if (c->pcount) {
 		// Reading the count is a read of process memory like any other, recorded at
 		// the read under the same admission (the reads map).
-		obs_read_taken(call.generation);
-		if (bpf_probe_read_user(&count, sizeof(count), (void *)call.pcount) == 0 &&
-		    count > 0 && count <= call.cap) {
-			obs_emit(&key, call.generation, &origin, call.ssl, (__u32)count, call.dir, call.early, 1,
-				 OBS_TRANSFER, call.buf, fd, binding, socket, fd_state, call.outcome, &ends, &at);
-			obs_unhold(occ, call.dir, id);
+		obs_read_taken(generation);
+		if (bpf_probe_read_user(&count, sizeof(count), (void *)c->pcount) == 0 &&
+		    count > 0 && count <= c->cap) {
+			obs_emit(&key, generation, &origin, c->ssl, (__u32)count, c->dir, c->early, 1,
+				 OBS_TRANSFER, c->buf, fd, binding, socket, fd_state, c->outcome, &ends, &at, 0, 0, 0);
+			obs_unhold(occ, c->dir, id);
 			return 0;
 		}
 	}
 #endif
-	obs_emit(&key, call.generation, &origin, call.ssl, 0, call.dir, call.early, 0, OBS_TRANSFER, 0,
-		 fd, binding, socket, fd_state, call.outcome, &ends, &at);
-	obs_unhold(occ, call.dir, id);
+	obs_emit(&key, generation, &origin, c->ssl, 0, c->dir, c->early, 0, OBS_TRANSFER, 0,
+		 fd, binding, socket, fd_state, c->outcome, &ends, &at, 0, 0, 0);
+	obs_unhold(occ, c->dir, id);
 	return 0;
 }
 
@@ -2585,16 +2626,18 @@ SEC("uprobe") int obs_free_entry(void *ctx)
 	// is what makes the next occupancy known without anything downstream seeing
 	// this ending.
 	struct place at = {};
+	__u64 last_sent = 0, last_received = 0;
+	__u8 in_flight = 0;
 	struct occupancy *occ = bpf_map_lookup_elem(&occupancies, &released);
 	if (occ) {
 		at.occupancy = occ->id;
 		at.born = occ->born;
-		at.last_sent = occ->sent;
-		at.last_received = occ->received;
+		last_sent = occ->sent;
+		last_received = occ->received;
 		if (occ->busy_sent)
-			at.in_flight |= OBS_SENT;
+			in_flight |= OBS_SENT;
 		if (occ->busy_received)
-			at.in_flight |= OBS_RECEIVED;
+			in_flight |= OBS_RECEIVED;
 		bpf_map_delete_elem(&occupancies, &released);
 	}
 
@@ -2613,7 +2656,26 @@ SEC("uprobe") int obs_free_entry(void *ctx)
 	struct origin origin = {};
 	obs_origin(grant, &origin);
 	obs_emit(&key, grant->generation, &origin, OBS_PARM1(ctx), 0, 0, 0, 0, OBS_CLOSED, 0,
-		 0, 0, 0, OBS_FD_NONE, OBS_OUTCOME_NONE, &none, &at);
+		 0, 0, 0, OBS_FD_NONE, OBS_OUTCOME_NONE, &none, &at, last_sent, last_received, in_flight);
+	return 0;
+}
+
+// SSL_sendfile moves plaintext from a file through kTLS without a user buffer,
+// so it is outside the plaintext catalogue and this build cannot read its bytes.
+// It is observed count-only: on entry it takes a SENT number in the handle's
+// occupancy and emits nothing, so its use shows as a gap in the sent direction
+// rather than as bytes nothing numbered. Numbered at ENTRY, so a call that fails
+// (no kTLS on the host) still marks the gap; the cost is that a failed
+// SSL_sendfile over-invalidates the sent direction, the conservative way. It is
+// the only plaintext-moving entry point libssl exports outside the catalogue.
+SEC("uprobe") int obs_sendfile(void *ctx)
+{
+	struct instance_key key = {};
+	struct admission *grant = obs_grant(&key);
+	if (!grant)
+		return 0;
+	struct occupancy *occ = obs_occupy(&key, OBS_PARM1(ctx), grant->generation, 0);
+	obs_lost(occ, OBS_SENT);
 	return 0;
 }
 

@@ -83,6 +83,7 @@ type fullCall struct {
 	Nested      uint8
 	LivePadding [6]uint8
 	Occupancy   uint64
+	Number      uint64
 }
 
 type fullHandleKey struct {
@@ -189,6 +190,7 @@ const (
 	fullMapAllowedProcesses     = "allowed_processes"
 	fullMapAttempts             = "attempts"
 	fullMapBindings             = "bindings"
+	fullMapCaptureLive          = "capture_live"
 	fullMapDiscovered           = "discovered"
 	fullMapDiscoveries          = "discoveries"
 	fullMapEvents               = "events"
@@ -233,6 +235,7 @@ const (
 	fullProgObsRecvfrom         = "obs_recvfrom"
 	fullProgObsRecvmsg          = "obs_recvmsg"
 	fullProgObsRwVerifyArea     = "obs_rw_verify_area"
+	fullProgObsSendfile         = "obs_sendfile"
 	fullProgObsSendmsg          = "obs_sendmsg"
 	fullProgObsSendto           = "obs_sendto"
 	fullProgObsSocketReturn     = "obs_socket_return"
@@ -318,6 +321,7 @@ type fullProgramSpecs struct {
 	ObsRecvfrom         *ebpf.ProgramSpec `ebpf:"obs_recvfrom"`
 	ObsRecvmsg          *ebpf.ProgramSpec `ebpf:"obs_recvmsg"`
 	ObsRwVerifyArea     *ebpf.ProgramSpec `ebpf:"obs_rw_verify_area"`
+	ObsSendfile         *ebpf.ProgramSpec `ebpf:"obs_sendfile"`
 	ObsSendmsg          *ebpf.ProgramSpec `ebpf:"obs_sendmsg"`
 	ObsSendto           *ebpf.ProgramSpec `ebpf:"obs_sendto"`
 	ObsSocketReturn     *ebpf.ProgramSpec `ebpf:"obs_socket_return"`
@@ -342,6 +346,7 @@ type fullMapSpecs struct {
 	AllowedProcesses *ebpf.MapSpec `ebpf:"allowed_processes"`
 	Attempts         *ebpf.MapSpec `ebpf:"attempts"`
 	Bindings         *ebpf.MapSpec `ebpf:"bindings"`
+	CaptureLive      *ebpf.MapSpec `ebpf:"capture_live"`
 	Discovered       *ebpf.MapSpec `ebpf:"discovered"`
 	Discoveries      *ebpf.MapSpec `ebpf:"discoveries"`
 	Events           *ebpf.MapSpec `ebpf:"events"`
@@ -391,6 +396,7 @@ type fullMaps struct {
 	AllowedProcesses *ebpf.Map `ebpf:"allowed_processes"`
 	Attempts         *ebpf.Map `ebpf:"attempts"`
 	Bindings         *ebpf.Map `ebpf:"bindings"`
+	CaptureLive      *ebpf.Map `ebpf:"capture_live"`
 	Discovered       *ebpf.Map `ebpf:"discovered"`
 	Discoveries      *ebpf.Map `ebpf:"discoveries"`
 	Events           *ebpf.Map `ebpf:"events"`
@@ -416,6 +422,7 @@ func (m *fullMaps) Close() error {
 		m.AllowedProcesses,
 		m.Attempts,
 		m.Bindings,
+		m.CaptureLive,
 		m.Discovered,
 		m.Discoveries,
 		m.Events,
@@ -473,6 +480,7 @@ type fullPrograms struct {
 	ObsRecvfrom         *ebpf.Program `ebpf:"obs_recvfrom"`
 	ObsRecvmsg          *ebpf.Program `ebpf:"obs_recvmsg"`
 	ObsRwVerifyArea     *ebpf.Program `ebpf:"obs_rw_verify_area"`
+	ObsSendfile         *ebpf.Program `ebpf:"obs_sendfile"`
 	ObsSendmsg          *ebpf.Program `ebpf:"obs_sendmsg"`
 	ObsSendto           *ebpf.Program `ebpf:"obs_sendto"`
 	ObsSocketReturn     *ebpf.Program `ebpf:"obs_socket_return"`
@@ -518,6 +526,7 @@ func (p *fullPrograms) Close() error {
 		p.ObsRecvfrom,
 		p.ObsRecvmsg,
 		p.ObsRwVerifyArea,
+		p.ObsSendfile,
 		p.ObsSendmsg,
 		p.ObsSendto,
 		p.ObsSocketReturn,

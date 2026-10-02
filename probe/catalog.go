@@ -40,6 +40,10 @@ type Function struct {
 	// Begins marks a lifecycle function returning a new handle: its birth, from
 	// which every transfer of the handle is numbered.
 	Begins bool `json:"begins,omitempty"`
+
+	// Route marks an uncatalogued byte-moving entry point, observed count-only so
+	// its use shows as a gap rather than as bytes nothing numbered.
+	Route bool `json:"route,omitempty"`
 }
 
 // Count is where a function reports its byte count, which decides whether a
@@ -74,6 +78,12 @@ type Runtime struct {
 	// stream, invisibly; without the beginning a connection's first transfer is
 	// the first one observed, not the first one made.
 	Lifecycle []Function
+
+	// Uncatalogued is the byte-moving entry points this build does not capture,
+	// observed count-only so their use shows as a gap in the affected direction
+	// rather than as bytes nothing numbered. SSL_sendfile (kTLS, no user buffer)
+	// is the only one libssl exports.
+	Uncatalogued []Function
 }
 
 // OpenSSL is the plaintext-moving family of OpenSSL's libssl, read off real
@@ -109,6 +119,11 @@ var OpenSSL = Runtime{
 		// lost is a number missing rather than a later one taken for the first.
 		{Symbol: "SSL_new", Since: "0.9.8", Probed: true, Begins: true},
 	},
+	Uncatalogued: []Function{
+		// Sends a file through kTLS, no user buffer: its bytes cannot be read, so its
+		// use is numbered in the sent direction and shows as a gap.
+		{Symbol: "SSL_sendfile", Since: "3.0.0", Direction: fragment.Sent, Probed: true, Count: CountNone, Route: true},
+	},
 }
 
 // Probed is the functions the observer attaches to.
@@ -136,7 +151,8 @@ func (r Runtime) Symbols() []string {
 // the lifecycle: both are attached, and dropping lifecycle probes would let
 // reused addresses continue old streams.
 func (r Runtime) Lookup(symbol string) (Function, bool) {
-	for _, function := range append(r.Functions, r.Lifecycle...) {
+	all := append(append(append([]Function{}, r.Functions...), r.Lifecycle...), r.Uncatalogued...)
+	for _, function := range all {
 		if function.Symbol == symbol {
 			return function, true
 		}

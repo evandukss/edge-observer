@@ -50,6 +50,7 @@ func TestTheAllowlistIsTheSameShapeOnBothSidesOfTheProgram(t *testing.T) {
 				"occupancies":   {binary.Size(handleKey{}), binary.Size(sequenceValue{})},
 				"occupancy_ids": {binary.Size(uint32(0)), binary.Size(uint64(0))},
 				"unlocated":     {binary.Size(uint32(0)), binary.Size(uint64(0))},
+				"capture_live":  {binary.Size(uint32(0)), binary.Size(uint8(0))},
 			}
 			for name, want := range sizes {
 				held, found := spec.Maps[name]

@@ -101,6 +101,18 @@ type Options struct {
 	// Production callers leave both unset.
 	Resize  map[string]uint32
 	Staging int
+
+	// DeferCaptureLive leaves the capture-live flag unset at attach, for a test
+	// that drives the pre-live window and sets it with MarkCaptureLive. Production
+	// callers leave it false, so an occupancy forms as soon as the transfer probes
+	// are confirmed.
+	DeferCaptureLive bool
+
+	// SkipReturn names catalogued functions whose return probe is not placed, for
+	// a test exercising a return that never fires: the function stays unmeasurable,
+	// so its entry takes a number that nothing fills, a gap. Production callers
+	// leave it empty.
+	SkipReturn []string
 }
 
 // MinimumKernel is the oldest kernel this package will attach on, published
@@ -379,6 +391,10 @@ type Session struct {
 	excluded []admission.Denial
 	denied   map[instanceKey]bool
 
+	// skipReturn names functions whose return probe is deliberately not placed, a
+	// test seam for a return that never fires (Options.SkipReturn).
+	skipReturn map[string]bool
+
 	// namedBy is every target that named an instance; the allowlist holds one.
 	namedBy map[instanceKey][]admission.Provenance
 
@@ -552,6 +568,10 @@ func Attach(options Options) (*Session, error) {
 	}
 
 	session.excluded = options.Deny
+	session.skipReturn = make(map[string]bool, len(options.SkipReturn))
+	for _, symbol := range options.SkipReturn {
+		session.skipReturn[symbol] = true
+	}
 
 	if err := session.authorise(options.Admit); err != nil {
 		_ = session.Close()
@@ -584,6 +604,15 @@ func Attach(options Options) (*Session, error) {
 	if err := session.measurable(); err != nil {
 		_ = session.Close()
 		return nil, err
+	}
+
+	// Every transfer probe is placed and confirmed now, so an occupancy formed from
+	// here is numbered from a true origin: the capture-live flag is set (Born).
+	if !options.DeferCaptureLive {
+		if err := session.markCaptureLive(); err != nil {
+			_ = session.Close()
+			return nil, err
+		}
 	}
 
 	// After the probes are placed, so a reading covers the window between filling
@@ -1061,6 +1090,25 @@ func (s *Session) seed() error {
 	return nil
 }
 
+// markCaptureLive sets the kernel flag that lets occupancies form, called once
+// every transfer probe is confirmed so a birth is never trusted before data
+// capture is live (bpf/ssl.bpf.h, capture_live).
+func (s *Session) markCaptureLive() error {
+	flag := s.collection.Maps["capture_live"]
+	if flag == nil {
+		return fmt.Errorf("%w: the program has no capture-live flag, so it cannot number a handle "+
+			"from a true origin", ErrUnavailable)
+	}
+	if err := flag.Update(uint32(0), uint8(1), ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("%w: set the capture-live flag: %v", ErrUnavailable, err)
+	}
+	return nil
+}
+
+// MarkCaptureLive sets the capture-live flag after a deferred attach, for a test
+// that first drives the window in which no occupancy may form.
+func (s *Session) MarkCaptureLive() error { return s.markCaptureLive() }
+
 // Declined is what this session would not authorise, and why.
 func (s *Session) Declined() []Declined { return s.declined }
 
@@ -1422,7 +1470,9 @@ func (s *Session) measurable() error {
 	}
 	for _, put := range s.placed {
 		code, known := obpf.EntryPrograms[put.point.Entry]
-		if !known || !s.answer(put).Confirmed {
+		if !known || s.skipReturn[put.point.Symbol] || !s.answer(put).Confirmed {
+			// A function whose return probe was deliberately not placed (a test seam)
+			// stays unmeasurable, so its entry numbers it and the missing return is a gap.
 			continue
 		}
 		if err := unmeasurable.Update(code, uint8(0), ebpf.UpdateAny); err != nil {
@@ -1468,7 +1518,10 @@ func (s *Session) put(target *placed) error {
 		target.entry = front
 	}
 
-	if point.Return == "" {
+	if point.Return == "" || s.skipReturn[point.Symbol] {
+		// A test seam: the return probe is left unplaced, so this function's return
+		// never fires and its entry number stays a gap. The function is marked
+		// unmeasurable because measurable() only clears a confirmed return.
 		return nil
 	}
 	back := s.collection.Programs[point.Return]
@@ -2200,6 +2253,7 @@ type callValue struct {
 	Nested      uint8
 	LivePadding [6]uint8
 	Occupancy   uint64
+	Number      uint64
 }
 
 // Executing is how many calls are still inside the observed library: live

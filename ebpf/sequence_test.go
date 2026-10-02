@@ -152,6 +152,8 @@ const sequenceActorSource = `
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/types.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #define HANDLES 64
@@ -262,6 +264,11 @@ int main(int argc, char **argv) {
             shutdown(fd_of[i], SHUT_RDWR);
             pthread_join(reading[0], NULL);
             printf("S %d\n", readers[0].result);
+        } else if (line[0] == 'L' && sscanf(line + 1, "%d", &i) == 1) {
+            int f = open("/etc/hostname", O_RDONLY);
+            long sent = (long)SSL_sendfile(ssl_of[i], f, 0, 1, 0);
+            if (f >= 0) close(f);
+            printf("L %ld\n", sent);
         } else if (line[0] == 'Q') {
             for (i = 0; i < HANDLES; i++) if (ssl_of[i]) { SSL_free(ssl_of[i]); close(fd_of[i]); ssl_of[i] = NULL; }
             printf("Q 0\n");
@@ -388,10 +395,16 @@ func (f *sequenceFragments) all() []fragment.Record {
 // deliverHeld attaches to one actor with the capacities given and starts the
 // delivery loop.
 func deliverHeld(t *testing.T, actor *armingProcess, resize map[string]uint32, staging int) *heldDelivery {
+	return deliverHeldWith(t, actor, ebpf.Options{Resize: resize, Staging: staging})
+}
+
+// deliverHeldWith is deliverHeld with the rest of the options a case needs
+// (SkipReturn, DeferCaptureLive). Program, Points and Admit are filled here.
+func deliverHeldWith(t *testing.T, actor *armingProcess, opts ebpf.Options) *heldDelivery {
 	t.Helper()
 	parent := loaded(t, int32(actor.command.Process.Pid))
-	session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: points(t, parent), Admit: authorise(parent),
-		Resize: resize, Staging: staging})
+	opts.Program, opts.Points, opts.Admit = bpf.Full(), points(t, parent), authorise(parent)
+	session, err := ebpf.Attach(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -908,5 +921,156 @@ func TestAFullOccupancyTableFallsBackToTheConservativeRule(t *testing.T) {
 	later := connectionCarrying(t, fragments, "/later-3")
 	if placement := placementIn(later, fragment.Sent); placement.Positions != connection.PositionsUnknownThroughout {
 		t.Errorf("a connection begun after the refusals is %s", placement)
+	}
+}
+
+// A2: an uncatalogued byte-moving route (SSL_sendfile) shows as a gap in the
+// sent direction, not as bytes nothing numbered. kTLS is unavailable in the gate
+// image, so SSL_sendfile moves no bytes (returns negative); its ENTRY probe
+// fires all the same and numbers the sent direction, which is the detection, and
+// the deterministic seam. The received direction, untouched, stays whole.
+func TestAnUncataloguedRouteShowsAsAGapInTheSentDirection(t *testing.T) {
+	port := sequencePeer(t, nil)
+	actor := independentActor(t, sequenceActorSource, port)
+	run := deliverHeld(t, actor, nil, 0)
+
+	placed := false
+	for _, p := range run.session.Placed() {
+		if p.Point.Symbol == "SSL_sendfile" && p.Confirmed {
+			placed = true
+		}
+	}
+	if !placed {
+		t.Fatal("wiring, not the property: the SSL_sendfile probe was not placed and confirmed")
+	}
+
+	command(t, actor, "O 1", "O 0")
+	command(t, actor, "X 0 before", "X 0")
+	before := uint64(0)
+	for _, one := range run.fragments.all() {
+		if one.Direction == fragment.Sent && strings.Contains(string(one.Payload), "/before-0") {
+			before = one.End()
+		}
+	}
+	if _, err := io.WriteString(actor.input, "L 0\n"); err != nil {
+		t.Fatal(err)
+	}
+	line, err := actor.output.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sent int
+	if _, scan := fmt.Sscanf(line, "L %d", &sent); scan != nil {
+		t.Fatalf("SSL_sendfile result: %q", line)
+	}
+	command(t, actor, "X 0 after", "X 0")
+	records := run.seal(t)
+	t.Logf("precondition: SSL_sendfile returned %d (kTLS bytes moved 0; its entry probe fired), before-0 sent end %d",
+		sent, before)
+
+	var record *connection.Record
+	for i := range records {
+		if _, ok := records[i].Placement(fragment.Sent); ok {
+			record = &records[i]
+		}
+	}
+	if record == nil {
+		t.Fatal("no connection record carried a sent placement")
+	}
+	placement, _ := record.Placement(fragment.Sent)
+	if placement.Positions != connection.PositionsUnknownFrom || placement.From > before ||
+		placement.Because != connection.ObservationLost {
+		t.Errorf("the sent direction after an SSL_sendfile is %s, want a located gap at or before %d", placement, before)
+	}
+	if received, ok := record.Placement(fragment.Received); ok && !received.Whole() {
+		t.Errorf("the received direction, which no uncatalogued route touched, is %s", received)
+	}
+}
+
+// A3: a return that never fires shows as a gap, because the number is taken at
+// entry. SSL_read's return probe is left unplaced (SkipReturn), so every read
+// enters, takes a received number, and never returns to us: the received
+// direction is a gap. The sent direction, whose return fires, stays whole.
+func TestAReturnThatNeverFiresShowsAsAGap(t *testing.T) {
+	port := sequencePeer(t, nil)
+	actor := independentActor(t, sequenceActorSource, port)
+	run := deliverHeldWith(t, actor, ebpf.Options{SkipReturn: []string{"SSL_read"}})
+
+	command(t, actor, "O 1", "O 0")
+	command(t, actor, "X 0 before", "X 0")
+	time.Sleep(200 * time.Millisecond)
+	unmeasurable := counter(t, run.session.Unmeasurable)
+	records := run.seal(t)
+	t.Logf("precondition: %d calls to a function whose return never fires", unmeasurable)
+	if unmeasurable == 0 {
+		t.Fatal("UNPROVED, not a pass: no call reached a function with no return probe")
+	}
+	if len(records) != 1 {
+		t.Fatalf("%d records, want the one handle's", len(records))
+	}
+	if sent, ok := records[0].Placement(fragment.Sent); !ok || !sent.Whole() {
+		t.Errorf("the sent direction, whose return fires, is %+v", sent)
+	}
+	received, ok := records[0].Placement(fragment.Received)
+	if !ok || received.Whole() || received.Because != connection.ObservationLost {
+		t.Errorf("the received direction, whose returns never fire, is %+v, want a located gap", received)
+	}
+}
+
+// 2911: a birth observed before capture is live forms no occupancy, so it is
+// never falsely Born. The birth and a transfer are driven while the capture-live
+// flag is deferred: the connection is unsequenced, and the Born counter does not
+// move. The control, a handle born after the flag is set, is Born and whole.
+func TestABirthBeforeCaptureIsLiveFormsNoOccupancy(t *testing.T) {
+	port := sequencePeer(t, nil)
+	actor := independentActor(t, sequenceActorSource, port)
+	run := deliverHeldWith(t, actor, ebpf.Options{DeferCaptureLive: true})
+
+	// Pre-live: handle 0 is born and transfers before any data probe is trusted.
+	command(t, actor, "O 1", "O 0")
+	command(t, actor, "X 0 prelive", "X 0")
+	time.Sleep(200 * time.Millisecond)
+	bornBefore := counter(t, run.session.Born)
+	if bornBefore != 0 {
+		t.Fatalf("wiring, not the property: %d births counted before capture was live", bornBefore)
+	}
+
+	if err := run.session.MarkCaptureLive(); err != nil {
+		t.Fatal(err)
+	}
+	// Post-live: handle 1 is born with every transfer probe confirmed.
+	if _, err := io.WriteString(actor.input, "N 1\n"); err != nil {
+		t.Fatal(err)
+	}
+	if ln, err := actor.output.ReadString('\n'); err != nil || !strings.HasPrefix(ln, "N 0 ") {
+		t.Fatalf("post-live handle: %q: %v", ln, err)
+	}
+	command(t, actor, "X 1 postlive", "X 0")
+	time.Sleep(200 * time.Millisecond)
+	bornAfter := counter(t, run.session.Born)
+	records := run.seal(t)
+	t.Logf("precondition: born before live %d, born after live %d", bornBefore, bornAfter)
+	if bornAfter != 1 {
+		t.Fatalf("a birth after capture is live did not count exactly one Born: %d", bornAfter)
+	}
+
+	prelive := connectionCarrying(t, run.fragments.all(), "/prelive-0")
+	postlive := connectionCarrying(t, run.fragments.all(), "/postlive-1")
+	for _, record := range records {
+		placement, ok := record.Placement(fragment.Sent)
+		if !ok {
+			continue
+		}
+		switch record.ID {
+		case prelive:
+			if placement.Positions != connection.PositionsUnknownThroughout ||
+				placement.Because != connection.SequenceUnavailable {
+				t.Errorf("a connection born before capture was live is %s, want unsequenced throughout", placement)
+			}
+		case postlive:
+			if !placement.Whole() {
+				t.Errorf("a connection born after capture was live is %s", placement)
+			}
+		}
 	}
 }

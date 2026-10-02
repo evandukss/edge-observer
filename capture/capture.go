@@ -600,12 +600,20 @@ func (s *Session) settleLocked(found *stream, final probe.Final, ending bool) {
 	}{{fragment.Sent, final.Sent}, {fragment.Received, final.Received}} {
 		at := found.offsets[one.direction]
 		last := found.numbered[one.direction]
+		// The number is taken at entry, so a call in flight when the occupancy ended
+		// has already advanced the terminal past what was delivered. That one number
+		// is the in-flight call, not a lost transfer: it is excluded from the lost
+		// count and leaves the direction unsettled instead.
+		terminal := one.terminal.Last
+		if one.terminal.InFlight && terminal > 0 {
+			terminal--
+		}
 		switch {
-		case one.terminal.Last > last:
-			missing := int64(one.terminal.Last - last)
+		case terminal > last:
+			missing := int64(terminal - last)
 			s.stats.Lost += missing
 			s.cutLocked(found, one.direction, at, connection.ObservationLost, missing, "")
-		case one.terminal.Last < last:
+		case terminal < last:
 			s.cutLocked(found, one.direction, at, connection.TerminalUnsettled, 0,
 				"the producer's last number is behind one delivered, so the direction's evidence disagrees")
 		}

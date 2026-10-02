@@ -83,6 +83,9 @@ func CoverageOf(answered []Placed) Coverage {
 		case one.Point.Return == progNewReturn:
 			// A handle's birth moves no plaintext; it only numbers the handle's
 			// transfers from their first.
+		case one.Point.Entry == progSendfile:
+			// An uncatalogued byte-moving route, observed count-only: it establishes no
+			// plaintext coverage, only that its use shows as a gap.
 		case bindingProgram(one.Point):
 			coverage.Binding = true
 		case socketProgram(one.Point):
@@ -111,11 +114,18 @@ func (c Coverage) Narrow(built probe.Capability) probe.Capability {
 
 // Coverage is what this session observes, read off what the kernel says it
 // holds.
-func (s *Session) Coverage() Coverage {
+// Placed is one point this session asked the kernel for, with the kernel's
+// answer, so a caller holding the raw session can confirm a symbol is probed.
+func (s *Session) Placed() []Placed {
 	answered := make([]Placed, 0, len(s.placed))
 	for _, put := range s.placed {
 		answered = append(answered, Placed{Point: put.point, Confirmed: s.answer(put).Confirmed})
 	}
+	return answered
+}
+
+func (s *Session) Coverage() Coverage {
+	answered := s.Placed()
 	coverage := CoverageOf(answered)
 
 	// The socket evidence was established by placeKernel, and is reported here
@@ -138,7 +148,7 @@ func (s *Session) Coverage() Coverage {
 // catalogued reports whether a point is one of the observed runtime's own entry
 // points, as opposed to the C library points a session places beside them.
 func catalogued(point Point) bool {
-	return !socketProgram(point) &&
+	return !socketProgram(point) && point.Entry != progSendfile &&
 		point.Entry != ForkEntryProgram && point.Return != ForkReturnProgram
 }
 

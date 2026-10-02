@@ -199,8 +199,11 @@ func TestAConnectionOpenWhenProductionStopsIsSettledByWhatTheProducerHolds(t *te
 	}{
 		"the producer holds what arrived": {settlers: []probe.Settler{settler{held: probe.Settlement{Occupancy: 7, Final: whole}}},
 			want: connection.PositionsEstablished},
+		// Two transfers delivered (numbered 2) and a third in flight: entry numbering
+		// makes the terminal 3 with InFlight. That one number is the in-flight call,
+		// not a lost transfer, so the prefix stays established.
 		"a call in flight when production stopped": {settlers: []probe.Settler{settler{held: probe.Settlement{Occupancy: 7,
-			Final: probe.Final{Known: true, Sent: probe.Terminal{Last: 2, InFlight: true}}}}},
+			Final: probe.Final{Known: true, Sent: probe.Terminal{Last: 3, InFlight: true}}}}},
 			want: connection.PositionsEstablished},
 		"the producer took a number that never arrived": {settlers: []probe.Settler{settler{held: probe.Settlement{Occupancy: 7,
 			Final: probe.Final{Known: true, Sent: probe.Terminal{Last: 3}}}}},
@@ -465,11 +468,18 @@ func TestARefusedTransferIsNeverCountedAsALoss(t *testing.T) {
 func TestACallInFlightAtTheReleaseLeavesItsDirectionUnsettled(t *testing.T) {
 	for name, inFlight := range map[string]bool{"a call in flight": true, "the control": false} {
 		t.Run(name, func(t *testing.T) {
+			// One transfer delivered (number 1); for the in-flight case a second call
+			// took number 2 at entry and had not returned, so the terminal is 2 with
+			// InFlight. That one number is the in-flight call, not a lost transfer.
 			s := capture.Recording(&collected{}, nil)
 			s.Transfer(numberedAs(worker, 0x18, fragment.Sent, 10, 7, 1))
 			ended := ending(worker, 0x18)
 			ended.Sequence = probe.Sequence{Occupancy: 7, Born: true}
-			ended.Final = probe.Final{Known: true, Sent: probe.Terminal{Last: 1, InFlight: inFlight}}
+			last := uint64(1)
+			if inFlight {
+				last = 2
+			}
+			ended.Final = probe.Final{Known: true, Sent: probe.Terminal{Last: last, InFlight: inFlight}}
 			s.Closed(ended)
 
 			if got := s.Stats().Closed; got != 1 {
@@ -485,6 +495,9 @@ func TestACallInFlightAtTheReleaseLeavesItsDirectionUnsettled(t *testing.T) {
 			if held.Positions != connection.PositionsUnknownFrom || held.From != 10 ||
 				held.Because != connection.TerminalUnsettled {
 				t.Errorf("a direction with a call in flight at the release is %s", held)
+			}
+			if held.Lost.Known && held.Lost.Value != 0 {
+				t.Errorf("the in-flight call's entry number was counted as %d lost", held.Lost.Value)
 			}
 		})
 	}

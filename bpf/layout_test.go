@@ -82,7 +82,7 @@ func TestTheInFlightMirrorNamesEveryFieldTheProgramDeclares(t *testing.T) {
 		{"socket_fd", 4}, {"sockets", 1}, {"ends", 1},
 		{"outcome", 1}, {"io", 1},
 		{"dir", 1}, {"count", 1}, {"early", 1}, {"deferred", 1}, {"live", 1},
-		{"nested", 1}, {"live_padding", 6}, {"occupancy", 8},
+		{"nested", 1}, {"live_padding", 6}, {"occupancy", 8}, {"number", 8},
 	}
 
 	if len(declared) != len(mirrored) {
