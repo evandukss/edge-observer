@@ -283,8 +283,9 @@ func TestIndependentProofRingAndConcurrentHandles(t *testing.T) {
 }
 func TestIndependentProofUnlocated(t *testing.T) {
 	r := proofFixture(t, map[string]uint32{"occupancies": 2})
+	addresses := make([]uint64, 4)
 	for i := 0; i < 3; i++ {
-		r.open(t, i)
+		addresses[i], _ = r.open(t, i)
 		r.command(t, fmt.Sprintf("W %d 1", i))
 		r.consume()
 	}
@@ -300,7 +301,7 @@ func TestIndependentProofUnlocated(t *testing.T) {
 	for _, event := range r.events {
 		prior[event.Sequence.Occupancy] = true
 	}
-	r.open(t, 3)
+	addresses[3], _ = r.open(t, 3)
 	r.command(t, "W 3 1")
 	r.consume()
 	r.finish(t)
@@ -318,10 +319,30 @@ func TestIndependentProofUnlocated(t *testing.T) {
 	if unsequenced == 0 || bornAfter == 0 {
 		t.Fatalf("UNPROVED: unsequenced=%d born_after=%d", unsequenced, bornAfter)
 	}
-	for _, rec := range r.collected.records {
-		if p, ok := rec.Placement(fragment.Sent); ok && p.Whole() {
-			t.Errorf("COUNTEREXAMPLE: conservative rule certified %+v", rec)
+	// The connection whose occupancy the full table refused is where the loss
+	// fell, so it is never certified. The connection born after the loss numbers
+	// every transfer from its observed birth, so it is. Its address may be the
+	// freed connection's, so it is the later record at that address.
+	lost := 0
+	var fresh *connection.Record
+	for i, rec := range r.collected.records {
+		switch rec.Handle.Address {
+		case addresses[2]:
+			lost++
+			if p, ok := rec.Placement(fragment.Sent); ok && p.Whole() {
+				t.Errorf("COUNTEREXAMPLE: the connection the unlocated loss fell on was certified %+v", rec)
+			}
+		case addresses[3]:
+			if fresh == nil || rec.ID > fresh.ID {
+				fresh = &r.collected.records[i]
+			}
 		}
+	}
+	if lost == 0 || fresh == nil {
+		t.Fatalf("UNPROVED: %d records for the refused connection, born-after record found %v", lost, fresh != nil)
+	}
+	if p, ok := fresh.Placement(fragment.Sent); !ok || !p.Whole() {
+		t.Errorf("the connection born after the unlocated loss was not certified: %+v", *fresh)
 	}
 	t.Logf("PRECONDITIONS table_capacity=2 rejected=%d unlocated=%d unsequenced=%d born_after=%d", proofCounter(t, r.session.OccupanciesUnrecorded), u, unsequenced, bornAfter)
 }

@@ -169,8 +169,9 @@ func TestIndependentPartialAttachmentRetainsOnlyConfiguredRefusals(t *testing.T)
 	port := serving(t)
 	client, excluded := speaking(t, port), speaking(t, port)
 	unavailable := unobservable(t)
-	exhausted := make(chan struct{})
-	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 1000, IntakeExhausted: exhausted})
+	// The witness keeps every event's slot, so two events fill the held-event
+	// bound and every later one is refused under the same reason.
+	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +179,7 @@ func TestIndependentPartialAttachmentRetainsOnlyConfiguredRefusals(t *testing.T)
 	request.DeliveryGate = gate
 	request.Deny = []admission.Denial{{Instance: excluded.process.Instance(), ObserverPID: excluded.process.PID, Provenance: admission.Provenance{Number: 1, Target: "excluded"}}}
 	witness := &collected{}
-	live, err := attach.NeweBPF(process.Approval{}).Attach(request, witness)
+	live, err := attach.NeweBPF(process.Approval{}).Attach(request, slotKeeping{witness})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,9 +210,8 @@ func TestIndependentPartialAttachmentRetainsOnlyConfiguredRefusals(t *testing.T)
 	if len(witness.moved()) == 0 {
 		t.Fatal("wiring, not the property: placed member never transferred")
 	}
-	// Inject the public intake-exhaustion boundary, then let real probe
-	// deliveries repeatedly write the same refusal reason.
-	close(exhausted)
+	// Real probe deliveries past the held-event bound repeatedly write the same
+	// refusal reason.
 	refusing := live.(probe.Refusing)
 	for i := 0; i < 80; i++ {
 		t18Ask(t, client, "/?asked=retained-refused")
@@ -222,7 +222,12 @@ func TestIndependentPartialAttachmentRetainsOnlyConfiguredRefusals(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			count = counts[probe.GateRefusal(probe.GateIntakeExhausted)]
+			count = 0
+			for name, n := range counts {
+				if strings.HasPrefix(name, probe.GateRefusal("")) {
+					count += n
+				}
+			}
 			if count >= int64(i+1) {
 				break
 			}
@@ -242,4 +247,22 @@ func TestIndependentPartialAttachmentRetainsOnlyConfiguredRefusals(t *testing.T)
 		}
 	}
 	t.Logf("PRECONDITIONS partial_refusals=2 exclusions=1 actual_refused_exchanges=80 retained=%v", read())
+}
+
+// slotKeeping is a witness that keeps every event's slot, as a store retaining
+// the event's input would, and returns none.
+type slotKeeping struct{ *collected }
+
+func (k slotKeeping) Transfer(t probe.Transfer) {
+	if t.Slot != nil {
+		t.Slot.Keep()
+	}
+	k.collected.Transfer(t)
+}
+
+func (k slotKeeping) Closed(c probe.Connection) {
+	if c.Slot != nil {
+		c.Slot.Keep()
+	}
+	k.collected.Closed(c)
 }

@@ -193,11 +193,13 @@ func TestP3T9DrainedAdmissionBoundaryAndPendingRetirement(t *testing.T) {
 					atN = c.Stats()
 				}
 			}
-			reason, charged := probe.GateReason(""), uint64(count+2)
-			if count == 5 {
-				reason, charged = probe.GateInputLimit, 6
+			// The event past the bound is refused and counted, reserves nothing, and
+			// costs only its own connection: no reason, no withdrawal.
+			charged := uint64(min(count, 4) + 2)
+			p3t9Reason(t, g, charged, "")
+			if refused := g.Snapshot().InputRefused; refused != uint64(count-min(count, 4)) {
+				t.Fatalf("%d events past the bound were counted refused, want %d", refused, count-min(count, 4))
 			}
-			p3t9Reason(t, g, charged, reason)
 			if c.Stats().Empty != 1 || c.Stats().EndingsUnmatched != 1 || len(a.known) != 1 {
 				t.Fatalf("charged controls missing or tail grew cache: stats %+v identities %d", c.Stats(), len(a.known))
 			}
@@ -216,8 +218,8 @@ func TestP3T9DrainedAdmissionBoundaryAndPendingRetirement(t *testing.T) {
 				t.Fatal("pending batch was not retired at Finish")
 			}
 			d := g.Authorize(probe.ReleaseEvidence{InputsSettled: true, LifecycleSettled: true})
-			if d.Authorized != (count <= 4) || d.Reason != reason {
-				t.Fatalf("pending authorization after Finish: %+v", d)
+			if !d.Authorized || d.Reason != "" {
+				t.Fatalf("the pending batch of a connection the refusal did not touch was not authorized after Finish: %+v", d)
 			}
 		})
 	}

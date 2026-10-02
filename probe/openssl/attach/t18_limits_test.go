@@ -6,12 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/evandukss/edge-observer/account"
-	"github.com/evandukss/edge-observer/probe"
 )
 
 // t18Settled waits until the running session has written at least want
@@ -34,30 +32,18 @@ func t18Settled(t *testing.T, binary string, c configured, s *t18Session, want u
 	t.Fatalf("wiring, not the property: the session neither wrote %d records nor ended in %s:\n%s", want, within, s.transcript())
 }
 
-// t18Rendered is the sealed session as the public command prints it.
-func t18Rendered(t *testing.T, binary, directory string) string {
-	t.Helper()
-	stdout, stderr, err := t18Command(t, 30*time.Second, binary, "inspect", directory, "--text")
-	if err != nil {
-		t.Fatalf("inspect %s: %v\n%s", directory, err, stderr)
-	}
-	return stdout
-}
-
 // Rows 4, 10 and 17, the event allowance, on the running program with real
 // traffic. With limits.events N, one connection is exchanged, closed,
 // processed and written, refunding its input, and four connections are kept
-// open and exchanged on in turn. Each stays below the per-connection cut.
-// The account must name the shared input limit, admit at least N further
-// events, and leave the undecided connections' payload
-// nowhere, and show the channel drained freely, so the limit cannot be
-// saturation under another name.
+// open and exchanged on in turn until events are refused at the allowance.
+// What the allowance costs is those connections: the refusals are counted
+// apart from capture loss, the account names no reason the session ended
+// for, the session runs on, and a connection idle through the overload
+// exchanges afterwards and is written. The credential is written nowhere.
 //
-// The control is the same workload under the default allowance: it runs until
-// stopped, admits more than N - so N in the limited run is the limit's doing -
-// and writes the second connection's exchanges, so their absence under the
-// limit is not an exchange that could never have been written.
-func TestT18TheAdmissionLimitEndsTheSessionUnderItsReasonAndKeepsOnlyWhatWasDecided(t *testing.T) {
+// The control is the same workload under the default allowance: it refuses
+// nothing and admits more than N, so N in the limited run is the limit's doing.
+func TestT18TheAdmissionLimitCostsConnectionsAndTheSessionGoesOn(t *testing.T) {
 	binary := built(t)
 	const limit = 60
 	const exchanges = 40
@@ -68,6 +54,7 @@ func TestT18TheAdmissionLimitEndsTheSessionUnderItsReasonAndKeepsOnlyWhatWasDeci
 			port := t18Serving(t)
 			decided := speaking(t, port)
 			undecided := t18OpenConnections(t, port, 4)
+			later := speaking(t, port)
 			c := configuring(t, target("clients", decided.process))
 			t18Edit(t, c, t18Removing)
 			if limited {
@@ -81,86 +68,63 @@ func TestT18TheAdmissionLimitEndsTheSessionUnderItsReasonAndKeepsOnlyWhatWasDeci
 				"wiring, not the property: the connection closed first was never written",
 				func(a account.Account) bool { return t18Written(a) >= 1 })
 			if admitted := t18Admitted(before); admitted <= 0 || admitted >= limit {
-				t.Fatalf("wiring, not the property: %d events were admitted before the open connection began, "+
-					"so the limit is not reached across both connections", admitted)
+				t.Fatalf("wiring, not the property: %d events were admitted before the open connections began, "+
+					"so the limit is not reached across them", admitted)
 			}
-
-			asked := 0
-			for ; asked < exchanges && (!limited || !s.ended()); asked++ {
+			for asked := 0; asked < exchanges; asked++ {
 				t18Ask(t, undecided[asked%len(undecided)], fmt.Sprintf("/?asked=t18-undecided-%d", asked), "Authorization: "+secret)
 			}
-			var sealed account.Account
-			if limited {
-				s.awaited(t, 30*time.Second)
-				if s.err != nil {
-					t.Fatalf("the session that ended at the limit exited %v:\n%s", s.err, s.transcript())
-				}
-				sealed = t18Sealed(t, s.directory(c), s.session)
-			} else {
-				sealed = s.stop(t, c)
+			overloaded := inspected(t, binary, c)
+			if limited && (overloaded.Seen == nil || overloaded.Seen.GateRefused == 0) {
+				t.Fatalf("wiring, not the property: %d exchanges on four open connections refused nothing at an allowance of %d: %+v",
+					exchanges, limit, overloaded.Seen)
 			}
-			t.Logf("%d exchanges on the open connection; %d events admitted; stopped record %v",
-				asked, t18Admitted(sealed), s.records("stopped"))
+			if s.ended() {
+				t.Fatalf("the session ended at the allowance:\n%s", s.transcript())
+			}
 
-			written := t18Approved(t, s.directory(c))
-			targets := t18Targets(written)
-			if !slices.Contains(targets, "/?asked=t18-decided") {
-				t.Fatalf("wiring, not the property: the connection decided before the limit is not in the approved output: %s", targets)
+			t18Ask(t, later, "/?asked=t18-later", "Authorization: "+secret)
+			t18Hangup(later)
+			t18Until(t, binary, c, 20*time.Second, "the connection exchanged after the overload was never written",
+				func(a account.Account) bool { return t18Written(a) > t18Written(overloaded) })
+			sealed := s.stop(t, c)
+			t.Logf("%d exchanges on the open connections; %d events admitted; seen %+v; stopped record %v",
+				exchanges, t18Admitted(sealed), sealed.Seen, s.records("stopped"))
+
+			targets := t18Targets(t18Approved(t, s.directory(c)))
+			for _, want := range []string{"/?asked=t18-decided", "/?asked=t18-later"} {
+				if !slices.Contains(targets, want) {
+					t.Errorf("%s is not in the approved output: %s", want, targets)
+				}
 			}
 			if sealed.Loss == nil || !sealed.Loss.Known || sealed.Loss.Dropped != 0 {
-				t.Errorf("the kernel refused events, so the limit cannot be told from saturation: loss %+v", sealed.Loss)
+				t.Errorf("the kernel refused events, so the allowance cannot be told from saturation: loss %+v", sealed.Loss)
 			}
-			// A refused transfer supplies its number without retaining payload.
-			// It must not count as a missing per-direction observation. The
-			// control, with no refusal, also counts none.
+			// A refused transfer supplies its number without retaining payload, so
+			// it is not counted as a missing per-direction observation.
 			if sealed.Seen.Lost != 0 {
-				t.Errorf("the account counts %d missing per-direction observations where the ring dropped %d: a refusal at the admission gate reads as capture loss",
-					sealed.Seen.Lost, sealed.Loss.Dropped)
+				t.Errorf("the account counts %d missing per-direction observations: a refusal at the admission gate reads as capture loss",
+					sealed.Seen.Lost)
+			}
+			if sealed.Processing == nil || sealed.Processing.GateReason != "" {
+				t.Errorf("the account gives %+v as a reason the session ended; it was stopped", sealed.Processing)
 			}
 			if holding := t18Holding(t, c.directory, secret); len(holding) != 0 {
 				t.Errorf("the credential reached %v", holding)
-			}
-
-			if !limited {
-				if sealed.Processing == nil || sealed.Processing.GateReason != "" {
-					t.Errorf("the control's gate says %+v, want no reason", sealed.Processing)
-				}
-				if admitted := t18Admitted(sealed); admitted <= limit {
-					t.Fatalf("wiring, not the property: the workload admits %d events under the default allowance, "+
-						"not more than %d, so the limited run cannot show the limit acting", admitted, limit)
-				}
-				if !slices.Contains(targets, "/?asked=t18-undecided-0") {
-					t.Errorf("the control did not write the open connection's exchanges, so their absence under the limit "+
-						"measures nothing: %s", targets)
-				}
-				return
-			}
-
-			if sealed.Processing == nil || sealed.Processing.ConnectionsCut != 0 {
-				t.Fatalf("wiring, not the property: a per-connection cut confounded the shared bound: %+v", sealed.Processing)
-			}
-			if s.signaled {
-				t.Fatal("wiring: the limited session was signalled")
-			}
-			if sealed.Processing == nil || sealed.Processing.GateReason != probe.GateInputLimit {
-				t.Errorf("the account gives %+v as the reason, want %s", sealed.Processing, probe.GateInputLimit)
-			}
-			if admitted := t18Admitted(sealed) - t18Admitted(before); admitted < limit {
-				t.Errorf("%d further events were admitted, fewer than the held allowance %d: seen %+v", admitted, limit, sealed.Seen)
-			}
-			if slices.ContainsFunc(targets, func(one string) bool { return strings.HasPrefix(one, "/?asked=t18-undecided-") }) {
-				t.Errorf("exchanges undecided when the limit was reached were written: %s", targets)
-			}
-			if holding := t18Holding(t, c.directory, "t18-undecided"); len(holding) != 0 {
-				t.Errorf("undecided payload reached %v", holding)
 			}
 			files := t18Files(t, s.directory(c))
 			slices.Sort(files)
 			if want := []string{"account.json", "contract-account.json"}; !slices.Equal(files, want) {
 				t.Errorf("the session directory holds %v, want only %v: approved output is at its stable path", files, want)
 			}
-			if text := t18Rendered(t, binary, s.directory(c)); !strings.Contains(text, "release    refused: "+string(probe.GateInputLimit)) {
-				t.Errorf("the public command does not state the reason:\n%s", text)
+			if !limited {
+				if sealed.Seen.GateRefused != 0 {
+					t.Errorf("the control refused %d events under the default allowance", sealed.Seen.GateRefused)
+				}
+				if admitted := t18Admitted(sealed); admitted <= limit {
+					t.Fatalf("wiring, not the property: the workload admits %d events under the default allowance, "+
+						"not more than %d, so the limited run cannot show the limit acting", admitted, limit)
+				}
 			}
 		})
 	}
@@ -169,16 +133,18 @@ func TestT18TheAdmissionLimitEndsTheSessionUnderItsReasonAndKeepsOnlyWhatWasDeci
 // Rows 4 and 17, the other exhaustion. The volatile intake is charged each
 // record's metadata as well as its payload, so with events carrying a full
 // payload it fills before the event allowance does. Four connections are kept
-// open and read in calls larger than an event carries, so nothing is
-// released and no individual connection reaches its cut. What must be reached is the
-// intake's refusal - records refused while fewer events than the allowance
-// were admitted, with nothing refused by the kernel - and the account must say
-// why the session ended: a gate reason, or a seal that is not complete and
-// says why. Nothing is spilled and the credential is written nowhere.
-func TestT18AFullVolatileIntakeEndsTheSessionUnderAStatedReason(t *testing.T) {
+// open and read in calls larger than an event carries until the intake
+// refuses records, with nothing refused by the kernel or at the allowance. What
+// that costs is those connections: the refusals are
+// counted, the account names no reason the session ended for, the session
+// runs on, and a connection idle through it exchanges afterwards and is
+// written. Nothing is spilled and the credential is written nowhere.
+func TestT18AFullVolatileIntakeCostsConnectionsAndTheSessionGoesOn(t *testing.T) {
 	binary := built(t)
 	const allowance = 8192
-	open := t18OpenConnections(t, t18Serving(t), 4)
+	port := t18Serving(t)
+	open := t18OpenConnections(t, port, 4)
+	later := speaking(t, port)
 	c := configuring(t, target("client", open[0].process))
 	t18Edit(t, c, t18Removing, t18Setting("events", allowance))
 	s := t18Started(t, binary, c)
@@ -186,37 +152,41 @@ func TestT18AFullVolatileIntakeEndsTheSessionUnderAStatedReason(t *testing.T) {
 	t18Until(t, binary, c, 10*time.Second, "wiring, not the property: nothing was captured before the load",
 		func(a account.Account) bool { return a.Seen != nil && a.Seen.Records >= 2 })
 	asked := 0
-	for ; asked < 400 && !s.ended(); asked++ {
+	var full account.Account
+	for ; asked < 400; asked++ {
 		t18Ask(t, open[asked%len(open)], fmt.Sprintf("/mega?asked=t18-intake-%d", asked))
+		if asked%20 == 19 {
+			if full = inspected(t, binary, c); full.Seen != nil && full.Seen.IntakeRefused > 0 {
+				break
+			}
+		}
 	}
-	s.awaited(t, 30*time.Second)
-	if s.signaled || s.err != nil {
-		t.Fatalf("the session did not end by itself cleanly: signalled %v, %v:\n%s", s.signaled, s.err, s.transcript())
+	// The session goes on, so admissions keep growing as slots are returned; what
+	// shows the exhaustion is the intake's is that the allowance refused nothing.
+	if full.Seen == nil || full.Seen.IntakeRefused == 0 || full.Seen.GateRefused != 0 {
+		t.Fatalf("wiring, not the property: after %d answers of a mebibyte the intake refused %+v at an allowance of %d, "+
+			"so the exhaustion reached is not the intake's alone", asked, full.Seen, allowance)
 	}
-	sealed := t18Sealed(t, s.directory(c), s.session)
+	if s.ended() {
+		t.Fatalf("the session ended when the volatile intake was full:\n%s", s.transcript())
+	}
+
+	t18Ask(t, later, "/?asked=t18-intake-later", "Authorization: Bearer t18-intake-secret")
+	t18Hangup(later)
+	t18Until(t, binary, c, 20*time.Second, "the connection exchanged after the full intake was never written",
+		func(a account.Account) bool { return t18Written(a) > t18Written(full) })
+	sealed := s.stop(t, c)
 	t.Logf("%d answers of a mebibyte; %d events admitted; seen %+v; processing %+v; seal %+v; stopped record %v",
 		asked, t18Admitted(sealed), sealed.Seen, sealed.Processing, sealed.Seal, s.records("stopped"))
 
-	if sealed.Processing == nil || sealed.Processing.ConnectionsCut != 0 {
-		t.Fatalf("wiring, not the property: connection cutting confounded intake exhaustion: %+v", sealed.Processing)
-	}
-	if sealed.Seen.Rejected == 0 || t18Admitted(sealed) >= allowance {
-		t.Fatalf("wiring, not the property: %d records refused by the intake with %d of %d events admitted, so the "+
-			"exhaustion reached is not the intake's", sealed.Seen.Rejected, t18Admitted(sealed), allowance)
+	if !slices.Contains(t18Targets(t18Approved(t, s.directory(c))), "/?asked=t18-intake-later") {
+		t.Errorf("the exchange after the full intake is not in the approved output")
 	}
 	if sealed.Loss == nil || !sealed.Loss.Known || sealed.Loss.Dropped != 0 {
 		t.Errorf("the kernel refused events, so the intake's exhaustion is not the only one reached: %+v", sealed.Loss)
 	}
-	because := []string{}
-	if sealed.Seal != nil {
-		because = sealed.Seal.Because
-	}
-	stated := (sealed.Processing != nil && sealed.Processing.GateReason != "") ||
-		(sealed.Seal != nil && !sealed.Seal.Complete && len(because) != 0)
-	if !stated {
-		t.Errorf("FINDING: the session ended when the volatile intake refused %d records, and its account states no "+
-			"reason: gate %+v, seal complete %v because %q", sealed.Seen.Rejected, sealed.Processing,
-			sealed.Seal != nil && sealed.Seal.Complete, because)
+	if sealed.Processing == nil || sealed.Processing.GateReason != "" {
+		t.Errorf("the account gives %+v as a reason the session ended; it was stopped", sealed.Processing)
 	}
 	files := t18Files(t, s.directory(c))
 	slices.Sort(files)

@@ -23,7 +23,7 @@ func retainedKernel(t *testing.T, s *ebpf.Session) map[string]retention.Occupanc
 		}
 		out[v.Store] = v
 	}
-	for _, name := range []string{"bpf.inflight", "bpf.allowed_processes", "bpf.reads", "bpf.sockets", "bpf.handles", "bpf.occupancies", "bpf.operations", "bpf.discovered", "ebpf.accepted", "ebpf.inventory", "ebpf.index", "ebpf.named_by", "ebpf.seen", "ebpf.beyond", "ebpf.declined"} {
+	for _, name := range []string{"bpf.inflight", "bpf.allowed_processes", "bpf.reads", "bpf.sockets", "bpf.handles", "bpf.occupancies", "bpf.operations", "bpf.discovered", "ebpf.accepted", "ebpf.inventory", "ebpf.index", "ebpf.named_by", "ebpf.declined"} {
 		if _, exists := out[name]; !exists {
 			t.Fatalf("wiring, not the property: full producer/session store %s absent", name)
 		}
@@ -112,7 +112,7 @@ func TestIndependentAdmissionChurnReclaimsGenerationStores(t *testing.T) {
 		if off["bpf.allowed_processes"].Held != 0 {
 			t.Fatal("wiring, not the property: explicit retraction did not remove grant")
 		}
-		for _, name := range []string{"bpf.reads", "ebpf.inventory", "ebpf.index", "ebpf.accepted", "ebpf.named_by", "ebpf.seen", "ebpf.beyond"} {
+		for _, name := range []string{"bpf.reads", "ebpf.inventory", "ebpf.index", "ebpf.accepted", "ebpf.named_by"} {
 			if v, ok := off[name]; ok && v.Held != 0 {
 				t.Errorf("%s retained%d for zero admitted processes after cycle%d", name, v.Held, i)
 			}

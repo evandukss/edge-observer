@@ -12,7 +12,7 @@ import (
 // T1 characterization only: the evidence below is supplied by the test, not
 // established by a parser/worker. Each fault gets the same held-seam control.
 func TestP3T9AuthorizationAfterHeldSeam(t *testing.T) {
-	for _, fault := range []probe.GateReason{"", probe.GateUnknownLength, probe.GateInputLimit} {
+	for _, fault := range []probe.GateReason{"", probe.GateUnknownLength} {
 		name := string(fault)
 		if name == "" {
 			name = "settled_control"
@@ -23,11 +23,7 @@ func TestP3T9AuthorizationAfterHeldSeam(t *testing.T) {
 			var once sync.Once
 			unblock := func() { once.Do(func() { close(release) }) }
 			defer unblock()
-			limit := uint64(8)
-			if fault == probe.GateInputLimit {
-				limit = 1
-			}
-			g, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: limit, BeforeAuthorize: func() {
+			g, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 8, BeforeAuthorize: func() {
 				if hold.Load() {
 					close(entered)
 					<-release

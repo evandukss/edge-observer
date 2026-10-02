@@ -52,8 +52,7 @@ func TestIndependentReservationsReturnAcrossProcessingOutcomes(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer func() { _ = store.Close() }()
-			exhausted := make(chan struct{})
-			gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 64, IntakeExhausted: exhausted})
+			gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 64})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -99,10 +98,13 @@ func TestIndependentReservationsReturnAcrossProcessingOutcomes(t *testing.T) {
 				t.Fatal("wiring, not the property: workload did not reach charged intake")
 			}
 			if mode == "invalidation" {
-				close(exhausted)
-				if gate.Snapshot().Reason != probe.GateIntakeExhausted {
+				// An unmeasured transfer invalidates the capture. Its slot is charged and,
+				// kept by nothing, returned by the deliverer.
+				fault := gate.Admit(probe.DeliveryTransfer, false)
+				if fault.Slot == nil || gate.Snapshot().Reason != probe.GateUnknownLength {
 					t.Fatal("wiring, not the property: invalidation absent")
 				}
+				fault.Slot.Refund(held.Unretained)
 			}
 			out, err := worker.Drain(ctx)
 			if mode == "discard" {
@@ -156,7 +158,7 @@ func TestIndependentReservationsReturnAcrossProcessingOutcomes(t *testing.T) {
 			if after.Held != 0 || after.Refunded != before.Refunded || after.DoubleRefunds != uint64(len(slots)) {
 				t.Errorf("duplicate refunds changed conservation: before=%+v after=%+v", before, after)
 			}
-			if mode == "invalidation" && after.Reason != probe.GateIntakeExhausted {
+			if mode == "invalidation" && after.Reason != probe.GateUnknownLength {
 				t.Error("refund cleared invalidation")
 			}
 			unblock()

@@ -490,11 +490,13 @@ func TestP3T9ProtectedDrainedLimitAndPendingFinish(t *testing.T) {
 			if count == 5 {
 				f.send(99, fragment.Sent, "tail", true, false)
 			}
-			reason, charged := probe.GateReason(""), uint64(count)
-			if count == 5 {
-				reason, charged = probe.GateInputLimit, 4
+			// The event past the bound is refused and counted, and costs only its own
+			// connection: the gate gives no reason and requests no withdrawal.
+			charged := uint64(min(count, 4))
+			p3t9Reason(t, f.gate, charged, "")
+			if refused := f.gate.Snapshot().InputRefused; refused != uint64(count)-charged {
+				t.Fatalf("%d events past the bound were counted refused, want %d", refused, uint64(count)-charged)
 			}
-			p3t9Reason(t, f.gate, charged, reason)
 			if f.capture.Stats().Records != int64(min(count, 4)) || f.capture.Stats().Closed != 0 {
 				t.Fatal("limit fixture changed the complete live exchange population")
 			}
@@ -502,29 +504,26 @@ func TestP3T9ProtectedDrainedLimitAndPendingFinish(t *testing.T) {
 				t.Log("input_limit_reached_with_real_worker_pending_complete_exchange")
 			}
 			o := f.finish()
-			if o.GateReason != reason {
+			if o.GateReason != "" {
 				t.Fatalf("wrong final gate reason: %+v", o)
 			}
-			if count == 5 {
-				if f.boundary.t20iHanded(config.ExchangesPipeline) != 0 || f.t20iPersisted(config.ExchangesPipeline) != 0 {
-					t.Fatalf("refused tail became approved at Finish: exchanges records authorized %d, persisted %d, %+v",
-						f.boundary.t20iHanded(config.ExchangesPipeline), f.t20iPersisted(config.ExchangesPipeline), o)
-				}
-				f.artifacts(0)
-			} else {
-				if f.boundary.t20iHanded(config.ExchangesPipeline) != 1 || f.t20iPersisted(config.ExchangesPipeline) != 1 {
-					t.Fatalf("below/at-limit pending control did not finalize: exchanges records authorized %d, persisted %d, %+v",
-						f.boundary.t20iHanded(config.ExchangesPipeline), f.t20iPersisted(config.ExchangesPipeline), o)
-				}
-				a, _ := f.artifacts(1)
-				p3t9Useful(t, a[0], "/limit", "still_open")
+			// The pending exchange belongs to another connection than the refused
+			// event, so it finalizes at every count.
+			if f.boundary.t20iHanded(config.ExchangesPipeline) != 1 || f.t20iPersisted(config.ExchangesPipeline) != 1 {
+				t.Fatalf("the pending exchange did not finalize: exchanges records authorized %d, persisted %d, %+v",
+					f.boundary.t20iHanded(config.ExchangesPipeline), f.t20iPersisted(config.ExchangesPipeline), o)
 			}
+			a, _ := f.artifacts(1)
+			p3t9Useful(t, a[0], "/limit", "still_open")
 		})
 	}
 }
 
 func TestP3T9ProtectedWorkerHeldAuthorizationKeepsPriorResult(t *testing.T) {
-	for _, fault := range []probe.GateReason{probe.GateUnknownLength, probe.GateInputLimit, probe.GateIntakeExhausted} {
+	// Only a capture-wide fault is held against a worker's authorization here:
+	// unknown_length. A refusal at the event allowance or at the full intake costs
+	// its own connection and leaves another connection's release standing.
+	for _, fault := range []probe.GateReason{probe.GateUnknownLength} {
 		t.Run(string(fault), func(t *testing.T) {
 			for _, inject := range []bool{false, true} {
 				name := "successful_neighbor"
