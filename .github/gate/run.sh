@@ -70,8 +70,13 @@ if ! docker build --target "$target" --tag "$image" "$root/.github/gate" >"$out/
 	exit 1
 fi
 
+# The descriptor limit is set rather than left to the Docker host, whose default
+# differs between hosts and is 65536 on the GitHub runners. The forced exec
+# window in process/independent_arguments_test.go holds 200000 descriptors open
+# and refuses to run with fewer than 202000 available.
 run_in() {
-	docker run --rm --memory="$memory" --memory-swap="$memory" ${privileged[@]+"${privileged[@]}"} \
+	docker run --rm --memory="$memory" --memory-swap="$memory" --ulimit nofile=262144:262144 \
+		${privileged[@]+"${privileged[@]}"} \
 		--volume "$root:/src:ro" --volume "$out:/out" \
 		"$image" /src/.github/gate/in-container.sh "$@"
 }
