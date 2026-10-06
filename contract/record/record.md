@@ -41,8 +41,8 @@ across sessions, so `session` is required on every line.
 | `extension_outcomes` | a present list of each extension's outcome for this exchange |
 | `replacement_exclusions` | a present list of fields removed from extension replacement content |
 
-Exchange lines go only on the `exchanges` route. Metadata can be provisional
-before retirement and never asserts an observed close without evidence. One
+Exchange lines go only on the `exchanges` route. Metadata never asserts an
+observed close without evidence. One
 connection line is emitted at retirement, only on the `connections` route. It
 carries final metadata, no exchange id, index or reconstruction, and empty
 evidence lists. On an exchange, all three evidence lists refer only to that
@@ -62,7 +62,7 @@ was discarded from its first byte, so the stop's `offset` is `0` and its
 
 Ids are issued monotonically before delivery and never reused. The same exchange
 has the same id and connection index on every route and in every extension.
-Indexes continue across releases of an open connection. A dropped line cannot
+No exchange line is released before its connection's retirement. A dropped line cannot
 renumber later exchanges. With `write_content` false, no exchange line is emitted
 and no exchange id is issued; the retirement line remains. Version 3 has no
 `exchange_ids` range. Historical versions 1 and 2 remain readable under their

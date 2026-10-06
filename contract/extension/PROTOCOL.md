@@ -65,8 +65,8 @@ attribution of what an extension says, never its truth.
 one sequence for the session, never reused.** Every extension sees the same id
 for the same exchange. The approved exchange line carries that `exchange_id`,
 its `session`, its connection metadata and its zero-based connection `index`.
-Indexes and ids survive dropped lines and continue across releases of an open
-connection. The retirement line carries final metadata, without an id range.
+Indexes and ids survive dropped lines. The retirement line carries final
+metadata, without an id range.
 See [the line contract](../record/record.md#approved-line-envelope).
 With `write_content` false no exchange is sent or written and no id is issued.
 

@@ -6,6 +6,6 @@
     create 0600 root root
     sharedscripts
     postrotate
-        /usr/local/bin/observer reopen /etc/observer/observer.config.json
+        /opt/observer/observer reopen /etc/observer/observer.config.json
     endscript
 }

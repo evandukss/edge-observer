@@ -13,6 +13,8 @@ SPDX-License-Identifier = "MPL-2.0"
 # as them.
 [[annotations]]
 path = [
+	"bpf/barrier_arm64_bpfel.o",
+	"bpf/barrier_x86_bpfel.o",
 	"bpf/full_arm64_bpfel.o",
 	"bpf/full_x86_bpfel.o",
 	"bpf/meta_arm64_bpfel.o",
@@ -27,6 +29,8 @@ SPDX-License-Identifier = "GPL-2.0-only"
 # code around it is bpf2go's template, which stays MIT.
 [[annotations]]
 path = [
+	"bpf/barrier_arm64_bpfel.go",
+	"bpf/barrier_x86_bpfel.go",
 	"bpf/full_arm64_bpfel.go",
 	"bpf/full_x86_bpfel.go",
 	"bpf/meta_arm64_bpfel.go",

@@ -96,9 +96,8 @@ bodies use Go string quoting.
 The canonical envelope is in the [record contract](../contract/record/record.md#approved-line-envelope).
 
 The writer emits `observer.approved/3`. Each line carries `session`,
-`policy_revision`, `route`, and `connection` metadata. The metadata can be
-provisional on an exchange released before retirement; its ending never asserts
-an observed close without evidence.
+`policy_revision`, `route`, and `connection` metadata. The metadata's ending
+never asserts an observed close without evidence.
 
 - `record: "exchange"` is emitted only on the exchanges route and carries `exchange_id` (a positive decimal string),
   `index` (the zero-based index within the connection), and `reconstruction`
@@ -114,7 +113,7 @@ an observed close without evidence.
 
 Ids are issued monotonically within the session before delivery, and never
 reused. An id denotes the same connection and index on every route and in every
-extension. Indexes continue across releases of a long connection. Dropping a
+extension. No exchange line is released before its connection's retirement. Dropping a
 line cannot renumber any later exchange. With `write_content` false, no exchange
 line is emitted and no exchange id is issued. Version 3 has no `exchange_ids`
 range. Readers retain support for versions 1 and 2 under their historical rules;

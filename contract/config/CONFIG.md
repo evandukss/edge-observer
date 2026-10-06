@@ -18,7 +18,7 @@ order, and the extensions after them in the order listed.
       "output": "/var/lib/observer",
       "log": "stdout",
       "watch": [
-        {"name": "api", "exe": "/usr/bin/php", "args": ["/srv/api/main.php"], "children": "all"}
+        {"name": "api", "exe": "/usr/local/bin/api-server", "args": ["--listen", "8443"], "children": "all"}
       ],
       "ignore": [{"exe": "/usr/bin/curl"}],
       "libraries": [],
@@ -61,7 +61,7 @@ document at another version is refused as `unknown_version`, naming the version 
 | `write_content` | `true` writes exchanges and connection records. `false` writes connection records only; **plaintext is still read into memory and processed, and never written** |
 | `remove`, `mask`, `truncate` | the rules, below |
 | `extensions` | the extensions to run, in order, each a `name`, a `command`, the `fields` it receives and `timeout_ms` (below) |
-| `limits` | `events`, the most captured events held at once while they wait to be processed (one connection may hold at most half of them and is cut past that; the observer user guide's processing sections say what that costs); `state_every_seconds`, how often the log restates the session's state; `workers`, the fixed number of processing workers, each holding a share of the connections (default 1; measurements are in the observer user guide's Processing capacity section) |
+| `limits` | `events`, the most captured events held at once while they wait to be processed (one connection may hold at most half of them and is cut past that; `docs/extensions.md` says what that costs); `state_every_seconds`, how often the log restates the session's state; `workers`, the fixed number of processing workers, each holding a share of the connections (default 1; measurements are in the Processing capacity section of `docs/extensions.md`) |
 
 **A watch entry's conditions are matched as the observer's admission reads them.** `exe` is an absolute
 path. `args` are the arguments after `argv[0]`; an empty list means a process run with none, and absent

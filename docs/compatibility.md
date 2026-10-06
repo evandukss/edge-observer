@@ -150,8 +150,7 @@ endpoints could read a message differently, it refuses the message and says why 
 **There is no parser for any other protocol, HTTP/2 included.** Such traffic can enter the bounded
 volatile intake; the intake does not parse it or make it eligible for durable output.
 
-Reconstruction runs when a finished session is read back with `observer inspect`, never while it is
-capturing.
+Reconstruction runs while capturing, not when a session is read back.
 
 ## Not required
 

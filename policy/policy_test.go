@@ -99,8 +99,8 @@ func TestTheNoRulesExampleIsRead(t *testing.T) {
 		t.Fatalf("the contract's no-rules example is refused: %v", err)
 	}
 	if len(read.Approval.Rules) != 1 || read.Approval.Rules[0].Name != "api-server" ||
-		read.Approval.Rules[0].Executable != "/usr/bin/php" ||
-		!slices.Equal(read.Approval.Rules[0].Arguments, []string{"/srv/api/main.php"}) {
+		read.Approval.Rules[0].Executable != "/usr/local/bin/api-server" ||
+		!slices.Equal(read.Approval.Rules[0].Arguments, []string{"--listen", "8443"}) {
 		t.Errorf("its watch entry read as %+v", read.Approval.Rules)
 	}
 	if read.Settings.Log != policy.Stdout || read.Settings.Directory != "/var/lib/observer" ||

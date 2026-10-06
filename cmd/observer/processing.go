@@ -170,7 +170,7 @@ func (d *daemon) extensionLogged(e extension.Event) {
 
 // finishProcessing runs only after withdrawal, delivery drain and capture's
 // final records. False facts discard pending payload. This wait has no invented
-// timeout: the whole-session bound and its terminal states belong to T4.
+// timeout: no deadline covers processing or the whole session (finish).
 func (d *daemon) finishProcessing(facts processing.Finalization) error {
 	d.startProcessing()
 	if d.processing == nil {
