@@ -116,6 +116,11 @@ type Birth struct {
 	Value  string `json:"value,omitempty"`
 }
 
+// WhyProvisional is why a count is undetermined on a line written before its
+// connection's retirement: the count is a total over the whole connection,
+// which only the retirement states.
+const WhyProvisional = "provisional"
+
 // Count is a quantity that may not be knowable.
 type Count struct {
 	State State  `json:"state"`
@@ -217,10 +222,23 @@ type Payload struct {
 
 // Connection is one occupancy of a TLS library handle by one admitted
 // execution.
+//
+// It comes in two forms. The FINAL record is the connection's retirement
+// (FromConnection): every member present, Provisional false. The PROVISIONAL
+// record describes a connection that may still be open (FromIdentity):
+// Provisional true, and only the members that stay true for the whole of the
+// connection - its id, handle, instance, process, process_network, first_seen
+// and opened. Its lifecycle and totals - ending, associations, placements,
+// fragments, early and early_unmeasured - are absent, not zero: nothing on a
+// provisional record says how the connection ended, how it was bound or how
+// much it carried. A record with Provisional set and any of those members
+// present, or with Provisional unset and any of them absent, is malformed.
 type Connection struct {
 	Record  string `json:"record"`
 	Version string `json:"version"`
 	ID      string `json:"id"`
+	// Provisional marks a record written before the connection's retirement.
+	Provisional bool `json:"provisional,omitempty"`
 
 	Handle   Handle   `json:"handle"`
 	Instance Instance `json:"instance"`
@@ -232,14 +250,35 @@ type Connection struct {
 
 	FirstSeen Instant `json:"first_seen"`
 	Opened    Instant `json:"opened"`
-	Ending    Ending  `json:"ending"`
 
-	Associations []Association `json:"associations"`
-	Placements   []Placement   `json:"placements"`
+	// The lifecycle and totals, which only the final record carries. A final
+	// record never holds a zero value here, so the zero value is absence.
+	Ending       Ending        `json:"ending,omitzero"`
+	Associations []Association `json:"associations,omitzero"`
+	Placements   []Placement   `json:"placements,omitzero"`
 
-	Fragments       Count   `json:"fragments"`
-	Early           []Range `json:"early"`
-	EarlyUnmeasured Count   `json:"early_unmeasured"`
+	Fragments       Count   `json:"fragments,omitzero"`
+	Early           []Range `json:"early,omitzero"`
+	EarlyUnmeasured Count   `json:"early_unmeasured,omitzero"`
+}
+
+// Identified is the provisional record holding this record's members that
+// stay true for the whole of the connection: for a final record whose
+// connection agrees with capture's identity of it, what FromIdentity gives.
+func (c Connection) Identified() Connection {
+	c.Provisional = true
+	c.Ending, c.Associations, c.Placements = Ending{}, nil, nil
+	c.Fragments, c.Early, c.EarlyUnmeasured = Count{}, nil, Count{}
+	return c
+}
+
+// Lifecycle reports, member by member, which of the lifecycle and totals
+// members a record carries: ending, associations, placements, fragments,
+// early and early_unmeasured, in that order. A final record carries all six
+// and a provisional record none.
+func (c Connection) Lifecycle() [6]bool {
+	return [6]bool{c.Ending != (Ending{}), c.Associations != nil, c.Placements != nil, c.Fragments != (Count{}),
+		c.Early != nil, c.EarlyUnmeasured != (Count{})}
 }
 
 // Handle is the connection's identity.

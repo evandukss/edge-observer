@@ -190,9 +190,34 @@ func TestAReloadRequestCrossesTheControlDirectoryWhole(t *testing.T) {
 	}
 }
 
+// waitRunning waits until pid is named name and runs program, read from /proc
+// directly, not through the reader under test. It waits for both: exec sets
+// comm before the new cmdline exists, so waiting on comm alone can return an
+// empty cmdline, and exec.Cmd.Start can return before the cmdline exists too.
+// The cmdline is matched on its leading path, since a shell's own line can name
+// the program it is about to exec.
+func waitRunning(t *testing.T, pid int32, name, program string) {
+	t.Helper()
+	comm := func() string {
+		content, _ := os.ReadFile(filepath.Join(procfs, strconv.Itoa(int(pid)), "comm"))
+		return strings.TrimSpace(string(content))
+	}
+	cmdline := func() string {
+		content, _ := os.ReadFile(filepath.Join(procfs, strconv.Itoa(int(pid)), "cmdline"))
+		return string(content)
+	}
+	for range 200 {
+		if comm() == name && strings.HasPrefix(cmdline(), program+"\x00") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("pid %d is running %q with the command line %q, not %q running %s, after two seconds",
+		pid, comm(), cmdline(), name, program)
+}
+
 // execing is a child running a shell until told to go on, then exec'ing
-// another program: same pid, same start, different program. Its name is read
-// from /proc directly, not through the reader under test.
+// another program: same pid, same start, different program.
 func execing(t *testing.T) (int32, func()) {
 	t.Helper()
 	command := exec.Command("/bin/sh", "-c", "read line; exec /bin/sleep 600.5")
@@ -208,33 +233,12 @@ func execing(t *testing.T) (int32, func()) {
 		_ = command.Wait()
 	})
 	pid := int32(command.Process.Pid)
-	comm := func() string {
-		content, _ := os.ReadFile(filepath.Join(procfs, strconv.Itoa(int(pid)), "comm"))
-		return strings.TrimSpace(string(content))
-	}
-	cmdline := func() string {
-		content, _ := os.ReadFile(filepath.Join(procfs, strconv.Itoa(int(pid)), "cmdline"))
-		return string(content)
-	}
-	// Wait for both: exec sets comm before the new cmdline exists, so waiting on
-	// comm alone can return an empty cmdline. The cmdline is matched on its leading
-	// path, since the shell's own line contains "sleep" too.
-	waitFor := func(name, program string) {
-		for range 200 {
-			if comm() == name && strings.HasPrefix(cmdline(), program+"\x00") {
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		t.Fatalf("pid %d is running %q with the command line %q, not %q running %s, after two seconds",
-			pid, comm(), cmdline(), name, program)
-	}
-	waitFor("sh", "/bin/sh")
+	waitRunning(t, pid, "sh", "/bin/sh")
 	return pid, func() {
 		if _, err := stdin.Write([]byte("go\n")); err != nil {
 			t.Fatalf("tell pid %d to exec: %v", pid, err)
 		}
-		waitFor("sleep", "/bin/sleep")
+		waitRunning(t, pid, "sleep", "/bin/sleep")
 	}
 }
 

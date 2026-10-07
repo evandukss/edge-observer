@@ -14,6 +14,9 @@
 //   - ConnectionID is unique within one capture session and means nothing else.
 //   - Endpoints, descriptors and connection lifecycle are in the connection's
 //     own record, joined by ConnectionID.
+//   - A record's Evidence, where taken, is what capture had established about
+//     its connection at that record: enough to certify a prefix of a connection
+//     still open.
 package fragment
 
 import (
@@ -110,6 +113,11 @@ type Record struct {
 	// handed to the store that retains the record; nil where there was none.
 	Slot held.Slot
 	Loss *held.Loss `json:"-"`
+
+	// Evidence is what capture had established about this record's connection
+	// when it placed this record. It travels with the record in process and is not
+	// part of any written format.
+	Evidence Evidence `json:"-"`
 }
 
 // Stream is the stream this record belongs to.
@@ -148,6 +156,23 @@ func (r Record) Validate() error {
 		return fmt.Errorf("%w: %d bytes kept of %d transferred", ErrInvalid, len(r.Payload), r.Length)
 	case r.At.IsZero():
 		return fmt.Errorf("%w: no capture time", ErrInvalid)
+	}
+	if !r.Evidence.Taken() {
+		return nil
+	}
+	// Evidence is optional, and evidence present must be this record's. These
+	// rules survive a consumer shortening the record to the bytes it keeps;
+	// Evidenced is the whole binding.
+	if err := r.Evidence.Validate(); err != nil {
+		return err
+	}
+	switch {
+	case r.Evidence.Identity.Connection != r.Connection || r.Evidence.Identity.Process != r.Process:
+		return fmt.Errorf("%w: %s fragment %d carries evidence for pid %d connection %d", ErrInvalid,
+			r.Stream(), r.Sequence, r.Evidence.Identity.Process.PID, r.Evidence.Identity.Connection)
+	case r.Evidence.Through != r.Sequence:
+		return fmt.Errorf("%w: %s fragment %d carries evidence taken through fragment %d", ErrInvalid,
+			r.Stream(), r.Sequence, r.Evidence.Through)
 	}
 	return nil
 }

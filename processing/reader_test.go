@@ -18,30 +18,54 @@ import (
 // owned condition-2 exclusion/absence and undecidable-suffix guarantee.
 func readableArtifact(t *testing.T) ([]byte, processing.Artifact) {
 	t.Helper()
+	line, exchange, _ := readableLines(t)
+	return line, exchange
+}
+
+// readableLines is one connection's exchange line, as written and decoded,
+// and its connection line.
+func readableLines(t *testing.T) ([]byte, processing.Artifact, processing.Artifact) {
+	t.Helper()
 	var out outputLog
 	w, store := worker(t, rulesPlan(t, ""), &out)
 	enqueue(t, store, batch(t, 1, "GET /public HTTP/1.1\r\nX-Public: useful\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\npublic-body"))
 	counted(t, drain(t, w), &out, 1, 1)
 	exchanges, lines := out.routed(config.ExchangesPipeline)
-	return lines[0], exchanges[0]
+	retirements, _ := out.routed(config.ConnectionsPipeline)
+	return lines[0], exchanges[0], retirements[0]
 }
 
 func artifactFS(data []byte) fstest.MapFS {
 	return fstest.MapFS{processing.ArtifactName: &fstest.MapFile{Data: data}}
 }
 
+// requireUsefulRead reads and renders one line and requires its permitted
+// values and provenance in the text, with the connection metadata the line's
+// kind carries: an exchange line's provisional record, whose identity is
+// rendered, or a connection line's final record, whose ending is.
 func requireUsefulRead(t *testing.T, data []byte) {
 	t.Helper()
 	var out bytes.Buffer
 	visits := 0
+	kind := ""
 	err := processing.ReadArtifacts(artifactFS(data), func(a processing.Artifact) error {
 		visits++
+		kind = a.Record
 		return processing.RenderArtifact(&out, a)
 	})
 	if err != nil || visits != 1 {
 		t.Fatalf("decidable control: visits=%d err=%v", visits, err)
 	}
-	for _, value := range []string{"useful", "public-body", "fixture-policy", "exchanges", "account", `"direction": "sent"`, `"offset": "0"`, `"ending"`} {
+	required := []string{"useful", "public-body", "fixture-policy", "exchanges", "account", `"direction": "sent"`, `"offset": "0"`}
+	switch kind {
+	case processing.ArtifactExchange:
+		required = append(required, `"provisional": true`, `"first_seen"`)
+	case processing.ArtifactConnection:
+		required = append(required, `"ending"`)
+	default:
+		t.Fatalf("decidable control: a line of kind %q", kind)
+	}
+	for _, value := range required {
 		if !strings.Contains(out.String(), value) {
 			t.Fatalf("successful read omitted %q: %s", value, &out)
 		}

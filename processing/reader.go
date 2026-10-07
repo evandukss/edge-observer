@@ -30,10 +30,12 @@ var ErrNoArtifacts = errors.New("approved artifact contains no records")
 // owns its decoded data. A nil visitor is refused.
 //
 // Validation requires the published versions, a named policy revision and
-// route, connection identity, and (when present) a reconstruction of that same
-// connection with complete, present request/response pairs and base64 bodies.
-// Truncation and exclusion evidence must refer to that retained population;
-// the detailed structural rules are in docs/approved-inspection.md.
+// route, connection identity in the form the line requires (in version 4, the
+// provisional record on an exchange line and the final one on a connection
+// line; contract/record/record.md), and (when present) a reconstruction of
+// that same connection with complete, present request/response pairs and
+// base64 bodies. Truncation and exclusion evidence must refer to that retained
+// population; the detailed structural rules are in docs/approved-inspection.md.
 func ReadArtifacts(files fs.FS, visit func(Artifact) error) error {
 	return ReadArtifactFiles(files, []string{ArtifactName}, "", visit)
 }

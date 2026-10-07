@@ -238,9 +238,12 @@ func TestIndependentTheSessionGoesOnAfterABurstOverTheHeldEventBound(t *testing.
 // serving, a connection begun afterwards is written, and a stop ends it with a
 // success status.
 func TestIndependentTheSessionGoesOnAfterTheIntakeIsFull(t *testing.T) {
-	f := overloadStarted(t, 64, 4096)
+	// Leave room for a fresh exchange's source, parsed and policy copies.
+	// The refused payload alone fills this allowance, before entry overhead.
+	const intakeBytes = 16 << 10
+	f := overloadStarted(t, 64, intakeBytes)
 	f.transfer(8, fragment.Sent, "GET /before HTTP/1.1\r\nHost: test\r\n\r\n")
-	f.transfer(8, fragment.Sent, "GET /refused HTTP/1.1\r\nX-Fill: "+strings.Repeat("x", 4000)+"\r\n\r\n")
+	f.transfer(8, fragment.Sent, "GET /refused HTTP/1.1\r\nX-Fill: "+strings.Repeat("x", intakeBytes)+"\r\n\r\n")
 	if refused := f.d.intake.Stats().FragmentsRefused; refused == 0 {
 		t.Fatalf("wiring, not the property: the intake refused nothing, so it was never full: %+v", f.d.intake.Stats())
 	}

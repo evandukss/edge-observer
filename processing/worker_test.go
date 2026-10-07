@@ -100,6 +100,9 @@ func batch(t *testing.T, id fragment.ConnectionID, request, response string) cap
 	}
 	for n := range b.fragments {
 		b.fragments[n].Connection = id
+		identity := *b.fragments[n].Evidence.Identity
+		identity.Connection = id
+		b.fragments[n].Evidence.Identity = &identity
 		if err := b.fragments[n].Validate(); err != nil {
 			t.Fatal(err)
 		}
@@ -179,7 +182,11 @@ func TestWorkerConnectionRouteContainsOnlyMetadata(t *testing.T) {
 	if out.artifacts[1].Route.Pipeline != config.ConnectionsPipeline || out.artifacts[1].Reconstruction != nil {
 		t.Fatal("metadata exception carried reconstruction")
 	}
-	if strings.Contains(string(out.lines[1]), "original") || strings.Contains(string(out.lines[1]), "reconstruction") {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(out.lines[1], &members); err != nil {
+		t.Fatal(err)
+	}
+	if _, carried := members["reconstruction"]; carried || strings.Contains(string(out.lines[1]), "original") {
 		t.Fatal("metadata route carries payload fields")
 	}
 }
@@ -214,7 +221,7 @@ func TestWorkerFinalizationKeepsDecidablePrefixAndWithholdsTail(t *testing.T) {
 	b := batch(t, 1, goodRequest+"GET /later HTTP/1.1\r\nAuthorization: unfinished", goodResponse)
 	b.records[0].How, b.records[0].Ended = connection.StillOpen, time.Time{}
 	enqueue(t, store, b)
-	if o := drain(t, w); o.Written != 0 || o.Pending != 1 {
+	if o := drain(t, w); o.Pending != 1 || len(retirementsOf(out)) != 0 {
 		t.Fatalf("live batch prematurely emitted: %+v", o)
 	}
 	o, err := w.Finish(context.Background(), processing.Finalization{Withdrawn: true, Drained: true})
@@ -230,9 +237,16 @@ func TestWorkerFinalizationKeepsDecidablePrefixAndWithholdsTail(t *testing.T) {
 	if strings.Contains(string(lines[0]), "unfinished") || strings.Contains(string(lines[0]), "/later") {
 		t.Fatal("undecidable tail persisted")
 	}
-	if exchanges[0].Connection.Ending.How != "still_open" {
-		t.Fatalf("capture end became close: %+v", exchanges[0].Connection.Ending)
+	retirements := retirementsOf(out)
+	if len(retirements) != 1 || retirements[0].Connection.Ending.How != "still_open" {
+		t.Fatalf("capture end became close: %+v", retirements)
 	}
+}
+
+// retirementsOf is the connection lines written, in order.
+func retirementsOf(out *outputLog) []processing.Artifact {
+	retirements, _ := out.routed(config.ConnectionsPipeline)
+	return retirements
 }
 
 // A processing failure drops the output it concerns, is counted, and the
@@ -290,7 +304,11 @@ func TestWorkerReportsIndeterminateSuffixAfterUsefulPrefix(t *testing.T) {
 			if field(t, out.artifacts[0], "x-public") != "original" || truncationOf(t, out.lines[0]) != nil {
 				t.Fatal("clean control is not a useful untruncated exchange")
 			}
-			if count := out.artifacts[0].Reconstruction.Unplaced; count.State != record.Determined || count.Value != "0" {
+			if count := out.artifacts[0].Reconstruction.Unplaced; count != (record.Count{State: record.Undetermined, Unit: record.Bytes, Why: record.WhyProvisional}) {
+				t.Fatalf("clean control's exchange line states its connection's unplaced total: %+v", count)
+			}
+			if count := out.artifacts[1].ReconstructionUnplaced; out.artifacts[1].Record != processing.ArtifactConnection || count == nil ||
+				count.State != record.Determined || count.Value != "0" {
 				t.Fatalf("clean control lost known zero: %+v", count)
 			}
 
@@ -305,6 +323,7 @@ func TestWorkerReportsIndeterminateSuffixAfterUsefulPrefix(t *testing.T) {
 			case "gap-at-boundary", "gap-inside-message":
 				later := b.fragments[0]
 				later.Sequence, later.Offset = 3, uint64(len(request)+5)
+				later.Evidence = fragment.Evidence{}
 				later.Payload = []byte("GET /after-hole HTTP/1.1\r\nX-Secret: hidden\r\n\r\n")
 				later.Length = uint32(len(later.Payload))
 				if later.Offset <= b.fragments[0].End() {
@@ -317,6 +336,7 @@ func TestWorkerReportsIndeterminateSuffixAfterUsefulPrefix(t *testing.T) {
 				// arrived; only the producer number shows transfer two never did.
 				later := b.fragments[0]
 				later.Sequence, later.Offset, later.Produced = 3, uint64(len(request)), 3
+				later.Evidence = fragment.Evidence{}
 				later.Payload = []byte("GET /after-hole HTTP/1.1\r\nX-Secret: hidden\r\n\r\n")
 				later.Length = uint32(len(later.Payload))
 				if later.Offset != b.fragments[0].End() || b.fragments[0].Produced != 1 {
@@ -329,6 +349,11 @@ func TestWorkerReportsIndeterminateSuffixAfterUsefulPrefix(t *testing.T) {
 				b.fragments[0].Length += 5
 				if !b.fragments[0].Truncated() {
 					t.Fatal("payload shortening was not reached")
+				}
+				// Capture advances a direction by what the call transferred, so
+				// every evidence taken from this fragment on reaches its new end.
+				for n := range b.fragments {
+					b.fragments[n].Evidence.Sent.Limit += 5
 				}
 			case "unterminated-message":
 				reason = "incomplete_message"
@@ -381,7 +406,7 @@ func TestWorkerReportsIndeterminateSuffixAfterUsefulPrefix(t *testing.T) {
 			if truncationOf(t, out.lines[2]) != nil || out.artifacts[3].Reconstruction != nil {
 				t.Fatal("metadata route received reconstruction state")
 			}
-			if out.artifacts[2].Connection.Ending.How != "handle_released" {
+			if out.artifacts[3].Record != processing.ArtifactConnection || out.artifacts[3].Connection.Ending.How != "handle_released" {
 				t.Fatal("reconstruction truncation changed lifecycle ending")
 			}
 		})

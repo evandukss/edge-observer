@@ -58,7 +58,10 @@ func TestHeldEventOverloadCutsItsConnectionAndFreshInputContinues(t *testing.T) 
 func TestIntakeLossSurvivesAFullQueueAndFreshInputContinues(t *testing.T) {
 	out := &outputLog{}
 	p := newPipeline(t, 100, 100, out)
-	store, err := intake.New(4096)
+	// An exchange holds its entries, its reading and its copy in the allowance
+	// at once, so the allowance has room for a few; a payload as large as the
+	// whole allowance is still refused whole.
+	store, err := intake.New(16384)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +75,7 @@ func TestIntakeLossSurvivesAFullQueueAndFreshInputContinues(t *testing.T) {
 	p.store, p.worker, p.capture = store, w, capture.Recording(store, store)
 	p.transfer(1, fragment.Sent, "GET /affected HTTP/1.1\r\n\r\n")
 	p.drain()
-	p.transfer(1, fragment.Received, strings.Repeat("x", 4096))
+	p.transfer(1, fragment.Received, strings.Repeat("x", 16384))
 	if store.Stats().FragmentsRefused != 1 {
 		t.Fatalf("wiring: intake did not refuse oversized fragment: %+v", store.Stats())
 	}

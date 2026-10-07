@@ -14,7 +14,7 @@ import (
 
 // Error text is structural and never includes a value taken from the file.
 func validateArtifact(a Artifact) error {
-	if a.Version != ArtifactVersion && a.Version != ArtifactVersion2 && a.Version != ArtifactVersion1 {
+	if a.Version != ArtifactVersion4 && a.Version != ArtifactVersion3 && a.Version != ArtifactVersion2 && a.Version != ArtifactVersion1 {
 		return errors.New("unsupported artifact version")
 	}
 	if a.PolicyRevision == "" || a.Route.Pipeline == "" || a.Route.Sink == "" || a.Route.Kind == "" {
@@ -22,6 +22,12 @@ func validateArtifact(a Artifact) error {
 	}
 	if a.Connection.Record != record.KindConnection || a.Connection.Version != record.Version || a.Connection.ID == "" {
 		return errors.New("invalid connection identity or version")
+	}
+	if err := connectionForm(a); err != nil {
+		return err
+	}
+	if err := unplacedTotal(a); err != nil {
+		return err
 	}
 	if a.Version == ArtifactVersion2 {
 		if err := validateIDs(a); err != nil {
@@ -31,7 +37,7 @@ func validateArtifact(a Artifact) error {
 			return errors.New("missing extension outcomes or replacement exclusions")
 		}
 	}
-	if a.Version == ArtifactVersion3 {
+	if a.Version == ArtifactVersion3 || a.Version == ArtifactVersion4 {
 		if a.Session == "" || a.ExchangeIDs != nil || a.PolicyExclusions == nil || a.ExtensionOutcomes == nil || a.ReplacementExclusions == nil {
 			return errors.New("invalid exchange-line envelope")
 		}
@@ -39,6 +45,11 @@ func validateArtifact(a Artifact) error {
 		case ArtifactExchange:
 			if _, ok := positiveDecimal(a.ExchangeID); !ok || a.Index == nil || *a.Index < 0 || a.Reconstruction == nil || len(a.Reconstruction.Exchanges) != 1 || a.Reconstruction.Exchanges[0].Index != *a.Index || a.ReconstructionTruncation != nil {
 				return errors.New("invalid exchange-line identity or population")
+			}
+			// Unplaced is a total over the connection, which a line that can
+			// precede the retirement does not state.
+			if a.Version == ArtifactVersion4 && a.Reconstruction.Unplaced != provisionalUnplaced {
+				return errors.New("exchange line stating its connection's unplaced total")
 			}
 		case ArtifactConnection:
 			if a.ExchangeID != "" || a.Index != nil || a.Reconstruction != nil {
@@ -55,7 +66,7 @@ func validateArtifact(a Artifact) error {
 	}
 	r := a.Reconstruction
 	if r == nil {
-		if (a.ReconstructionTruncation != nil && a.Version != ArtifactVersion3) || len(a.PolicyExclusions) != 0 || len(a.ExtensionOutcomes) != 0 ||
+		if (a.ReconstructionTruncation != nil && a.Version != ArtifactVersion3 && a.Version != ArtifactVersion4) || len(a.PolicyExclusions) != 0 || len(a.ExtensionOutcomes) != 0 ||
 			len(a.ReplacementExclusions) != 0 {
 			return errors.New("reconstruction evidence without reconstruction")
 		}
@@ -140,6 +151,75 @@ func validateArtifact(a Artifact) error {
 				return errors.New("removed body structure without removal evidence")
 			}
 		}
+	}
+	return nil
+}
+
+// unplacedTotal is a version 4 connection line's unplaced total, required
+// there and nowhere else: bytes, and either a determined decimal value with no
+// reason or an undetermined state with a reason and no value.
+func unplacedTotal(a Artifact) error {
+	u := a.ReconstructionUnplaced
+	if a.Version != ArtifactVersion4 || a.Record != ArtifactConnection {
+		if u != nil {
+			return errors.New("unplaced total outside a version 4 connection line")
+		}
+		return nil
+	}
+	if u == nil {
+		return errors.New("connection line without its unplaced total")
+	}
+	if u.Unit != record.Bytes {
+		return errors.New("invalid unplaced total unit")
+	}
+	switch u.State {
+	case record.Determined:
+		if _, ok := decimalOffset(u.Value); !ok || u.Why != "" {
+			return errors.New("invalid determined unplaced total")
+		}
+	case record.Undetermined:
+		if u.Value != "" || u.Why == "" {
+			return errors.New("invalid undetermined unplaced total")
+		}
+	default:
+		return errors.New("invalid unplaced total state")
+	}
+	return nil
+}
+
+// provisionalUnplaced is the only unplaced count a version 4 exchange line
+// carries.
+var provisionalUnplaced = record.Count{State: record.Undetermined, Unit: record.Bytes, Why: record.WhyProvisional}
+
+// connectionForm is the line's connection record in the form the line's
+// version and kind require. A version 4 exchange line carries the provisional
+// record: Provisional set, and none of the lifecycle and totals members. A
+// version 4 connection line carries the final record: Provisional unset, and
+// every one of those members stated - an ending that names how, associations,
+// placements and early as lists, fragments and early_unmeasured with a state.
+// No earlier version has a provisional record.
+func connectionForm(a Artifact) error {
+	c := a.Connection
+	switch {
+	case a.Version == ArtifactVersion4 && a.Record == ArtifactExchange:
+		if !c.Provisional {
+			return errors.New("exchange line without a provisional connection record")
+		}
+		for _, carried := range c.Lifecycle() {
+			if carried {
+				return errors.New("provisional connection record carrying lifecycle or totals")
+			}
+		}
+	case a.Version == ArtifactVersion4:
+		if c.Provisional {
+			return errors.New("provisional connection record on a connection line")
+		}
+		if c.Ending.How == "" || c.Associations == nil || c.Placements == nil || c.Fragments.State == "" ||
+			c.Early == nil || c.EarlyUnmeasured.State == "" {
+			return errors.New("connection line without its final lifecycle and totals")
+		}
+	case c.Provisional:
+		return errors.New("provisional connection record in a version written only at retirement")
 	}
 	return nil
 }
@@ -271,8 +351,8 @@ func repeated(fields []string, field string) bool {
 // failureReasons is every reason a failed outcome can name.
 var failureReasons = []string{extension.Timeout, extension.Crash, extension.ProtocolError, extension.OversizedFrame,
 	extension.UnknownID, extension.Flood, extension.Malformed, extension.NotGiven, extension.ReadOnly,
-	extension.RemovedContent, extension.Excluded, extension.Declined, extension.Unavailable, extension.Busy,
-	extension.TooLarge}
+	extension.RemovedContent, extension.Excluded, extension.Declined, extension.NoRoom, extension.Unavailable,
+	extension.Busy, extension.TooLarge, extension.Withdrawn}
 
 // changedBy is whether name's outcome for exchange is changed.
 func changedBy(a Artifact, exchange int, name string) bool {

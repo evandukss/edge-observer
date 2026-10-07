@@ -3,13 +3,18 @@ package processing_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/evandukss/edge-observer/admission"
+	"github.com/evandukss/edge-observer/capture"
+	"github.com/evandukss/edge-observer/connection"
 	"github.com/evandukss/edge-observer/fragment"
 	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/intake"
+	"github.com/evandukss/edge-observer/internal/workload"
 	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/processing"
 	"github.com/evandukss/edge-observer/sink"
@@ -32,6 +37,45 @@ func (s *refundSink) Write(_ context.Context, b []byte) (int, error) {
 }
 func (*refundSink) Reopen(context.Context) error { return nil }
 func (*refundSink) Close(context.Context) error  { return nil }
+
+type refundEntries struct{ entries []workload.Entry }
+
+func (s *refundEntries) Write(r fragment.Record) error {
+	s.entries = append(s.entries, workload.Entry{Fragment: &r})
+	return nil
+}
+
+func (s *refundEntries) Connection(r connection.Record) error {
+	s.entries = append(s.entries, workload.Entry{Connection: &r})
+	return nil
+}
+
+// Each source event is one framed request for a peer that never responds.
+// Capture supplies all records and evidence, including the terminal numbers.
+func refundPendingRequests(t *testing.T, count int) []workload.Entry {
+	t.Helper()
+	var out refundEntries
+	session := capture.Recording(&out, &out)
+	process := fragment.Process{PID: 42, StartTime: 7}
+	instance := admission.Instance{Namespace: admission.Namespace{Device: 1, Inode: 2}, PID: 42,
+		Start: admission.Determinate(7), Generation: 1}
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for n := 1; n <= count; n++ {
+		payload := fmt.Sprintf("GET /pending-%d HTTP/1.1\r\nHost: test\r\n\r\n", n)
+		session.Transfer(probe.Transfer{Process: process, Instance: instance, Endpoint: 7,
+			Direction: fragment.Sent, Measured: true, Length: uint32(len(payload)), Payload: []byte(payload),
+			Sequence: probe.Sequence{Occupancy: 1, Number: uint64(n), Born: true},
+			Stamp:    uint64(n), At: at.Add(time.Duration(n) * time.Millisecond)})
+	}
+	session.Closed(probe.Connection{Process: process, Instance: instance, Endpoint: 7,
+		Sequence: probe.Sequence{Occupancy: 1, Born: true},
+		Final:    probe.Final{Known: true, Sent: probe.Terminal{Last: uint64(count)}},
+		Stamp:    uint64(count + 1), At: at.Add(time.Second)})
+	if stats := session.Stats(); stats.Records != int64(count) || stats.Closed != 1 || len(out.entries) != count+1 {
+		t.Fatalf("wiring, not the property: unanswered requests did not produce %d fragments and one retirement: %+v, entries=%d", count, stats, len(out.entries))
+	}
+	return out.entries
+}
 
 func TestIndependentReservationsReturnAcrossProcessingOutcomes(t *testing.T) {
 	for _, mode := range []string{"write", "enqueue", "sink_failure", "discard", "invalidation", "connection_cut"} {
@@ -67,6 +111,9 @@ func TestIndependentReservationsReturnAcrossProcessingOutcomes(t *testing.T) {
 			}
 			defer func() { _ = worker.Close() }()
 			entries := deliveryConnections(t, 1, 47)[0]
+			if mode == "connection_cut" {
+				entries = refundPendingRequests(t, 4)
+			}
 			if mode == "discard" {
 				entries = entries[:len(entries)-1]
 			}

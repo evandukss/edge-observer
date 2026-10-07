@@ -318,6 +318,50 @@ func FromConnection(r connection.Record) (Connection, error) {
 	return out, nil
 }
 
+// FromIdentity is the provisional record of a connection that may still be
+// open: the members FromConnection derives from what stays true for the whole
+// of the connection, derived the same way from capture's identity of it, and
+// none of its lifecycle or totals. For a connection whose retirement agrees
+// with that identity (connection.Record.Agrees), every member it carries
+// equals the final record's.
+func FromIdentity(identity fragment.Identity) (Connection, error) {
+	if identity.Generation == 0 {
+		return Connection{}, refuse("connection %d carries no handle generation", identity.Connection)
+	}
+	key, err := instanceKey(identity.Instance.Key())
+	if err != nil {
+		return Connection{}, err
+	}
+	executable := Text{State: Undetermined}
+	if identity.Instance.Executable != "" {
+		executable = Text{State: Determined, Value: identity.Instance.Executable}
+	}
+	opened := Instant{State: Undetermined, Domain: Wall, Unit: Nanoseconds}
+	if !identity.Opened.IsZero() {
+		opened = crossed(identity.Opened)
+	}
+	return Connection{
+		Record:      KindConnection,
+		Version:     Version,
+		ID:          decimal(uint64(identity.Connection)),
+		Provisional: true,
+		Handle: Handle{
+			Instance:   key,
+			Address:    decimal(identity.Address),
+			Generation: decimal(identity.Generation),
+		},
+		Instance: Instance{
+			Key:        key,
+			Birth:      procBirth(uint64(identity.Instance.Start.Ticks), identity.Instance.Start.Determined),
+			Executable: executable,
+		},
+		Process:        process(identity.Process),
+		ProcessNetwork: namespace(identity.NetworkDevice, identity.NetworkInode, ByProcessRead),
+		FirstSeen:      wallRead(identity.FirstSeen),
+		Opened:         opened,
+	}, nil
+}
+
 // ending keeps the instant an unobserved ending carries out of At, because
 // capture stamps it with the moment the replacing occupancy was seen
 // (capture.go, retireLocked) and a reader of At would take it for the end.

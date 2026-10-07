@@ -16,6 +16,7 @@ import (
 	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/contract/record"
 	"github.com/evandukss/edge-observer/extension"
+	"github.com/evandukss/edge-observer/fragment"
 	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/http1"
 	"github.com/evandukss/edge-observer/jsonshape"
@@ -186,51 +187,57 @@ func (e *extensions) counts() []account.ExtensionCounts {
 	return out
 }
 
-// dispatch is one batch from its reconstruction to its lines: what each
-// pipeline made of it, and, with extensions, where it is in their chain. It
-// holds the batch's intake leases until its lines are written.
+// dispatch is one exchange on its way through the extensions to its lines:
+// its id and index, the exchange as handed over and the reconstruction
+// pipeline's copy of it as the chain leaves it, what each extension did to it,
+// and where it is in the chain. It holds the exchange's charges - what it was
+// handed over with (intake.Parsing) and its copy's (intake.Policy) - until its
+// lines are written or it is let go (letGo).
 type dispatch struct {
-	b        *batch
-	metadata record.Connection
-	// lines are the batch's pipelines in plan order: an artifact to write, or
-	// none where the pipeline failed, and whether a refused suffix is counted
-	// against it once written.
-	lines []pipelineLine
-	// ids is the range issued to the batch's exchanges.
-	ids   IDRange
-	first uint64
-	// refusedWhole is a batch whose reconstruction was refused: it sends an
-	// extension nothing, not even connection_done.
-	refusedWhole bool
+	b     *batch
+	id    uint64
+	index int
+	role  reconstruct.Role
+	// excluded is an exchange the output will not write, and reason why, once
+	// that is decidable; "" until then.
+	excluded bool
+	reason   string
 
-	// The reconstruction pipeline's state, for extensions: the connection as
-	// parsed and as the chain left it, every exchange of each, the chain's
-	// evidence and what it did to bodies, how many exchanges the output
-	// writes, and why each one after those is excluded.
+	// source is the exchange as handed over. processed is the first
+	// reconstruction pipeline's copy of it (w.pipelines[reconstruction]), alone
+	// in its connection, with its pipeline's evidence and what it did to bodies
+	// (run), charged policy; pipelines are the reconstruction pipelines that
+	// write it.
+	source         reconstruct.Exchange
 	reconstruction int
-	source         reconstruct.Connection
 	processed      reconstruct.Connection
 	run            *slotRun
-	good           int
-	excluded       []string
-	truncation     *ReconstructionTruncation
+	policy         int64
+	pipelines      []string
 
 	outcomes []ExtensionOutcome
 	replaced []ReplacementExclusion
-	// changedBy is, per exchange, the outcome that last changed each field.
-	changedBy []map[string]int
+	// changedBy is, per field, the outcome that last changed it.
+	changedBy map[string]int
 
-	// i and k are the exchange and the extension the chain is at.
-	i, k  int
-	bytes int64
-	dead  bool
+	// k is the extension the exchange is at. dead is an exchange let go
+	// before its chain was through: a result that still arrives is counted,
+	// and nothing more is done with it.
+	k    int
+	dead bool
 }
 
-type pipelineLine struct {
-	name     string
-	input    string
-	artifact *Artifact
-	refused  bool
+// submission is one extension call as a worker is about to submit it: the
+// exchange's id, the extension's index in the plan, what the call is admitted
+// at (extension.Call.Bytes), the length of its encoded message, and the
+// connection's current accounted charge in the shared allowance
+// (batch.charged). The call is admitted at that charge, so Bytes is Charged.
+type submission struct {
+	ID        uint64
+	Extension int
+	Bytes     int64
+	Message   int
+	Charged   int64
 }
 
 // completion is an extension's result for the call a dispatch waits on.
@@ -240,26 +247,301 @@ type completion struct {
 	result extension.Result
 }
 
+// chain issues an exchange the pairing handed over its id and index and puts
+// it on its connection's chain, behind the exchanges before it: each goes
+// through every extension in turn, one at a time, and then its lines are
+// written. The first reconstruction pipeline's copy, which every extension
+// and every line reads, is made and charged before the id is issued: a copy
+// the shared allowance refuses cuts the connection with nothing of the
+// exchange released. The first exchange that is not complete and supported
+// is excluded, and so is every one after it; each still takes an id and an
+// index, and is sent as excluded once its reason is decidable (settled), at
+// the latest at the connection's end or cut (decideTail).
+func (w *Worker) chain(ctx context.Context, b *batch, x reconstruct.Exchange, role reconstruct.Role) error {
+	p := b.parse
+	if !x.Complete || !countableMessage(x.Request) || !countableMessage(x.Response) {
+		p.countable = false
+	}
+	_, err := w.identity(b)
+	d := &dispatch{b: b, role: role, source: x, changedBy: map[string]int{},
+		excluded: err != nil || p.excluded || !supportedExchange(x)}
+	one := reconstruct.Connection{Process: b.process, ID: b.id, Role: role, Exchanges: []reconstruct.Exchange{x}}
+	for i, pipeline := range w.pipelines {
+		if pipeline.Input != config.ReconstructionInput || p.failed[pipeline.Name] {
+			continue
+		}
+		processed, run, held, failed, full := w.policyCopy(b, one, pipeline.Slots)
+		if full {
+			w.returnPolicy(b, d.policy)
+			p.reserver.Release(x.Charge)
+			w.cutByAllowance(b)
+			return nil
+		}
+		if !failed {
+			// Projected now, so it cannot fail to reach an extension later for
+			// want of a record.
+			if _, _, err := record.FromReconstruction(reconstruct.Reconstruction{Connections: []reconstruct.Connection{processed}}, nil); err != nil {
+				failed = true
+			}
+		}
+		if failed {
+			// A pipeline that fails writes nothing more for the connection,
+			// and is counted once for it.
+			w.returnPolicy(b, held)
+			p.failed[pipeline.Name] = true
+			w.countProcessingFailure(pipeline.Name)
+			continue
+		}
+		if d.run == nil {
+			d.reconstruction, d.processed, d.run, d.policy = i, processed, run, held
+		} else {
+			w.returnPolicy(b, held)
+		}
+		d.pipelines = append(d.pipelines, pipeline.Name)
+	}
+	if d.run == nil {
+		// No pipeline can give an extension its record of it: it is not
+		// released, as nothing of a connection was when that was found at its
+		// retirement.
+		p.reserver.Release(x.Charge)
+		return nil
+	}
+	request, response := directions(role)
+	d.index = p.exchanges
+	p.exchanges++
+	d.id = w.release.issued.Add(1)
+	w.extensions.issue(1)
+	if d.excluded {
+		if !p.excluded {
+			p.excluded = true
+			for _, side := range []struct {
+				direction fragment.Direction
+				message   *reconstruct.Message
+			}{{request, x.Request}, {response, x.Response}} {
+				if side.message != nil && side.direction != fragment.Unknown {
+					reason, at := messageStop(side.message)
+					p.omitted[side.direction] = &prefixCut{offset: at, reason: reason}
+				}
+			}
+		}
+		if err != nil {
+			b.invalid = true
+		}
+		d.reason = b.settled(d)
+	} else {
+		p.good++
+		p.released[request], p.released[response] = x.Request.End, x.Response.End
+	}
+	b.chain = append(b.chain, d)
+	return w.advanceChain(ctx, b)
+}
+
+// advanceChain takes a connection's chain as far as it goes now. The first
+// exchange is sent to its next extension unless it has a call outstanding, or
+// is excluded and its reason is not yet decidable; one through every
+// extension has its lines written and is let go, and the next one starts.
+// Once the chain is through and the connection has ended, its connection_done
+// is sent and its connection lines written (closeConnection), and it is let
+// go.
+func (w *Worker) advanceChain(ctx context.Context, b *batch) error {
+	if b.cut {
+		w.decideTail(b)
+	}
+	for len(b.chain) > 0 && !b.calling {
+		d := b.chain[0]
+		if d.excluded && d.reason == "" {
+			if d.reason = b.settled(d); d.reason == "" {
+				break
+			}
+		}
+		waits, err := w.step(d)
+		if err != nil {
+			return err
+		}
+		if waits {
+			b.calling = true
+			break
+		}
+		b.chain[0] = nil
+		b.chain = b.chain[1:]
+		err = w.writeExchange(ctx, d)
+		w.letGo(d)
+		// Its input is no longer held for it.
+		b.refund()
+		if err != nil {
+			return err
+		}
+	}
+	if len(b.chain) == 0 {
+		b.chain = nil
+	}
+	if !b.ended || b.calling || len(b.chain) != 0 {
+		return nil
+	}
+	path, err := w.closeConnection(ctx, b)
+	b.release(path)
+	w.waiting = held.Deleted(w.waiting, b, &w.waitingChurn)
+	return err
+}
+
+// settled is the reason an excluded exchange's connection line will record for
+// it, where nothing later can change that reason; "" where something can, and
+// the exchange waits for the connection's end or cut (decideTail). It is
+// settled where, in the direction the reason comes from (exclusionReason),
+// the first exchange not released stopped below what has been read there, and
+// capture has stopped nothing there: a stop capture records later is never
+// below what was read, so it cannot take the reason over.
+func (b *batch) settled(d *dispatch) string {
+	request, response := fragment.Sent, fragment.Received
+	if d.role == reconstruct.Server {
+		request, response = response, request
+	}
+	direction := response
+	if d.source.Request == nil || !supportedMessage(d.source.Request) {
+		direction = request
+	}
+	omitted := b.parse.omitted[direction]
+	if omitted == nil || b.place[direction].stop != nil || omitted.offset >= b.place[direction].fed {
+		return ""
+	}
+	return omitted.reason
+}
+
+// decideTail gives every held excluded exchange of a connection the reason
+// its connection line records for it, now that it is decidable: the cut, the
+// capture loss, or, at its end, the truncation of what it read.
+func (w *Worker) decideTail(b *batch) {
+	var truncation *ReconstructionTruncation
+	read := false
+	for _, d := range b.chain {
+		if !d.excluded || d.reason != "" {
+			continue
+		}
+		switch {
+		case b.cut:
+			d.reason = TruncationConnectionCut
+		case b.lost:
+			d.reason = "positions_unknown"
+		default:
+			if !read {
+				truncation, read = b.truncation(), true
+			}
+			d.reason = exclusionReason(d.source, d.role, truncation)
+		}
+	}
+}
+
+// letGo gives back what a dispatch holds: its copy's charge and what its
+// exchange was handed over with, once.
+func (w *Worker) letGo(d *dispatch) {
+	w.returnPolicy(d.b, d.policy)
+	d.policy = 0
+	if p := d.b.parse; p != nil {
+		p.reserver.Release(d.source.Charge)
+	}
+	d.source.Charge = http1.Charge{}
+}
+
+// drop lets go of every exchange on a connection's chain without writing it:
+// results still outstanding are counted when they arrive.
+func (w *Worker) drop(b *batch) {
+	for _, d := range b.chain {
+		d.dead = true
+		w.letGo(d)
+	}
+	b.chain, b.calling = nil, false
+}
+
+// writeExchange writes an exchange that has been through every extension: one
+// line per reconstruction pipeline that writes it and route, with its id and
+// index, the connection's provisional record, the chain's copy of it and what
+// each extension did to it. An excluded exchange writes nothing.
+func (w *Worker) writeExchange(ctx context.Context, d *dispatch) error {
+	b := d.b
+	if d.excluded {
+		w.reportOne(b, d.index, d.id, releaseExcluded)
+		return nil
+	}
+	outcome := releaseNone
+	projected, _, err := record.FromReconstruction(reconstruct.Reconstruction{Connections: []reconstruct.Connection{d.processed}}, nil)
+	if err != nil {
+		for _, name := range d.pipelines {
+			b.parse.failed[name] = true
+			w.countProcessingFailure(name)
+		}
+		w.reportOne(b, d.index, d.id, releaseExcluded)
+		return nil
+	}
+	d.run.mark(&projected[0], d.processed)
+	exchange := projected[0].Exchanges[0]
+	exchange.Index = d.index
+	reconstruction := projected[0]
+	reconstruction.Unplaced = provisionalUnplaced
+	reconstruction.Exchanges = []record.Exchange{exchange}
+	exclusions := make([]PolicyExclusion, 0, len(d.run.evidence.fields))
+	for _, entry := range d.run.evidence.fields {
+		entry.Exchange = d.index
+		exclusions = append(exclusions, entry)
+	}
+	replaced := make([]ReplacementExclusion, 0, len(d.replaced))
+	for _, entry := range d.replaced {
+		entry.Exchange = d.index
+		replaced = append(replaced, entry)
+	}
+	evidence := b.exchangeEvidence(d.source, d.role)
+	for _, name := range d.pipelines {
+		a := Artifact{Version: ArtifactVersion, Record: ArtifactExchange, Session: w.options.Session,
+			PolicyRevision: w.options.PolicyRevision, Connection: *b.parse.identity, ExchangeID: strconv.FormatUint(d.id, 10),
+			Index: &d.index, Reconstruction: &reconstruction, PolicyExclusions: exclusions, ExtensionOutcomes: d.outcomes,
+			ReplacementExclusions: replaced}
+		for _, route := range w.routes {
+			if route.Pipeline != name {
+				continue
+			}
+			a.Route = route
+			one, err := w.emit(ctx, a, b.loss, evidence)
+			if err != nil {
+				return err
+			}
+			outcome = outcome.worse(one)
+		}
+	}
+	if outcome == releaseNone {
+		outcome = releaseExcluded
+	}
+	w.reportOne(b, d.index, d.id, outcome)
+	return nil
+}
+
 // step submits d's next call, resolving every one that skips its extension
-// at once, and reports whether d now waits for a result. Every exchange of d
-// was projected when it was dispatched and after each change, so a message
-// that cannot be encoded is the observer's defect, returned as terminal.
+// at once - one its connection's capture loss withdrew as withdrawn - and
+// reports whether d now waits for a result. A call is admitted
+// at its connection's current charge in the shared allowance (batch.charged).
+// d was projected when it was copied and after each change, so a message that
+// cannot be encoded is the observer's defect, returned as terminal.
 func (w *Worker) step(d *dispatch) (bool, error) {
 	exts := w.extensions
-	for d.i < len(d.processed.Exchanges) {
+	for d.k < len(exts.supervisors) {
 		k := d.k
-		message, err := w.exchangeMessage(d, d.i, k)
+		message, err := w.exchangeMessage(d, k)
 		if err != nil {
 			return false, errors.New("internal observer defect: cannot encode an exchange for an extension")
 		}
-		reason := extension.Unavailable
-		// Submit only enqueues; order that handoff against this connection's cut.
-		d.b.loss.Authorize(func() {
-			reason = exts.supervisors[k].Submit(extension.Call{ID: d.first + uint64(d.i), Bytes: d.bytes,
-				Message: message, Done: func(result extension.Result) {
+		charged := d.b.charged()
+		if w.options.submits != nil {
+			w.options.submits(submission{ID: d.id, Extension: k, Bytes: charged, Message: len(message), Charged: charged})
+		}
+		var reason string
+		// Submit only enqueues; order that handoff against this connection's
+		// capture loss, which withdraws the exchange's content.
+		if !d.b.loss.Authorize(func() {
+			reason = exts.supervisors[k].Submit(extension.Call{ID: d.id, Bytes: charged, Message: message,
+				Done: func(result extension.Result) {
 					w.queue.complete(completion{d: d, k: k, result: result})
 				}})
-		})
+		}) {
+			reason = extension.Withdrawn
+		}
 		if reason == "" {
 			return true, nil
 		}
@@ -268,94 +550,108 @@ func (w *Worker) step(d *dispatch) (bool, error) {
 	return false, nil
 }
 
-// resolve applies extension k's result for the exchange d is at, counts it,
-// sends connection_done after the connection's last exchange, and moves d to
-// the next call.
+// resolve applies extension k's result for d, counts it, and moves d to its
+// next extension. A change whose growth the shared allowance has no room for
+// fails as no_room, and cuts the connection.
 func (w *Worker) resolve(d *dispatch, k int, result extension.Result) {
 	exts := w.extensions
-	i := d.i
 	name := exts.entries[k].Name
-	outcome := ExtensionOutcome{Exchange: i, Extension: name, Outcome: result.Outcome}
-	switch result.Outcome {
-	case extension.Changed:
-		changed, reason := w.change(d, i, k, result.Changes)
+	outcome := ExtensionOutcome{Exchange: d.index, Extension: name, Outcome: result.Outcome}
+	switch {
+	case result.Outcome == extension.Changed && !d.dead:
+		changed, reason := w.change(d, k, result.Changes)
 		if reason != "" {
-			outcome = ExtensionOutcome{Exchange: i, Extension: name, Outcome: extension.Failed, Reason: reason}
+			outcome = ExtensionOutcome{Exchange: d.index, Extension: name, Outcome: extension.Failed, Reason: reason}
+			if reason == extension.NoRoom {
+				w.cutByAllowance(d.b)
+			}
 			break
 		}
 		outcome.Changed, outcome.Overwritten = changed, []string{}
 		for _, field := range changed {
-			if previous, ok := d.changedBy[i][field]; ok {
+			if previous, ok := d.changedBy[field]; ok {
 				d.outcomes[previous].Overwritten = append(d.outcomes[previous].Overwritten, field)
 			}
-			d.changedBy[i][field] = len(d.outcomes)
+			d.changedBy[field] = len(d.outcomes)
 		}
-	case extension.Unchanged:
+	case result.Outcome == extension.Changed, result.Outcome == extension.Unchanged:
 	default:
 		outcome.Outcome, outcome.Reason = extension.Failed, result.Reason
 	}
 	d.outcomes = append(d.outcomes, outcome)
 	exts.count(k, outcome.Outcome, outcome.Reason)
-	if i == len(d.processed.Exchanges)-1 && !d.dead {
-		w.connectionDone(d, k)
-	}
 	d.k++
-	if d.k == len(exts.supervisors) {
-		d.k = 0
-		d.i++
+}
+
+// connectionDone tells every extension that a connection has no more
+// exchanges: once for each connection issued an id, counting them, and once,
+// counting none, for one that ends with none issued and was not refused whole.
+// It carries the connection's ending where its retirement record can be read.
+func (w *Worker) connectionDone(b *batch) {
+	issued := 0
+	if b.parse != nil {
+		issued = b.parse.exchanges
+	}
+	if issued == 0 {
+		reads := slices.ContainsFunc(w.pipelines, func(p config.EffectivePipeline) bool { return p.Input == config.ReconstructionInput })
+		refusedWhole := reads && (b.parse == nil || b.parse.fedBytes == 0) && (b.arrived != 0 || b.prefix().truncated())
+		if b.cut || b.lost || b.invalid || b.unsettled || refusedWhole {
+			return
+		}
+	}
+	var metadata *record.Connection
+	if b.retirement != nil {
+		if one, err := record.FromConnection(*b.retirement); err == nil {
+			metadata = &one
+		}
+	}
+	for k, entry := range w.extensions.entries {
+		message := map[string]any{"type": "connection_done", "connection_id": strconv.FormatUint(uint64(b.id), 10),
+			"count": strconv.Itoa(issued)}
+		if metadata != nil {
+			message["ending"] = metadata.Ending
+			if slices.Contains(entry.Fields, config.FieldConnection) {
+				message["connection"] = metadata
+			}
+		}
+		line, err := json.Marshal(message)
+		if err != nil {
+			continue
+		}
+		w.extensions.supervisors[k].ConnectionDone(append(line, '\n'))
 	}
 }
 
-// connectionDone tells extension k that d's connection has no more exchanges.
-func (w *Worker) connectionDone(d *dispatch, k int) {
-	message := map[string]any{"type": "connection_done", "ids": d.ids, "ending": d.metadata.Ending}
-	if slices.Contains(w.extensions.entries[k].Fields, config.FieldConnection) {
-		message["connection"] = d.metadata
-	}
-	line, err := json.Marshal(message)
-	if err != nil {
-		return
-	}
-	w.extensions.supervisors[k].ConnectionDone(append(line, '\n'))
-}
-
-// settle applies every result that has arrived, writing the lines of each
-// dispatch that no longer waits.
+// settle applies every result that has arrived, and takes each connection's
+// chain on from there.
 func (w *Worker) settle(ctx context.Context) error {
 	if w.queue == nil {
 		return nil
 	}
 	for _, c := range w.queue.completions() {
 		d := c.d
-		w.resolve(d, c.k, c.result)
 		if d.dead {
-			// Discarded: its result is counted, and nothing more is sent.
+			// Let go: its result is counted, and nothing more is done.
+			w.resolve(d, c.k, c.result)
 			continue
 		}
-		waits, err := w.step(d)
-		if err != nil {
-			return err
-		}
-		if waits {
-			continue
-		}
-		w.waiting = held.Deleted(w.waiting, d, &w.waitingChurn)
-		err = w.write(ctx, d)
-		d.b.release(processedUnless(err))
-		if err != nil {
+		d.b.calling = false
+		w.resolve(d, c.k, c.result)
+		if err := w.advanceChain(ctx, d.b); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// exchangeMessage is the exchange message for exchange i of d at extension k:
-// the fields its entry selects, as the chain left them.
-func (w *Worker) exchangeMessage(d *dispatch, i, k int) ([]byte, error) {
+// exchangeMessage is the exchange message for d at extension k: its id, its
+// connection's id and its index, and the fields k's entry selects, as the
+// chain left them.
+func (w *Worker) exchangeMessage(d *dispatch, k int) ([]byte, error) {
 	entry := w.extensions.entries[k]
 	selected := func(field string) bool { return slices.Contains(entry.Fields, field) }
-	e := d.processed.Exchanges[i]
-	projected, err := w.project(d, i)
+	e := d.processed.Exchanges[0]
+	projected, err := w.project(d)
 	if err != nil {
 		return nil, err
 	}
@@ -390,7 +686,7 @@ func (w *Worker) exchangeMessage(d *dispatch, i, k int) ([]byte, error) {
 		return map[string]any{"state": record.Present, "message": out}
 	}
 	removed := []map[string]string{}
-	for _, entry := range w.removals(d, i) {
+	for _, entry := range w.removals(d) {
 		if !selected(fieldOfRemoval(entry)) {
 			continue
 		}
@@ -401,17 +697,17 @@ func (w *Worker) exchangeMessage(d *dispatch, i, k int) ([]byte, error) {
 		removed = append(removed, one)
 	}
 	output := map[string]string{"state": "eligible"}
-	if i >= d.good {
-		output = map[string]string{"state": "excluded", "reason": d.excluded[i]}
+	if d.excluded {
+		output = map[string]string{"state": "excluded", "reason": d.reason}
 	}
 	message := map[string]any{
-		"type": "exchange", "id": strconv.FormatUint(d.first+uint64(i), 10), "ids": d.ids, "index": i,
-		"output": output,
-		"exchange": map[string]any{"index": i, "complete": e.Complete, "request": side(e.Request, projected.Request, true),
+		"type": "exchange", "id": strconv.FormatUint(d.id, 10),
+		"connection_id": strconv.FormatUint(uint64(d.b.id), 10), "index": d.index, "output": output,
+		"exchange": map[string]any{"index": d.index, "complete": e.Complete, "request": side(e.Request, projected.Request, true),
 			"response": side(e.Response, projected.Response, false), "removed": removed},
 	}
-	if selected(config.FieldConnection) {
-		message["connection"] = d.metadata
+	if identity := d.b.parse.identity; selected(config.FieldConnection) && identity != nil {
+		message["connection"] = *identity
 	}
 	line, err := json.Marshal(message)
 	if err != nil {
@@ -420,17 +716,12 @@ func (w *Worker) exchangeMessage(d *dispatch, i, k int) ([]byte, error) {
 	return append(line, '\n'), nil
 }
 
-// removals is every removal the rules made in exchange i: from captured
+// removals is every removal the rules made in d's exchange: from captured
 // content and from replacement content, once each.
-func (w *Worker) removals(d *dispatch, i int) []PolicyExclusion {
-	var out []PolicyExclusion
-	for _, entry := range d.run.evidence.fields {
-		if entry.Exchange == i {
-			out = append(out, entry)
-		}
-	}
+func (w *Worker) removals(d *dispatch) []PolicyExclusion {
+	out := slices.Clone(d.run.evidence.fields)
 	for _, entry := range d.replaced {
-		if entry.Exchange == i && !slices.Contains(out, entry.PolicyExclusion) {
+		if !slices.Contains(out, entry.PolicyExclusion) {
 			out = append(out, entry.PolicyExclusion)
 		}
 	}
@@ -450,18 +741,16 @@ func fieldOfRemoval(e PolicyExclusion) string {
 	}
 }
 
-// project is exchange i of d as the record writes it, bodies marked as the
-// chain left them.
-func (w *Worker) project(d *dispatch, i int) (record.Exchange, error) {
-	one := d.processed
-	one.Exchanges = []reconstruct.Exchange{d.processed.Exchanges[i]}
-	projected, _, err := record.FromReconstruction(reconstruct.Reconstruction{Connections: []reconstruct.Connection{one}}, nil)
+// project is d's exchange as the record writes it, bodies marked as the chain
+// left them.
+func (w *Worker) project(d *dispatch) (record.Exchange, error) {
+	projected, _, err := record.FromReconstruction(reconstruct.Reconstruction{Connections: []reconstruct.Connection{d.processed}}, nil)
 	if err != nil {
 		return record.Exchange{}, err
 	}
-	d.run.mark(&projected[0], one)
+	d.run.mark(&projected[0], d.processed)
 	e := projected[0].Exchanges[0]
-	e.Index = i
+	e.Index = d.index
 	return e, nil
 }
 
@@ -495,16 +784,18 @@ type replacement struct {
 	body    []byte
 }
 
-// change checks extension k's changes to exchange i whole and, where every
+// change checks extension k's changes to d's exchange whole and, where every
 // one is valid, applies each through the chain once. It returns the fields
 // changed, in the protocol's order, or the reason the answer failed, in which
-// case nothing of it is applied.
-func (w *Worker) change(d *dispatch, i, k int, changes map[string]json.RawMessage) ([]string, string) {
-	if i >= d.good {
+// case nothing of it is applied. A changed copy is kept only where its growth
+// is charged first; one the shared allowance has no room for fails as
+// no_room.
+func (w *Worker) change(d *dispatch, k int, changes map[string]json.RawMessage) ([]string, string) {
+	if d.excluded {
 		return nil, extension.Excluded
 	}
 	entry := w.extensions.entries[k]
-	e := d.processed.Exchanges[i]
+	e := d.processed.Exchanges[0]
 	names := slices.Sorted(maps.Keys(changes))
 	for _, name := range names {
 		if name == config.FieldConnection {
@@ -550,10 +841,10 @@ func (w *Worker) change(d *dispatch, i, k int, changes map[string]json.RawMessag
 	replacedBefore := len(d.replaced)
 	var fields []string
 	for _, r := range replacements {
-		w.rechain(d, i, entry.Name, r)
+		w.rechain(d, entry.Name, r)
 		fields = append(fields, r.field)
 	}
-	if _, err := w.project(d, i); err != nil {
+	undo := func() {
 		for side, m := range []*reconstruct.Message{e.Request, e.Response} {
 			if m != nil {
 				*m = saved[side]
@@ -561,7 +852,17 @@ func (w *Worker) change(d *dispatch, i, k int, changes map[string]json.RawMessag
 		}
 		d.run.bodies = keptBodies
 		d.replaced = d.replaced[:replacedBefore]
+	}
+	if _, err := w.project(d); err != nil {
+		undo()
 		return nil, extension.Malformed
+	}
+	if now := copyUnits(d.processed); now > d.policy {
+		if !w.reservePolicy(d.b, now-d.policy) {
+			undo()
+			return nil, extension.NoRoom
+		}
+		d.policy = now
 	}
 	return fields, ""
 }
@@ -697,15 +998,15 @@ func printable(s string, spaces bool) bool {
 	return true
 }
 
-// rechain applies one replacement to exchange i as a new representation of
+// rechain applies one replacement to d's exchange as a new representation of
 // its component: the component alone goes through the whole chain once, and
 // what the chain removes from it is recorded apart, attributed to the
 // extension that supplied it. Body operations read the captured message's
 // header facts, as they do for captured content.
-func (w *Worker) rechain(d *dispatch, i int, name string, r replacement) {
-	m := d.processed.Exchanges[i].Response
+func (w *Worker) rechain(d *dispatch, name string, r replacement) {
+	m := d.processed.Exchanges[0].Response
 	if r.request {
-		m = d.processed.Exchanges[i].Request
+		m = d.processed.Exchanges[0].Request
 	}
 	scratch := &reconstruct.Message{}
 	scratch.Kind, scratch.Complete, scratch.Framed, scratch.Defect = m.Kind, m.Complete, m.Framed, m.Defect
@@ -725,10 +1026,10 @@ func (w *Worker) rechain(d *dispatch, i int, name string, r replacement) {
 		}
 	}
 	exchange := reconstruct.Exchange{Response: scratch}
-	parsed := reconstruct.Exchange{Response: d.source.Exchanges[i].Response}
+	parsed := reconstruct.Exchange{Response: d.source.Response}
 	if r.request {
 		exchange = reconstruct.Exchange{Request: scratch}
-		parsed = reconstruct.Exchange{Request: d.source.Exchanges[i].Request}
+		parsed = reconstruct.Exchange{Request: d.source.Request}
 	}
 	connection := reconstruct.Connection{Process: d.processed.Process, ID: d.processed.ID, Role: d.processed.Role,
 		Exchanges: []reconstruct.Exchange{exchange}}
@@ -739,7 +1040,7 @@ func (w *Worker) rechain(d *dispatch, i int, name string, r replacement) {
 		run.apply(&connection, slot)
 	}
 	for _, entry := range run.evidence.fields {
-		entry.Exchange = i
+		entry.Exchange = 0
 		one := ReplacementExclusion{PolicyExclusion: entry, Extension: name}
 		if !slices.Contains(d.replaced, one) {
 			d.replaced = append(d.replaced, one)

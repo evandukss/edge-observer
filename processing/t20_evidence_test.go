@@ -66,8 +66,8 @@ func TestT20EvidenceDistinguishesEveryState(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			a, _, text := t20Exchange(t, t20Plan(t, tc.op.implementation, tc.op.arguments), tc.request, tc.response)
 			t20Absent(t, text, t20Card)
-			if a.Version != processing.ArtifactVersion || processing.ArtifactVersion != "observer.approved/3" {
-				t.Fatalf("PROPERTY: the artifact is %q, not observer.approved/3", a.Version)
+			if a.Version != processing.ArtifactVersion || processing.ArtifactVersion != "observer.approved/4" {
+				t.Fatalf("PROPERTY: the artifact is %q, not observer.approved/4", a.Version)
 			}
 			if a.PolicyExclusions == nil || len(a.PolicyExclusions) != len(tc.entries) {
 				t.Fatalf("PROPERTY: evidence entries: got %+v, want %v", a.PolicyExclusions, tc.entries)
@@ -175,8 +175,11 @@ func TestT20ReaderChecksVersionTwoEvidence(t *testing.T) {
 		enqueue(t, store, batch(t, 1, "GET / HTTP/1.1\r\nAuthorization: x\r\n\r\n", goodResponse))
 		counted(t, drain(t, w), out, 1, 1)
 		exchanges, _ := out.routed(config.ExchangesPipeline)
+		retirements, _ := out.routed(config.ConnectionsPipeline)
 		a := exchanges[0]
 		a.Version = processing.ArtifactVersion1
+		// A version 1 line carried its connection's final record.
+		a.Connection = retirements[0].Connection
 		a.PolicyExclusions = []processing.PolicyExclusion{{Exchange: 0, Message: "request", Section: "headers", Name: "authorization"}}
 		var text bytes.Buffer
 		if err := processing.RenderArtifact(&text, a); err != nil {

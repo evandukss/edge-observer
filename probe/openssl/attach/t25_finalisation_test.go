@@ -194,8 +194,8 @@ func (r *t25Recorded) holding(needle string) int {
 // comment 2260): the only way to the timeout branch, since no seam holds
 // delivery from outside the process. The real attachment, intake, gate, worker
 // and writer run in this process. A decided connection is written first. An
-// open connection's exchange carrying both markers is captured and left
-// pending; then capture's sink is held so delivery cannot finish, and the
+// open connection's unfinished request body carrying both markers is captured
+// and left pending; then capture's sink is held so delivery cannot finish, and the
 // program's own finalisation order runs: the sealer withdraws and drains within
 // a second, which expires, then capture finishes and the worker finishes with
 // Drained=false. Asserted: the pending payload is discarded, nothing of it
@@ -205,7 +205,8 @@ func (r *t25Recorded) holding(needle string) int {
 // this process is not observed here.
 func TestT25InProcessNotTheSyscallBoundaryAnExpiredDrainDiscardsPendingPayload(t *testing.T) {
 	decidedClient := speaking(t, t18Serving(t))
-	pendingClient := speaking(t, t18Serving(t))
+	peer := unfinishedServing(t)
+	pendingClient := speaking(t, peer.port)
 	compiled := t18Compiled(t, decidedClient.process, pendingClient.process)
 	barrier := t18NewBarrier()
 	t.Cleanup(barrier.open)
@@ -277,14 +278,12 @@ func TestT25InProcessNotTheSyscallBoundaryAnExpiredDrainDiscardsPendingPayload(t
 		t.Fatal("wiring, not the property: the decided connection was never written")
 	}
 	before := recording.Stats().Records
-	t18Ask(t, pendingClient, "/?asked=t25-pending", "X-Public: "+t18BoundaryPermitted, "Authorization: Bearer "+t18BoundaryProtected)
-	for deadline := time.Now().Add(10 * time.Second); recording.Stats().Records < before+2 && time.Now().Before(deadline); {
+	peer.begin(t, pendingClient, "/?asked=t25-pending", "X-Public: "+t18BoundaryPermitted, "Authorization: Bearer "+t18BoundaryProtected)
+	for deadline := time.Now().Add(10 * time.Second); recording.Stats().Records < before+1 && time.Now().Before(deadline); {
 		time.Sleep(10 * time.Millisecond)
 	}
 	sink.armed.Store(true)
-	if _, err := t18Timed(pendingClient, "t25-after-the-hold", 1, 10*time.Second); err != nil {
-		t.Fatalf("the exchange after the hold: %v", err)
-	}
+	peer.chunk(t, pendingClient, unfinishedChunk)
 	select {
 	case <-barrier.entered:
 	case <-time.After(10 * time.Second):
@@ -292,7 +291,7 @@ func TestT25InProcessNotTheSyscallBoundaryAnExpiredDrainDiscardsPendingPayload(t
 	}
 	stopDriver()
 	pending := store.Stats()
-	if pending.Queued+pending.Leased == 0 || recording.Stats().Records < before+2 {
+	if pending.Queued+pending.Leased == 0 || recording.Stats().Records < before+1 {
 		t.Fatalf("wiring, not the property: no undecided payload was pending at finalisation: intake %+v, records %d from %d",
 			pending, recording.Stats().Records, before)
 	}

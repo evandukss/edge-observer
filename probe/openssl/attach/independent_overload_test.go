@@ -83,7 +83,7 @@ type overloadChain struct {
 
 // overloadNew composes the chain as activation does: one intake both capture
 // sinks write to, and a gate sharing the intake's exhaustion signal.
-// connectionInput is the worker's per-connection held-input bound, zero for its
+// connectionInput is the worker's per-connection pending-message bound, zero for its
 // default.
 func overloadNew(t *testing.T, events uint64, intakeBytes int64, connectionInput int) *overloadChain {
 	t.Helper()
@@ -237,12 +237,15 @@ func TestIndependentABurstOverTheHeldEventBoundCostsOnlyItsConnection(t *testing
 // That connection's suffix is incomplete and counted; another connection open
 // across it, and a fresh one begun after it, are written.
 func TestIndependentAFullIntakeCostsOnlyTheConnectionItRefused(t *testing.T) {
-	c := overloadNew(t, 64, 4096, 0)
+	// Leave room for both ordinary exchanges and their coexisting copies.
+	// The refused payload alone fills this allowance, before entry overhead.
+	const intakeBytes = 16 << 10
+	c := overloadNew(t, 64, intakeBytes, 0)
 	c.begin(1, true)
 	c.exchange(1, "/other")
 	c.begin(2, true)
 	c.exchange(2, "/intake-before")
-	c.send(2, fragment.Sent, "GET /intake-refused HTTP/1.1\r\nX-Fill: "+strings.Repeat("x", 4000)+"\r\n\r\n", 0)
+	c.send(2, fragment.Sent, "GET /intake-refused HTTP/1.1\r\nX-Fill: "+strings.Repeat("x", intakeBytes)+"\r\n\r\n", 0)
 	if refused := c.store.Stats().FragmentsRefused; refused == 0 {
 		t.Fatalf("wiring, not the property: the intake refused nothing, so it was never full: %+v", c.store.Stats())
 	}
@@ -264,16 +267,17 @@ func TestIndependentAFullIntakeCostsOnlyTheConnectionItRefused(t *testing.T) {
 	c.goesOn([]string{"/other", "/fresh"}, []string{"/intake-refused", "/intake-after"})
 }
 
-// A per-connection bound: one open connection holds more input than one
-// connection may. Its input is cut and counted; another connection and a
+// A per-connection bound: one open connection reaches the pending-message
+// ceiling. Its input is cut and counted; another connection and a
 // fresh one are written.
 func TestIndependentAPerConnectionBoundCostsOnlyThatConnection(t *testing.T) {
 	c := overloadNew(t, 64, 1<<20, 4)
 	c.begin(1, true)
 	c.exchange(1, "/other")
 	c.begin(2, true)
-	for _, target := range []string{"/bound-1", "/bound-2", "/bound-3"} {
-		c.exchange(2, target)
+	// Four requests without responses reach four pending message descriptors.
+	for _, target := range []string{"/bound-1", "/bound-2", "/bound-3", "/bound-4"} {
+		c.send(2, fragment.Sent, "GET "+target+" HTTP/1.1\r\nHost: test\r\n\r\n", 0)
 	}
 	c.drain()
 	c.exchange(2, "/bound-after")
@@ -283,7 +287,7 @@ func TestIndependentAPerConnectionBoundCostsOnlyThatConnection(t *testing.T) {
 	c.close(3)
 	c.drain()
 	if c.outcome.ConnectionsCut == 0 {
-		t.Fatalf("wiring, not the property: no connection reached the bound of 4 entries: %+v", c.outcome)
+		t.Fatalf("wiring, not the property: no connection reached the bound of 4 pending messages: %+v", c.outcome)
 	}
 	c.close(2)
 	c.drain()

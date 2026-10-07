@@ -6,7 +6,9 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/evandukss/edge-observer/capture"
 	"github.com/evandukss/edge-observer/fragment"
+	"github.com/evandukss/edge-observer/intake"
 	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/processing"
 )
@@ -27,6 +29,43 @@ func refuseInput(t *testing.T, p *pipeline, handle uint64) {
 	if p.capture.Stats().GateRefused == 0 {
 		t.Fatal("wiring, not the property: capture did not receive the refused transfer")
 	}
+}
+
+// unanswered delivers n requests on a handle, each framed and none answered:
+// the peer that never answers holds a pending message per request.
+func unanswered(p *pipeline, handle uint64, n int) {
+	for i := 0; i < n; i++ {
+		p.transfer(handle, fragment.Sent, fmt.Sprintf("GET /unanswered-%d HTTP/1.1\r\n\r\n", i))
+	}
+}
+
+// gapTap delivers every fragment to the store but a connection's first, which
+// it holds, its slot kept, until deliver: the later fragments of each
+// connection wait behind the hole in its sequence.
+type gapTap struct {
+	store *intake.Store
+	held  []fragment.Record
+}
+
+func (g *gapTap) Write(r fragment.Record) error {
+	if r.Sequence == 1 {
+		if r.Slot != nil {
+			r.Slot.Keep()
+		}
+		g.held = append(g.held, r)
+		return nil
+	}
+	return g.store.Write(r)
+}
+
+func (g *gapTap) deliver(t *testing.T) {
+	t.Helper()
+	for _, r := range g.held {
+		if err := g.store.Write(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g.held = nil
 }
 
 func returnedReservations(t *testing.T, p *pipeline) {
@@ -109,8 +148,7 @@ func TestGateLossWritesItsRetirementWithoutCountingABoundCut(t *testing.T) {
 func TestABoundCutThenGateLossWritesOneCutRetirement(t *testing.T) {
 	out := &outputLog{}
 	p := newPipeline(t, 4, 3, out)
-	p.exchange(1, "/cut")
-	p.transfer(1, fragment.Sent, "GET /more HTTP/1.1\r\n\r\n")
+	unanswered(p, 1, 3)
 	first := p.drain()
 	if first.ConnectionsCut != 1 || first.InputCut != 3 || p.gate.Snapshot().Held != 0 {
 		t.Fatalf("wiring, not the property: initial connection did not reach its bound: %+v", first)
@@ -134,23 +172,27 @@ func TestABoundCutThenGateLossWritesOneCutRetirement(t *testing.T) {
 
 func TestSimultaneousBoundCutsEachWriteTheirRetirement(t *testing.T) {
 	out := &outputLog{}
-	p := newPipeline(t, 9, 3, out)
+	p := newPipeline(t, 12, 3, out)
+	gap := &gapTap{store: p.store}
+	p.capture = capture.Recording(gap, p.store)
 	for h := uint64(1); h <= 3; h++ {
 		p.exchange(h, fmt.Sprintf("/burst-%d", h))
 		p.transfer(h, fragment.Sent, "GET /more HTTP/1.1\r\n\r\n")
+		p.transfer(h, fragment.Sent, "GET /most HTTP/1.1\r\n\r\n")
 	}
-	if p.store.Stats().Fragments != 9 || p.gate.Snapshot().Held != 9 {
+	if p.store.Stats().Fragments != 9 || len(gap.held) != 3 || p.gate.Snapshot().Held != 12 {
 		t.Fatal("wiring, not the property: three simultaneous batches did not reach their bounds")
 	}
 	for h := uint64(1); h <= 3; h++ {
 		refuseInput(t, p, h)
 		p.closed(h)
 	}
+	gap.deliver(t)
 	o := p.drain()
 	if o.ProcessingFailures != 0 {
 		t.Errorf("loss or bound cut counted as processing failure: %d", o.ProcessingFailures)
 	}
-	if o.ConnectionsCut != 3 || o.InputCut != 9 {
+	if o.ConnectionsCut != 3 || o.InputCut != 12 {
 		t.Errorf("simultaneous cuts miscounted: connections=%d input=%d", o.ConnectionsCut, o.InputCut)
 	}
 	for h := uint64(1); h <= 3; h++ {
@@ -162,8 +204,7 @@ func TestSimultaneousBoundCutsEachWriteTheirRetirement(t *testing.T) {
 func TestABoundCutKeepsItsRetirementThroughTheFinalDrain(t *testing.T) {
 	out := &outputLog{}
 	p := newPipeline(t, 4, 3, out)
-	p.exchange(1, "/long")
-	p.transfer(1, fragment.Sent, "GET /more HTTP/1.1\r\n\r\n")
+	unanswered(p, 1, 3)
 	first := p.drain()
 	if first.ConnectionsCut != 1 || first.InputCut != 3 {
 		t.Fatalf("wiring, not the property: long connection never reached its bound: %+v", first)

@@ -108,6 +108,7 @@ func TestWithheldUnknownInputNeverBecomesAnExchangeCount(t *testing.T) {
 			case "overlap":
 				later := b.fragments[0]
 				later.Sequence, later.Offset, later.Length, later.Payload = 3, 1, 1, []byte("x")
+				later.Evidence = fragment.Evidence{}
 				b.fragments = append(b.fragments, later)
 				b.records[0].Fragments = connection.Counted(3)
 				reason = "invalid_input"
@@ -118,12 +119,19 @@ func TestWithheldUnknownInputNeverBecomesAnExchangeCount(t *testing.T) {
 				wantBatches, wantFailures, reason = 1, 0, "late_batch_entry"
 			case "unsettled-finalization":
 				b.records[0].How, b.records[0].Ended = connection.StillOpen, time.Time{}
+				// Its complete pair is written while it is open; it never
+				// settles, so it writes no connection line.
+				wantExchanges = 2
 				wantBatches, wantFailures, reason = 1, 0, "unsettled_input"
 			}
 			enqueue(t, store, b)
 			o := drain(t, w)
 			if name == "unsettled-finalization" {
-				if o.Pending != 1 || store.Stats().Leased != 3 || o.Written != 2 {
+				// Written: the control's two lines and this connection's pair,
+				// released while it is open. Leased: this connection's
+				// retirement alone, its pair's entries returned as the pair was
+				// handed over.
+				if o.Pending != 1 || store.Stats().Leased != 1 || o.Written != 3 {
 					t.Fatalf("unsettled input was not held: %+v", o)
 				}
 				expectWithheld(t, o, connection.Counted(0))

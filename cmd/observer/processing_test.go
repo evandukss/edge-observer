@@ -267,14 +267,18 @@ func (f *processingControllerFixture) finish(log *logger) error {
 // children reach the identical final queue as the acceptance child; only the
 // producer's explicit settlement evidence changes.
 func TestControllerProcessingUsesFinalizationEvidence(t *testing.T) {
+	// The facts decide whether the open connection is settled: its connection
+	// line. want is the exchange records of a settled session; an unsettled
+	// one's are not counted here.
 	for _, one := range []struct {
 		name               string
 		withdrawn, drained bool
 		want               uint64
+		settled            bool
 	}{
-		{"settled", true, true, 2},
-		{"withdrawal-incomplete", false, true, 1},
-		{"drain-incomplete", true, false, 1},
+		{"settled", true, true, 2, true},
+		{"withdrawal-incomplete", false, true, 0, false},
+		{"drain-incomplete", true, false, 0, false},
 	} {
 		t.Run(one.name, func(t *testing.T) {
 			f := processingController(t)
@@ -322,7 +326,7 @@ func TestControllerProcessingUsesFinalizationEvidence(t *testing.T) {
 					lines = append(lines, line)
 				}
 			}
-			if uint64(len(lines)) != one.want || !bytes.Contains(lines[0], []byte("useful")) {
+			if (one.want != 0 && uint64(len(lines)) != one.want) || len(lines) == 0 || !bytes.Contains(lines[0], []byte("useful")) {
 				t.Fatalf("final exchange records=%d want=%d, or the first is not the useful one", len(lines), one.want)
 			}
 			if one.want == 2 {
@@ -334,20 +338,27 @@ func TestControllerProcessingUsesFinalizationEvidence(t *testing.T) {
 					t.Fatal("final exchange is missing or carries retirement evidence")
 				}
 			}
-			if one.want == 2 {
-				found := false
-				for _, line := range all {
-					var a processing.Artifact
-					if err := json.Unmarshal(line, &a); err != nil {
-						t.Fatal(err)
-					}
-					if a.Record == processing.ArtifactConnection && a.ReconstructionTruncation != nil {
-						found = true
+			var control processing.Artifact
+			if err := json.Unmarshal(lines[0], &control); err != nil {
+				t.Fatal(err)
+			}
+			// The open connection's connection line: written, with its
+			// indeterminate suffix marked, exactly when the session settled it.
+			settled := 0
+			for _, line := range all {
+				var a processing.Artifact
+				if err := json.Unmarshal(line, &a); err != nil {
+					t.Fatal(err)
+				}
+				if a.Record == processing.ArtifactConnection && a.Connection.ID != control.Connection.ID {
+					settled++
+					if a.ReconstructionTruncation == nil {
+						t.Fatal("retirement omitted the indeterminate suffix marker")
 					}
 				}
-				if !found {
-					t.Fatal("retirement omitted the indeterminate suffix marker")
-				}
+			}
+			if settled > 1 || (settled == 1) != one.settled {
+				t.Fatalf("the open connection's connection line was written %d times; settled=%t", settled, one.settled)
 			}
 			processingAccount(t, f, uint64(len(all)), logs.Bytes())
 		})

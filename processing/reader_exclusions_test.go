@@ -15,7 +15,7 @@ import (
 // re-encoded through the public type. This does not replace the independent
 // condition-2 engagement over capture, exclusion and undecidable suffixes.
 func TestApprovedReaderDistinguishesAllFourExclusionWireForms(t *testing.T) {
-	empty, _ := readableArtifact(t)
+	empty, _, retirement := readableLines(t)
 	var out outputLog
 	w, store := worker(t, rulesPlan(t, `"remove": {"headers": ["authorization"]}`), &out)
 	enqueue(t, store, batch(t, 1, "GET /public HTTP/1.1\r\nAuthorization: source-value\r\nX-Public: useful\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\npublic-body"))
@@ -27,6 +27,12 @@ func TestApprovedReaderDistinguishesAllFourExclusionWireForms(t *testing.T) {
 	}
 	members["version"] = json.RawMessage(`"observer.approved/1"`)
 	delete(members, "policy_exclusions")
+	// A version 1 line carried its connection's final record.
+	final, err := json.Marshal(retirement.Connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	members["connection"] = final
 	absent, err := json.Marshal(members)
 	if err != nil {
 		t.Fatal(err)

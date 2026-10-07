@@ -92,18 +92,51 @@ func TestP3T9BCondition2PublicInspection(t *testing.T) {
 				t.Fatal(err)
 			}
 			if name == "legacy_absent" || name == "legacy_null" {
+				var final processing.Artifact
+				for _, line := range lines {
+					var candidate processing.Artifact
+					if err := json.Unmarshal(line, &candidate); err != nil {
+						t.Fatal(err)
+					}
+					if candidate.Record == processing.ArtifactConnection {
+						final = candidate
+					}
+				}
+				if final.Connection.ID == "" || final.Connection.Provisional {
+					t.Fatal("wiring, not the property: legacy fixture has no final connection record")
+				}
 				// An artifact written before the member existed lacks it on
 				// every record, the connection record included. Only a
 				// historical version may lack it, so the records are made
 				// version 1 records: that version's label, and none of the
-				// members a later version added.
+				// members a later version added. Every historical line carries
+				// the connection's final record, including exchange lines.
 				for i, line := range lines {
+					var current processing.Artifact
+					if err := json.Unmarshal(line, &current); err != nil {
+						t.Fatal(err)
+					}
+					if current.Session != final.Session || current.Connection.ID != final.Connection.ID ||
+						current.Connection.Process != final.Connection.Process {
+						t.Fatal("wiring, not the property: legacy line does not join its final connection record")
+					}
 					var each map[string]json.RawMessage
 					if err := json.Unmarshal(line, &each); err != nil {
 						t.Fatal(err)
 					}
+					each["connection"], err = json.Marshal(final.Connection)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if current.Reconstruction != nil && final.ReconstructionUnplaced != nil {
+						current.Reconstruction.Unplaced = *final.ReconstructionUnplaced
+						each["reconstruction"], err = json.Marshal(current.Reconstruction)
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
 					delete(each, "policy_exclusions")
-					for _, later := range []string{"record", "session", "exchange_id", "index"} {
+					for _, later := range []string{"record", "session", "exchange_id", "index", "reconstruction_unplaced"} {
 						delete(each, later)
 					}
 					each["version"] = json.RawMessage(strconv.Quote(processing.ArtifactVersion1))
