@@ -325,12 +325,20 @@ func parseCgroup(content []byte) string {
 // the process name.
 const statFieldsBeforeState = 2
 
-// statState, statPPID and statStartTime are proc(5)'s one-based field numbers.
+// statState, statPPID, statFlags and statStartTime are proc(5)'s one-based
+// field numbers.
 const (
 	statState     = 3
 	statPPID      = 4
+	statFlags     = 9
 	statStartTime = 22
 )
+
+// taskExiting is PF_EXITING, the bit of the stat flags word for which proc(5)
+// defers to include/linux/sched.h. The kernel sets it in do_exit, which does
+// not return, and never clears it, so a task carrying it never runs its own
+// code again.
+const taskExiting = 0x00000004
 
 // parseStat reads the parent pid, start time and state character from
 // /proc/<pid>/stat, returning the state uninterpreted (TaskState classifies
@@ -362,6 +370,26 @@ func parseStat(stat []byte) (ppid int32, startTime uint64, state byte, err error
 		return 0, 0, state, fmt.Errorf("start time: %w", err)
 	}
 	return int32(ppid64), startTime, state, nil
+}
+
+// parseExiting reads whether a task has begun exiting from the flags word of
+// /proc/<pid>/stat. It is kept apart from parseStat so that a flags word it
+// cannot read fails only the liveness reading, the one reader that needs it.
+func parseExiting(stat []byte) (bool, error) {
+	end := bytes.LastIndexByte(stat, ')')
+	if end < 0 {
+		return false, errors.New("no process name")
+	}
+	fields := strings.Fields(string(stat[end+1:]))
+	at := statFlags - statFieldsBeforeState - 1
+	if len(fields) <= at {
+		return false, fmt.Errorf("%d fields after the process name, want at least %d", len(fields), at+1)
+	}
+	flags, err := strconv.ParseUint(fields[at], 10, 64)
+	if err != nil {
+		return false, fmt.Errorf("flags: %w", err)
+	}
+	return flags&taskExiting != 0, nil
 }
 
 // parseCmdline splits /proc/<pid>/cmdline: argv with a NUL after every entry.

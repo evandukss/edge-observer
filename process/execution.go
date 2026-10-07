@@ -39,17 +39,19 @@ type TaskState byte
 // NoTaskState is a state nobody read, which is not a state the kernel has.
 const NoTaskState TaskState = 0
 
-// nonterminalStates are the state characters of a task that has not exited
-// (proc(5), stat field 3). The list is positive: an unknown character is
-// unrecognised, never alive.
+// nonterminalStates are the state characters of a task that is not yet a
+// zombie (proc(5), stat field 3). The list is positive: an unknown character
+// is unrecognised, never alive. A task inside do_exit keeps R or D until it
+// becomes a zombie, so the character alone does not say the task runs on: the
+// flags word does (taskExiting).
 const nonterminalStates = "RSDTtWKPI"
 
 // terminalStates are the state characters of a task that has exited: a zombie
 // awaiting reaping, and dead in either spelling.
 const terminalStates = "ZXx"
 
-// Nonterminal reports whether this task had not exited when read; no promise
-// about later.
+// Nonterminal reports whether this task was not yet a zombie when read; no
+// promise about later.
 func (s TaskState) Nonterminal() bool {
 	return s != NoTaskState && strings.IndexByte(nonterminalStates, byte(s)) >= 0
 }
@@ -107,7 +109,8 @@ func (g Group) String() string {
 }
 
 // Witness is the task whose own state established that a group is running: a
-// positive observation.
+// positive observation of a nonterminal state on a task that had not begun
+// exiting.
 type Witness struct {
 	// TID is the task's number in the reader's own pid namespace.
 	TID int32
@@ -174,14 +177,15 @@ const (
 	LivenessUnestablished Liveness = iota
 
 	// LivenessRunning is a task of the expected group, authenticated against its
-	// identity, in a state it had not exited from: the leader, or a sibling if the
-	// leader exited.
+	// identity, in a state it had not exited from and not inside do_exit: the
+	// leader, or a sibling if the leader exited or is exiting.
 	LivenessRunning
 
 	// LivenessTerminated is a complete read of the group's task list with every
-	// task exited (a zombie leader with nothing running, or all threads awaiting
-	// a tracer). A list that lost a task mid-read does not support it: that task
-	// could have cloned a sibling this reading never saw.
+	// task exited or inside do_exit (a zombie leader with nothing running, all
+	// threads awaiting a tracer, or a last thread still releasing what it held).
+	// A list that lost a task mid-read does not support it: that task could have
+	// cloned a sibling this reading never saw.
 	LivenessTerminated
 
 	// LivenessGone is a number holding no process, on a procfs that does not hide
@@ -422,6 +426,9 @@ type leaderReading struct {
 	Group Group
 	State TaskState
 
+	// Exiting is whether the leader had begun exiting, whatever its state.
+	Exiting bool
+
 	// Threads is the group's own task count from its status file; zero where the
 	// line is missing, and zero is not a count.
 	Threads int32
@@ -439,6 +446,11 @@ func (e *Execution) identify(held *os.Root, directory string) (leaderReading, bo
 		return leaderReading{}, false
 	}
 	_, startTime, state, err := parseStat(stat)
+	if err != nil {
+		e.failed(fmt.Sprintf("parse %s/stat", directory), err)
+		return leaderReading{}, false
+	}
+	exiting, err := parseExiting(stat)
 	if err != nil {
 		e.failed(fmt.Sprintf("parse %s/stat", directory), err)
 		return leaderReading{}, false
@@ -476,14 +488,22 @@ func (e *Execution) identify(held *os.Root, directory string) (leaderReading, bo
 	return leaderReading{
 		Group:   Group{Namespace: namespace, NamespacePID: groupPID, Start: start},
 		State:   TaskState(state),
+		Exiting: exiting,
 		Threads: parseThreads(status),
 	}, true
 }
 
 // witness looks for one task of the group that had not exited, and reports
 // whether every listed task was read and had exited. The leader is its own
-// witness unless it exited (pthread_exit leaves a zombie while workers serve);
-// then siblings are walked.
+// witness unless it exited (pthread_exit leaves a zombie while workers serve)
+// or is exiting; then siblings are walked.
+//
+// A task that has begun exiting counts as exited whatever its state character.
+// The kernel raises sched_process_exit, where a grant ends with its last
+// thread, inside do_exit after setting PF_EXITING and while that thread still
+// reads R or D, so trusting the character takes an ordinary exit for a process
+// still running. The flag is per task: one thread exiting beside another that
+// is not leaves the group running.
 //
 // An unreadable candidate stops the "all exited" answer: a task listed and
 // gone before being read was alive at listing and could have cloned a sibling
@@ -491,7 +511,7 @@ func (e *Execution) identify(held *os.Root, directory string) (leaderReading, bo
 // listed count is returned for reconciliation in terminated instead.
 func (e *Execution) witness(held *os.Root, directory string, leaderTID int32, leader leaderReading) (found Witness, everyTaskExited bool, listed int) {
 	switch {
-	case leader.State.Nonterminal():
+	case leader.State.Nonterminal() && !leader.Exiting:
 		// The leader is its own witness; its birth is the group's.
 		return Witness{TID: leaderTID, State: leader.State, Start: leader.Group.Start}, false, 0
 	case !leader.State.Recognised():
@@ -565,7 +585,8 @@ const (
 	// taskUnreadable is a candidate whose state could not be interpreted: neither
 	// running nor exited, so the group cannot be called terminated.
 	taskUnreadable taskOutcome = iota
-	// taskExited is a candidate read in a state it had exited from.
+	// taskExited is a candidate read in a state it had exited from, or inside
+	// do_exit.
 	taskExited
 	// taskLost is a candidate listed and gone before read: it exited, but it may
 	// have cloned first, so it unsettles the walk.
@@ -599,12 +620,19 @@ func (e *Execution) candidate(held *os.Root, directory string, tid int32) (Witne
 		e.failed(fmt.Sprintf("parse %s/%s/stat", directory, at), err)
 		return Witness{}, taskUnreadable
 	}
+	exiting, err := parseExiting(stat)
+	if err != nil {
+		e.failed(fmt.Sprintf("parse %s/%s/stat", directory, at), err)
+		return Witness{}, taskUnreadable
+	}
 	switch task := TaskState(state); {
 	case task.Terminal():
 		return Witness{}, taskExited
 	case !task.Recognised():
 		e.failed(fmt.Sprintf("%s/%s/stat reports %s", directory, at, task), nil)
 		return Witness{}, taskUnreadable
+	case exiting:
+		return Witness{}, taskExited
 	default:
 		if !e.authenticate(held, directory, at, tid) {
 			return Witness{}, taskRunning
