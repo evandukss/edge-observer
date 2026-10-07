@@ -322,11 +322,13 @@ func TestACommandThatCannotStartIsRetiredAsStartFailed(t *testing.T) {
 	}
 }
 
-// A connection holding more intake bytes than an extension's waiting-byte
-// bound - half the intake allowance over the extensions - skips it at once as
-// busy rather than waiting on it.
+// A connection whose charge in the shared allowance is over an extension's
+// waiting-byte bound - half the allowance over the extensions - skips it at
+// once as busy rather than waiting on it, and no connection is cut. Its intake
+// bytes alone are under the bound, so only its whole charge - its input, what
+// its reading keeps and the copies of its exchanges - puts it over.
 func TestAConnectionOverTheWaitingByteBoundSkipsAsBusy(t *testing.T) {
-	const limit = 64 << 10
+	const limit = 128 << 10
 	plan := planOf(t, "", entry{name: "bounded", fields: []string{config.FieldRequestLine}})
 	store, err := intake.New(limit)
 	if err != nil {
@@ -338,12 +340,16 @@ func TestAConnectionOverTheWaitingByteBoundSkipsAsBusy(t *testing.T) {
 	if n, err := w.Write(store); err != nil || n != len(w.Entries) {
 		t.Fatalf("wiring, not the property: %d of %d entries reached the intake: %v", n, len(w.Entries), err)
 	}
-	if held := store.Stats().Bytes; held <= extension.WaitingBytes(limit, 1) {
-		t.Fatalf("wiring, not the property: the connection holds %d intake bytes, within the %d byte bound", held,
-			extension.WaitingBytes(limit, 1))
+	if held := store.Stats().Bytes; held >= extension.WaitingBytes(limit, 1) {
+		t.Fatalf("wiring, not the property: the connection holds %d intake bytes, not below the %d byte bound, so "+
+			"a busy skip would not show its whole charge is read", held, extension.WaitingBytes(limit, 1))
 	}
 	s.run.Route()
 	o := s.finish(t)
+	if o.ConnectionsCut != 0 || o.AllowanceCut != 0 {
+		t.Errorf("%d connections were cut, %d of them for the allowance, where the extension should be skipped",
+			o.ConnectionsCut, o.AllowanceCut)
+	}
 	if c := counts(t, o, "bounded"); c.FailedBy[extension.Busy] != 2 || c.Unchanged != 0 {
 		t.Errorf("busy %d of 2, unchanged %d", c.FailedBy[extension.Busy], c.Unchanged)
 	}

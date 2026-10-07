@@ -12,8 +12,10 @@ import (
 // checks an entry against the written message only where its author owns the
 // written component.
 func TestTheReaderChecksIDRangesExtensionOutcomesAndReplacementRemovals(t *testing.T) {
-	_, artifact := readableArtifact(t)
+	_, artifact, retirement := readableLines(t)
 	artifact.Version = processing.ArtifactVersion2
+	// A version 2 line carried its connection's final record.
+	artifact.Connection = retirement.Connection
 	artifact.ExchangeIDs = &processing.IDRange{First: "1", Last: "1", Count: "1"}
 	line, err := json.Marshal(artifact)
 	if err != nil {
@@ -80,6 +82,14 @@ func TestTheReaderChecksIDRangesExtensionOutcomesAndReplacementRemovals(t *testi
 			a["extension_outcomes"] = []any{map[string]any{"exchange": 0, "extension": "a", "outcome": "failed",
 				"reason": "it said no"}}
 		}, false},
+		{"a call withdrawn by a capture loss", func(a map[string]any) {
+			a["extension_outcomes"] = []any{map[string]any{"exchange": 0, "extension": "a", "outcome": "failed",
+				"reason": "withdrawn"}}
+		}, true},
+		{"a failure for want of room to keep a replacement", func(a map[string]any) {
+			a["extension_outcomes"] = []any{map[string]any{"exchange": 0, "extension": "a", "outcome": "failed",
+				"reason": "no_room"}}
+		}, true},
 		{"an unchanged outcome with a reason", func(a map[string]any) {
 			a["extension_outcomes"] = []any{map[string]any{"exchange": 0, "extension": "a", "outcome": "unchanged",
 				"reason": "declined"}}

@@ -173,9 +173,7 @@ func TestEverySlotReturnsThroughThePathItsInputTook(t *testing.T) {
 	p.closed(1)
 	p.empty(5)
 	p.closed(99)
-	for i := 0; i < 3; i++ {
-		p.exchange(2, fmt.Sprintf("/cut-%d", i))
-	}
+	unanswered(p, 2, 6)
 	p.closed(2)
 	p.transfer(3, fragment.Sent, "GET /pending HTTP/1.1\r\n\r\n")
 	o := p.drain()
@@ -352,8 +350,10 @@ func TestNewConnectionsChurnedAtAConstantPopulationLeaveTheBatchesAllocationBoun
 func TestAConnectionPastTheBoundIsCutAndTheSessionGoesOn(t *testing.T) {
 	out := &outputLog{}
 	p := newPipeline(t, 256, 8, out)
-	for i := 0; i < 10; i++ {
-		p.exchange(1, fmt.Sprintf("/held-%d", i))
+	p.transfer(1, fragment.Sent, "GET /held-0 HTTP/1.1\r\n\r\n")
+	p.transfer(1, fragment.Received, "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n")
+	for i := 1; i < 19; i++ {
+		p.transfer(1, fragment.Sent, fmt.Sprintf("GET /held-%d HTTP/1.1\r\n\r\n", i))
 	}
 	p.exchange(7, "/beside")
 	p.closed(7)

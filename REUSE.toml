@@ -1,8 +1,9 @@
 version = 1
 
 # Every file is the project's own and under the Mozilla Public License 2.0,
-# unless the file states otherwise itself, as the three BPF sources do: they
-# are GPL-2.0-only, which is the exception this default is read against.
+# unless the file states otherwise itself, as the BPF sources do -
+# bpf/sslfull.bpf.c, bpf/sslmeta.bpf.c, bpf/readbarrier.bpf.c and bpf/ssl.bpf.h:
+# they are GPL-2.0-only, which is the exception this default is read against.
 [[annotations]]
 path = "**"
 precedence = "closest"

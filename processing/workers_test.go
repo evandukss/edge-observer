@@ -499,6 +499,9 @@ func TestALateEntryHoldsNoLease(t *testing.T) {
 			if step > 1 {
 				f := *late.Entries[0].Fragment
 				f.Connection = 3
+				identity := *f.Evidence.Identity
+				identity.Connection = f.Connection
+				f.Evidence.Identity = &identity
 				late.Entries = append(late.Entries, workload.Entry{Fragment: &f})
 			}
 			if n, err := late.Write(store); err != nil || n != len(late.Entries) {
@@ -540,6 +543,9 @@ func standalone(t *testing.T, plan *config.ProcessingPlan, output processing.Out
 func renumber(e workload.Entry, step uint64) {
 	if f := e.Fragment; f != nil {
 		f.Connection = fragment.ConnectionID(uint64(f.Connection) * step)
+		identity := *f.Evidence.Identity
+		identity.Connection = f.Connection
+		f.Evidence.Identity = &identity
 		return
 	}
 	r := e.Connection

@@ -12,6 +12,10 @@
 // still holds (probe.Settler); otherwise it is explicitly unsettled. A loss the
 // producer could place in no occupancy costs first-call occupancies begun after
 // that loss their origin. An observed birth establishes a fresh origin.
+//
+// Every record carries what capture holds for its connection as it places that
+// record (fragment.Evidence), taken under the same lock that places it, so a
+// consumer can certify a prefix of a connection that is still open.
 package capture
 
 import (
@@ -177,6 +181,17 @@ type stream struct {
 	// unlocated is the producer's count of losses no occupancy could take, as of
 	// this stream's last observation.
 	unlocated uint64
+
+	// identity is the connection's stable facts, shared by every evidence its
+	// records carry; origin is what the producer's number one is.
+	identity *fragment.Identity
+	origin   fragment.Origin
+
+	// first is the first producer number seen in each direction, and resolved the
+	// number through which every number from one arrived in order, as a fragment
+	// or as a transfer that moved no bytes.
+	first    map[fragment.Direction]uint64
+	resolved map[fragment.Direction]uint64
 }
 
 // binding is what a direction's transfers established about their socket.
@@ -361,12 +376,13 @@ func (s *Session) Transfer(t probe.Transfer) {
 	}
 
 	found := s.follow(t)
-	s.number(found, t)
+	next := s.number(found, t)
 	if t.Length == 0 {
 		// Numbered and moved nothing: no fragment, and the next one says so, so
 		// its number is not read as following a transfer never delivered.
 		s.stats.Empty++
 		found.empties[t.Direction]++
+		found.resolve(t.Direction, t.Sequence.Number, next)
 		s.mutex.Unlock()
 		return
 	}
@@ -400,6 +416,10 @@ func (s *Session) Transfer(t probe.Transfer) {
 	// Advance by what the call transferred, not what was kept, so a truncated
 	// payload leaves a visible hole.
 	found.offsets[t.Direction] += uint64(t.Length)
+	found.resolve(t.Direction, t.Sequence.Number, next)
+	// Taken before the sink sees the record: a cut the sink's refusal causes is
+	// in the next record's evidence, never in this one's.
+	record.Evidence = found.evidence()
 	s.mutex.Unlock()
 
 	err := s.sink.Write(record)
@@ -437,6 +457,9 @@ func (s *Session) Refused(t probe.Transfer) {
 	}
 	found.loss.Stop("input_limit")
 	s.cutLocked(found, t.Direction, found.offsets[t.Direction], connection.ObservationLost, 0, "the held-event bound refused a transfer")
+	if found.first[t.Direction] == 0 {
+		found.first[t.Direction] = t.Sequence.Number
+	}
 	last := found.numbered[t.Direction]
 	if t.Sequence.Number <= last {
 		return
@@ -469,8 +492,9 @@ func (s *Session) Refused(t probe.Transfer) {
 // bpf/ssl.bpf.h). A number past the next is that many transfers lost here,
 // and only here. A number at or behind one already seen, or a direction the
 // producer saw two calls overlap in, is the supported use broken: the order of
-// its bytes is not established from there.
-func (s *Session) number(found *stream, t probe.Transfer) {
+// its bytes is not established from there. It reports whether the number is
+// the one after the last seen, which is what lets the transfer resolve it.
+func (s *Session) number(found *stream, t probe.Transfer) bool {
 	direction := t.Direction
 	at := found.offsets[direction]
 	sequence := t.Sequence
@@ -484,15 +508,19 @@ func (s *Session) number(found *stream, t probe.Transfer) {
 			s.cutLocked(found, each, found.offsets[each], connection.SequenceUnavailable, 0,
 				"the producer kept no sequence for the connection's handle")
 		}
-		return
+		return false
 	}
 	if sequence.Overlapped {
 		s.cutLocked(found, direction, at, connection.OperationsOverlapped, 0,
 			"two calls in the direction overlapped, so whether any of their bytes is missing is unknown")
 	}
+	if found.first[direction] == 0 {
+		found.first[direction] = sequence.Number
+	}
 	last := found.numbered[direction]
+	next := sequence.Number == last+1
 	switch {
-	case sequence.Number == last+1:
+	case next:
 	case sequence.Number > last+1:
 		missing := int64(sequence.Number - last - 1)
 		s.stats.Lost += missing
@@ -507,6 +535,46 @@ func (s *Session) number(found *stream, t probe.Transfer) {
 		// only the tail drops this has not already located.
 		found.droppedBelow[direction] = sequence.Dropped
 	}
+	return next
+}
+
+// resolve advances a direction's run of numbers that all arrived in order, by a
+// transfer that arrived as a fragment or moved no bytes. A number that came next
+// after the run's end extends it; anything else ends it for good, since the
+// number that broke it never resolves. The caller holds the lock.
+func (t *stream) resolve(direction fragment.Direction, number uint64, next bool) {
+	if next && number != 0 && t.resolved[direction] == number-1 {
+		t.resolved[direction] = number
+	}
+}
+
+// evidence is what this stream has established as of the record just placed.
+// The caller holds the lock.
+func (t *stream) evidence() fragment.Evidence {
+	return fragment.Evidence{
+		Identity:  t.identity,
+		Occupancy: t.occupancy,
+		Origin:    t.origin,
+		Through:   t.sequence,
+		Sent:      t.reached(fragment.Sent),
+		Received:  t.reached(fragment.Received),
+	}
+}
+
+// reached is one direction's part of the evidence. The caller holds the lock.
+func (t *stream) reached(direction fragment.Direction) fragment.DirectionEvidence {
+	one := fragment.DirectionEvidence{
+		Limit:    t.offsets[direction],
+		First:    t.first[direction],
+		Numbered: t.numbered[direction],
+		Resolved: t.resolved[direction],
+		Empties:  t.empties[direction],
+	}
+	if held, cut := t.placement[direction]; cut {
+		one.Cut, one.From = true, held.from
+		one.Lost, one.LostUncounted = uint64(held.lost), held.uncounted != ""
+	}
+	return one
 }
 
 // unlocatedLocked keeps the loss count. A loss with no occupancy cannot
@@ -578,6 +646,18 @@ func (s *Session) follow(t probe.Transfer) *stream {
 		begun = connection.BindingUnobservable
 	}
 
+	// What the producer's number one is. A stream with no occupancy has no
+	// numbers to count from.
+	origin := fragment.OriginFirstRecorded
+	switch {
+	case t.Sequence.Occupancy == 0:
+		origin = fragment.OriginUnestablished
+	case t.Sequence.Born:
+		origin = fragment.OriginBirth
+	case t.Sequence.BeginUnlocated > 0:
+		origin = fragment.OriginUnestablished
+	}
+
 	s.next++
 	found = &stream{
 		lifetime:     !s.told() || s.observing.Lifecycle,
@@ -597,6 +677,20 @@ func (s *Session) follow(t probe.Transfer) *stream {
 		empties:      make(map[fragment.Direction]uint64, 2),
 		droppedBelow: make(map[fragment.Direction]uint64, 2),
 		unlocated:    t.Sequence.Unlocated,
+		identity: &fragment.Identity{
+			Connection:    s.next,
+			Process:       t.Process,
+			Instance:      t.Instance,
+			Address:       t.Endpoint,
+			Generation:    uint64(s.next),
+			NetworkDevice: t.Network.Device,
+			NetworkInode:  t.Network.Inode,
+			FirstSeen:     t.At,
+			Opened:        t.Ends.OpenedAt,
+		},
+		origin:   origin,
+		first:    make(map[fragment.Direction]uint64, 2),
+		resolved: make(map[fragment.Direction]uint64, 2),
 	}
 	if t.Sequence.BeginUnlocated > 0 && t.Sequence.Occupancy != 0 && !t.Sequence.Born {
 		// The conservative rule for a stream begun after a loss nothing located:

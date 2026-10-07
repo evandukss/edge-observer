@@ -179,6 +179,9 @@ func independentRunQueueChurn(t *testing.T, sparse bool) {
 			for _, e := range entries {
 				if e.Fragment != nil {
 					e.Fragment.Connection = fragment.ConnectionID(3*i + 7)
+					identity := *e.Fragment.Evidence.Identity
+					identity.Connection = e.Fragment.Connection
+					e.Fragment.Evidence.Identity = &identity
 				}
 				if e.Connection != nil {
 					e.Connection.ID = fragment.ConnectionID(3*i + 7)

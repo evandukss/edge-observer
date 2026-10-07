@@ -163,8 +163,14 @@ func TestT18ASessionThatDiesLeavesNoCompleteAccount(t *testing.T) {
 	port := t18Serving(t)
 	for _, death := range []string{"stopped", "killed after an approved write", "killed by memory pressure"} {
 		t.Run(death, func(t *testing.T) {
-			approved := speaking(t, port)
-			flooding := speaking(t, port)
+			var peer *unfinishedPeer
+			loadPort := port
+			if death == "killed by memory pressure" {
+				peer = unfinishedServing(t)
+				loadPort = peer.port
+			}
+			approved := speaking(t, loadPort)
+			flooding := speaking(t, loadPort)
 			c := configuring(t, target("clients", approved.process))
 			t18Edit(t, c, t18Removing)
 			s := t18Started(t, binary, c)
@@ -191,6 +197,13 @@ func TestT18ASessionThatDiesLeavesNoCompleteAccount(t *testing.T) {
 				}
 				s.awaited(t, 30*time.Second)
 			case "killed by memory pressure":
+				before := t18Until(t, binary, c, 10*time.Second, "approved traffic was not captured", func(a account.Account) bool {
+					return a.Seen != nil && a.Seen.Records > 0
+				}).Seen.Records
+				peer.begin(t, flooding, "/?asked=t18-pressure", "Authorization: Bearer t18-death-secret")
+				t18Until(t, binary, c, 10*time.Second, "the unfinished request was not captured", func(a account.Account) bool {
+					return a.Seen != nil && a.Seen.Records > before
+				})
 				envelope := t18CgroupOf(t, int32(s.pid()))
 				content, err := os.ReadFile(filepath.Join(envelope, "memory.current"))
 				if err != nil {
@@ -205,10 +218,11 @@ func TestT18ASessionThatDiesLeavesNoCompleteAccount(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(envelope, "memory.max"), []byte(limit), 0o644); err != nil {
 					t.Fatalf("lower the envelope to %s: %v", limit, err)
 				}
-				for i := 0; i < 400 && !s.ended(); i++ {
-					if _, err := t18Exchange(flooding, fmt.Sprintf("/mega?asked=t18-pressure-%d", i)); err != nil {
-						t.Fatal(err)
-					}
+				// Source and parser own the unfinished body's bytes together. The
+				// envelope allows only eight additional mebibytes; traffic offers
+				// up to thirty-two without completing the declared gibibyte body.
+				for i := 0; i < (32<<20)/unfinishedChunk && !s.ended(); i++ {
+					peer.chunk(t, flooding, unfinishedChunk)
 				}
 				s.awaited(t, 30*time.Second)
 				if after := t18Event(t, envelope, "oom_kill"); after <= killed {

@@ -59,21 +59,18 @@ including OpenSSL ones.
 ## A protocol or body format
 
 HTTP/1.1 is parsed in `http1/` and JSON bodies are described by their shape in `jsonshape/`.
-`reconstruct/reconstruct.go` pairs a connection's two directions into request and response
-exchanges.
+While capturing, `reconstruct/pairing.go` pairs a connection's two directions into request and
+response exchanges as they arrive: `processing/dispatch.go` feeds each connection to its `Pairing`
+and writes the exchanges it hands over. `reconstruct.Run`, in `reconstruct/reconstruct.go`, does the
+same for a connection already whole; `internal/published` reads a legacy spool's fragments back with
+it.
 
-There is no interface for a second protocol. `reconstruct/reconstruct.go` calls the HTTP/1.1 parser
-directly, its `Message` type is HTTP/1.1's, it decides which side of a connection a process was on by
-looking for an HTTP method, and it hands every body to the JSON reader. A second protocol changes that
-file, and `contract/record/project.go`, which turns a reconstruction into the published record, reads
-HTTP fields from it. The record types the configuration can route (`Reconstruction` in
+There is no interface for a second protocol. Both files call the HTTP/1.1 parser directly, their
+`Message` type is HTTP/1.1's, they decide which side of a connection a process was on by looking for
+an HTTP method, and they hand every body to the JSON reader. A second protocol changes both, and
+`contract/record/project.go`, which turns a reconstruction into the published record, reads HTTP
+fields from it. The record types the configuration can route (`Reconstruction` in
 `policy/inventory.go`) name HTTP fields too.
-
-The legacy spool reader reconstructs when a finished capture is read back: a
-capture yields fragments and connection records and holds no reconstruction state, and `inspect`,
-given a session's directory, runs `reconstruct.Run` over the fragments beside the account
-(`internal/published/published.go`, `Reconstruct`) and prints what `reconstruct` renders. A second
-protocol is reached from that read.
 
 ## An output
 

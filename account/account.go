@@ -301,8 +301,8 @@ func ExtensionsOf(configured []config.Extension) []Extension {
 // protocol (contract/extension/PROTOCOL.md).
 var (
 	ExtensionFailureReasons = []string{"timeout", "crash", "protocol", "oversized_frame", "unknown_id", "flood",
-		"malformed", "not_given", "read_only", "removed_content", "excluded", "declined", "unavailable", "busy",
-		"too_large"}
+		"malformed", "not_given", "read_only", "removed_content", "excluded", "declined", "no_room", "unavailable",
+		"busy", "too_large", "withdrawn"}
 	ExtensionRetirementCauses = []string{"start_failed", "startup_timeout", "timeout", "crash", "protocol",
 		"oversized_frame", "unknown_id", "flood"}
 	DerivedRefusalReasons = []string{"malformed", "unknown_source", "rate", "queue_full", "stopped",

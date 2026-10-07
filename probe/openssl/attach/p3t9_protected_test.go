@@ -384,10 +384,25 @@ func (f *p3t9ProtectedCapture) t20iPersisted(pipeline string) int {
 	return count
 }
 
-func p3t9Useful(t *testing.T, a processing.Artifact, target, ending string) {
+func p3t9Useful(t *testing.T, a processing.Artifact, raw []byte, target, ending string) {
 	t.Helper()
-	if a.Connection.Ending.How != ending || len(a.Reconstruction.Exchanges) != 1 {
-		t.Fatalf("wrong batch/exchange population: %+v", a)
+	finals, gotEnding := 0, ""
+	for _, line := range bytes.Split(bytes.TrimSpace(raw), []byte{'\n'}) {
+		var final processing.Artifact
+		if err := json.Unmarshal(line, &final); err != nil {
+			t.Fatalf("wiring, not the property: retirement line does not decode: %v", err)
+		}
+		if final.Record == processing.ArtifactConnection && final.Session == a.Session &&
+			final.Connection.ID == a.Connection.ID && final.Connection.Process == a.Connection.Process {
+			finals++
+			gotEnding = final.Connection.Ending.How
+		}
+	}
+	if finals != 1 {
+		t.Fatalf("wiring, not the property: exchange joined %d connection lines, want one", finals)
+	}
+	if gotEnding != ending || len(a.Reconstruction.Exchanges) != 1 {
+		t.Fatalf("wrong batch/exchange population: ending %q, want %q; exchange %+v", gotEnding, ending, a)
 	}
 	x := a.Reconstruction.Exchanges[0]
 	if !x.Complete || x.Request.Message == nil || x.Response.Message == nil {
@@ -444,8 +459,8 @@ func TestP3T9ProtectedWitnessAndMeasuredOutput(t *testing.T) {
 					t.Fatalf("measured closed control did not produce useful output: exchanges records persisted %d, authorized %d, %+v",
 						f.t20iPersisted(config.ExchangesPipeline), f.boundary.t20iHanded(config.ExchangesPipeline), o)
 				}
-				a, _ := f.artifacts(1)
-				p3t9Useful(t, a[0], "/witness", "handle_released")
+				a, raw := f.artifacts(1)
+				p3t9Useful(t, a[0], raw, "/witness", "handle_released")
 			} else {
 				p3t9Reason(t, f.gate, 2, probe.GateUnknownLength)
 				if f.capture.Stats().Records != 1 || f.capture.Stats().Closed != 0 {
@@ -467,54 +482,64 @@ func TestP3T9ProtectedWitnessAndMeasuredOutput(t *testing.T) {
 }
 
 func TestP3T9ProtectedDrainedLimitAndPendingFinish(t *testing.T) {
-	for _, count := range []int{3, 4, 5} {
-		t.Run([]string{"N_minus_1", "N", "N_plus_1"}[count-3], func(t *testing.T) {
-			// Isolate the shared reservation bound from the independent
-			// per-connection cut. All admitted fragments remain with the worker.
-			f := p3t9ProtectedWithIntakeLimit(t, 4, 1<<20, nil, 8)
-			parts := []string{"GET /limit HTTP/1.1\r\nHost: test\r\n", "X-public: benign\r\n", "Authorization: " + p3t9ProtectedMarker + "\r\n\r\n"}
-			if count == 3 {
-				parts = []string{parts[0] + parts[1], parts[2]}
+	const allowance = 4
+	for _, count := range []int{allowance - 1, allowance, allowance + 1} {
+		t.Run([]string{"N_minus_1", "N", "N_plus_1"}[count-allowance+1], func(t *testing.T) {
+			// Unanswered requests occupy the shared event allowance without
+			// reaching the separate per-connection ceiling of eight messages.
+			f := p3t9ProtectedWithIntakeLimit(t, allowance, 1<<20, nil, 8)
+			admitted := min(count, allowance)
+			for i := range admitted {
+				f.send(9, fragment.Sent, fmt.Sprintf("GET /limit-%d HTTP/1.1\r\nHost: test\r\nX-public: benign\r\nAuthorization: %s\r\n\r\n", i, p3t9ProtectedMarker), true, false)
 			}
-			for _, part := range parts {
-				f.send(9, fragment.Sent, part, true, false)
+			if f.capture.Stats().Records != int64(admitted) || f.store.Stats().Fragments != int64(admitted) {
+				t.Fatal("wiring, not the property: unanswered requests did not reach capture and intake")
 			}
-			f.send(9, fragment.Received, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK", true, false)
-			if o := f.drain(); o.Pending != 1 || o.ConnectionsCut != 0 || f.t20iPersisted(config.ExchangesPipeline) != 0 {
-				t.Fatalf("complete-but-live batch was not pending without a cut: %+v", o)
+			if o := f.drain(); o.ConnectionsCut != 0 {
+				t.Fatalf("shared allowance fixture reached the per-connection cut: %+v", o)
 			}
-			if f.gate.Snapshot().Held != uint64(min(count, 4)) {
-				t.Fatalf("wiring, not the property: worker did not retain the input reservations: %+v", f.gate.Snapshot())
-			}
-			f.artifacts(0)
-			if count == 5 {
+			if count > allowance {
 				f.send(99, fragment.Sent, "tail", true, false)
 			}
-			// The event past the bound is refused and counted, and costs only its own
-			// connection: the gate gives no reason and requests no withdrawal.
-			charged := uint64(min(count, 4))
-			p3t9Reason(t, f.gate, charged, "")
-			if refused := f.gate.Snapshot().InputRefused; refused != uint64(count)-charged {
-				t.Fatalf("%d events past the bound were counted refused, want %d", refused, uint64(count)-charged)
+			// Refusal costs only the extra event's connection; it neither
+			// invalidates the session nor changes the admitted population.
+			p3t9Reason(t, f.gate, uint64(admitted), "")
+			if refused := f.gate.Snapshot().InputRefused; refused != uint64(count-admitted) {
+				t.Fatalf("%d events past the bound were counted refused, want %d", refused, count-admitted)
 			}
-			if f.capture.Stats().Records != int64(min(count, 4)) || f.capture.Stats().Closed != 0 {
-				t.Fatal("limit fixture changed the complete live exchange population")
+			if f.capture.Stats().Records != int64(admitted) || f.capture.Stats().Closed != 0 {
+				t.Fatal("limit fixture changed the admitted open connection's population")
 			}
-			if count == 5 {
-				t.Log("input_limit_reached_with_real_worker_pending_complete_exchange")
+			if count > allowance {
+				t.Log("input_limit_reached_with_real_worker_pending_requests")
 			}
 			o := f.finish()
-			if o.GateReason != "" {
-				t.Fatalf("wrong final gate reason: %+v", o)
+			if o.GateReason != "" || o.ConnectionsCut != 0 {
+				t.Fatalf("shared refusal invalidated the session or cut another connection: %+v", o)
 			}
-			// The pending exchange belongs to another connection than the refused
-			// event, so it finalizes at every count.
-			if f.boundary.t20iHanded(config.ExchangesPipeline) != 1 || f.t20iPersisted(config.ExchangesPipeline) != 1 {
-				t.Fatalf("the pending exchange did not finalize: exchanges records authorized %d, persisted %d, %+v",
-					f.boundary.t20iHanded(config.ExchangesPipeline), f.t20iPersisted(config.ExchangesPipeline), o)
+			_, raw := f.artifacts(0)
+			finals := 0
+			for _, line := range bytes.Split(bytes.TrimSpace(raw), []byte{'\n'}) {
+				var a processing.Artifact
+				if err := json.Unmarshal(line, &a); err != nil {
+					t.Fatal(err)
+				}
+				if a.Record != processing.ArtifactConnection || a.Connection.Handle.Address != "9" {
+					continue
+				}
+				finals++
+				if a.Connection.Ending.How != "still_open" || a.Connection.Fragments.State != "determined" ||
+					a.Connection.Fragments.Value != fmt.Sprint(admitted) {
+					t.Fatalf("unaffected connection lost its retirement or admitted fragments: %+v", a.Connection)
+				}
+				if len(a.Connection.Placements) != 1 || a.Connection.Placements[0].Direction != "sent" ||
+					a.Connection.Placements[0].Positions != "established" {
+					t.Fatalf("another connection's refused event damaged admitted placement: %+v", a.Connection.Placements)
+				}
 			}
-			a, _ := f.artifacts(1)
-			p3t9Useful(t, a[0], "/limit", "still_open")
+			if finals != 1 {
+				t.Fatalf("unaffected connection produced %d final lines, want one", finals)
+			}
 		})
 	}
 }
@@ -564,7 +589,7 @@ func TestP3T9ProtectedWorkerHeldAuthorizationKeepsPriorResult(t *testing.T) {
 							f.t20iPersisted(config.ExchangesPipeline), f.boundary.t20iHanded(config.ExchangesPipeline), o)
 					}
 					prior, priorBytes := f.artifacts(1)
-					p3t9Useful(t, prior[0], "/prior", "handle_released")
+					p3t9Useful(t, prior[0], priorBytes, "/prior", "handle_released")
 					f.exchange(10, "/candidate", true)
 					if f.capture.Stats().Closed != 2 {
 						t.Fatal("second real closed batch missing")
@@ -707,12 +732,12 @@ func TestP3T9ProtectedWorkerHeldAuthorizationKeepsPriorResult(t *testing.T) {
 					if !bytes.HasPrefix(afterBytes, priorBytes) || (inject && !bytes.Equal(afterBytes, priorBytes)) {
 						t.Fatal("later fault recalled or altered the earlier approved result")
 					}
-					p3t9Useful(t, a[0], "/prior", "handle_released")
+					p3t9Useful(t, a[0], afterBytes, "/prior", "handle_released")
 					if !inject {
 						if a[0].Connection.ID == a[1].Connection.ID {
 							t.Fatal("prior and candidate were not independent batches")
 						}
-						p3t9Useful(t, a[1], "/candidate", "handle_released")
+						p3t9Useful(t, a[1], afterBytes, "/candidate", "handle_released")
 					}
 				})
 			}

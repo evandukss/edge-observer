@@ -259,9 +259,12 @@ permission does not assert write completion or durable flush. For each batch's p
 the affected pipeline's routes for a pipeline refusal. This is not a count of unique routes, batches or exchanges; a route can write a useful
 prefix and also count a refused suffix. `output_failures` counts failed approved writes.
 `connections_cut` counts connections, and `input_cut` input entries, one per captured transfer: a
-connection holding as much input as one connection may while it waits to be processed is cut there.
-What it held is discarded, what arrives for it afterwards is discarded on arrival, both are counted in
-`input_cut`, and its connection line's truncation stops at its first byte with reason `connection_cut`.
+connection is cut where it could not hold more unreleased work, for either of two causes - it reached
+its own bound on what one connection may hold unreleased, or the session's shared allowance for held
+work (the intake's, `limits.events` events of the largest payload) was full and refused the growth its
+processing needed. What it held unreleased is discarded, what arrives for it afterwards is discarded on
+arrival, both are counted in `input_cut`, the exchanges it released before the cut stay, and its
+connection line's truncation stops at its first unreleased byte with reason `connection_cut`.
 A cut is neither a processing failure nor a capture loss, and the session goes on. An internal
 artifact-serialization defect instead terminates processing and names the binary defect in the seal
 reason; it does not increment `processing_failures` or `output_failures`. Neither of those is policy
@@ -272,7 +275,7 @@ the capture - `unknown_length` and `unknown_kind` - and each remains distinguish
 The ordering and capture refusal counts report them separately; they do not set `gate_reason` or
 increment `connections_cut` and `input_cut`. Discarded input is released while its connection waits
 for retirement; the metadata line reports the loss with a `positions_unknown` truncation. A connection
-already cut at its input bound keeps its one `connection_cut` line even if it later loses input.
+already cut keeps its one `connection_cut` line even if it later loses input.
 The capture refusal `a decoded event could not record its withdrawn admission generation` counts
 an event's inventory recording only when its emitted generation is no longer granted and its
 process is established as still running. Ordinary process exit is not this refusal. The event
@@ -344,7 +347,7 @@ error - is never carried here. Each entry:
 | `changed`, `unchanged` | exchanges its accepted answer changed, or left unchanged |
 | `failed` | exchanges it failed or skipped, for any reason |
 | `pending` | exchanges outstanding at it when the account was taken |
-| `failed_by` | `{reason: count}` with every reason of the protocol, each present: `timeout`, `crash`, `protocol`, `oversized_frame`, `unknown_id`, `flood`, `malformed`, `not_given`, `read_only`, `removed_content`, `excluded`, `declined`, `unavailable`, `busy`, `too_large` |
+| `failed_by` | `{reason: count}` with every reason of the protocol, each present: `timeout`, `crash`, `protocol`, `oversized_frame`, `unknown_id`, `flood`, `malformed`, `not_given`, `read_only`, `removed_content`, `excluded`, `declined`, `no_room`, `unavailable`, `busy`, `too_large`, `withdrawn` |
 | `retired_by` | `{cause: count}`, generations retired, with every cause of the protocol, each present: `start_failed`, `startup_timeout`, `timeout`, `crash`, `protocol`, `oversized_frame`, `unknown_id`, `flood` |
 | `restarts` | generations started after a retirement |
 | `state_resets` | generations that answered `ready` after an earlier one had: each one started with nothing the earlier one held |

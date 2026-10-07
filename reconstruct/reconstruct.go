@@ -65,6 +65,10 @@ type Exchange struct {
 	Response *Message
 	// Complete reports that both sides are here and neither is missing a byte.
 	Complete bool
+	// Charge is what a Pairing retained for this exchange and hands over with
+	// it. Run retains nothing on a Reserver's account, so its exchanges carry
+	// none.
+	Charge http1.Charge
 }
 
 // Connection is one TLS connection of one process.
@@ -204,7 +208,13 @@ func read(m http1.Message, limits jsonshape.Limits) *Message {
 // roleOf reads which side the process was on from what each direction begins
 // with. Where they do not say, it says so rather than choosing.
 func roleOf(sent, received stream.Stream) Role {
-	switch outbound, inbound := opening(sent), opening(received); {
+	return roleFrom(opening(sent), opening(received))
+}
+
+// roleFrom is the side what the process wrote and what it read begin with
+// decide.
+func roleFrom(outbound, inbound opener) Role {
+	switch {
 	case outbound == opensResponse && inbound != opensResponse,
 		outbound == opensNothing && inbound == opensRequest:
 		return Server
@@ -245,14 +255,20 @@ func opening(s stream.Stream) opener {
 // isMethod reports whether these bytes are a token.
 func isMethod(b []byte) bool {
 	for _, c := range b {
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0:
-		default:
+		if !isTokenByte(c) {
 			return false
 		}
 	}
 	return true
+}
+
+func isTokenByte(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	default:
+		return strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0
+	}
 }
 
 // String renders the reconstruction for a reader: start lines, field names,

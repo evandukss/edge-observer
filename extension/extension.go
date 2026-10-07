@@ -63,10 +63,10 @@ const (
 	ReasonBytes = 256
 )
 
-// WaitingBytes is waiting_bytes for one of extensions extensions over an
-// intake whose allowance is intakeBytes: the intake bytes connections waiting
-// on it may hold, so that all of them together hold at most half the
-// allowance.
+// WaitingBytes is waiting_bytes for one of extensions extensions over a shared
+// allowance of intakeBytes: the charge the connections waiting on it may hold
+// in that allowance, each read when its call is made (Call.Bytes), so that all
+// of them together are admitted within half the allowance.
 func WaitingBytes(intakeBytes int64, extensions int) int64 {
 	if extensions <= 0 || intakeBytes <= 0 {
 		return 0
@@ -103,9 +103,11 @@ const (
 	RemovedContent = "removed_content"
 	Excluded       = "excluded"
 	Declined       = "declined"
+	NoRoom         = "no_room"
 	Unavailable    = "unavailable"
 	Busy           = "busy"
 	TooLarge       = "too_large"
+	Withdrawn      = "withdrawn"
 )
 
 // The reasons a derived record is refused, from the protocol.

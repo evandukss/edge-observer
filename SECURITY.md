@@ -14,15 +14,15 @@ A report the maintainer can act on says:
 
 ## Supported versions
 
-No release has been published. Fixes are made on `main`, and the latest commit on `main` is the only
-supported version.
+One pre-release, `v0.1.0-rc1`, has been published, and there is no stable release. Fixes are made on
+`main`, and the latest commit on `main` is the only supported version.
 
 ## What counts as a vulnerability
 
 The observer reads the plaintext of other processes, so its limits are the security boundary. A way to
 make it do any of the following is a vulnerability:
 
-- observe a process that no target in its configuration selects, or one that `exclude` names;
+- observe a process that no target in its configuration selects, or one that `ignore` names;
 - read the memory of a process no target approves, or read an approved process's memory beyond the
   buffers and byte counts handed to the TLS library calls it attaches to;
 - write to any process's memory;

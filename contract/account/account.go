@@ -568,12 +568,14 @@ type ExtensionAccount struct {
 // route whose suffix incurs a processing failure. Authorized and Written count
 // permitted and completed route records separately; OutputFailures counts
 // failed approved writes. ConnectionsCut counts connections cut because they
-// held as much input as one connection may while waiting to be processed, and
-// InputCut the input entries, one per captured transfer, discarded for them; a
-// cut is neither a processing failure nor a capture loss. Internal
-// serialization defects use the terminal error/seal reason, not these
-// counters. A gate reason is not an output failure, policy suppression or a
-// capture-loss count. No whole-session terminal-state claim is made here.
+// could not hold more unreleased work, for either of two causes: at their own
+// bound on what one connection may hold unreleased, or with the session's
+// shared allowance for held work full. InputCut counts the input entries, one
+// per captured transfer, discarded for them; a cut is neither a processing
+// failure nor a capture loss. Internal serialization defects use the terminal
+// error/seal reason, not these counters. A gate reason is not an output
+// failure, policy suppression or a capture-loss count. No whole-session
+// terminal-state claim is made here.
 type ProcessingAggregate struct {
 	Delivery           *SinkDelivery `json:"delivery,omitempty" account:"optional"`
 	GateReason         string        `json:"gate_reason"`

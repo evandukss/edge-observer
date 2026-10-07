@@ -97,30 +97,40 @@ the reset. **Exchanges that arrive before an extension has said it is ready - at
 and after each restart - and while it is down skip it**, counted as `unavailable`: nothing waits for an
 extension to start.
 
-**An extension takes at most 4096 exchanges at once, one per connection, and a burst beyond that skips
-it**, counted as `busy`. **When a session ends, every connection still open is sent to your extensions at
-once**, so a session that ends with more open connections than that is such a burst.
+**An extension takes at most 4096 exchanges at once, one per connection, and the connections waiting on
+it may hold at most its share of half the observer's allowance for held work; past either, an exchange
+skips it**, counted as `busy`, and goes on to be written. So an extension slower than its load costs
+extension processing before it costs any connection. **When a session ends, what every connection still
+open holds is released at once**, so a session that ends with more open connections than that is such a
+burst.
 
 ## The delay it adds
 
-**Exchanges reach an extension when their connection ends** - its handle released or its socket closed -
-or when the session ends, the same moment they reach the output. A keep-alive connection is seen when it
-closes. Each exchange waits at most `timeout_ms` at one extension, including the time to queue and write
-it, and at most the sum of the `timeout_ms` of all your extensions in total. Earlier exchanges of its
-connection, processing and output can add to that. While one connection waits on an extension, other
-connections are processed and written; **the application you watch never waits on an extension.**
+**Exchanges reach an extension as they are released, while their connection is open**: once both its
+messages are read whole and the exchange before it on its connection is done, and at the latest when the
+connection or the session ends. **An exchange's line is written once every extension has answered or
+skipped it.** An exchange the output will not write - incomplete, one-sided, or unsupported, such as a
+compressed body - is sent marked excluded as soon as that is decidable, and then let go. Each exchange
+waits at most `timeout_ms` at one extension, including the time to queue and write it, and at most the
+sum of the `timeout_ms` of all your extensions in total. Earlier exchanges of its connection, processing
+and output can add to that. While one connection waits on an extension, other connections are processed
+and written; **the application you watch never waits on an extension.**
 
-**A connection that holds too much before it ends is cut.** Until it ends, a connection's captured
-transfers wait to be processed, and one connection may hold at most half of `limits.events` of them (8192
-at the default 16384). **A long keep-alive connection reaches that in ordinary operation**: each request
-and response pair takes at least one transfer each way, so it is reached within 4096 pairs, and sooner
-where a message is written or read in several pieces. It is cut there:
-everything it held is discarded, and so is everything that arrives for it afterwards. Its connection line
-is still written, with a truncation stop at its first byte in each direction, reason `connection_cut`, and
-no exchange of it reaches the output or an extension. The account's `processing.aggregate` counts the
-connections cut in `connections_cut` and the transfers discarded for them in `input_cut`. The session goes
-on, other connections are untouched, and the next connection on the same TLS handle is processed as
-usual.
+**A connection that holds too much unreleased work is cut.** A connection holds only what it has not
+released: a request waiting for its response, a message still being read, an exchange waiting on an
+extension. A released exchange is no longer held, so a long keep-alive connection is not cut for its
+length. **It is cut when what it holds reaches half of `limits.events` messages and transfers** (8192 at
+the default 16384) - many requests left unanswered can reach that - **or when the observer's allowance
+for held work is full as its reading needs more**. That allowance, `limits.events` times 4096 bytes, is
+shared by the captured events and the copies processing makes of them, so large bodies hold fewer
+events at once, and large bodies still incomplete can fill it. An extension's replacement that finds it
+full fails as `no_room`, and its connection is cut too. What a cut connection held unreleased is
+discarded, and so is everything that arrives for it afterwards. **The exchanges it released before the
+cut stay**: they are still sent to your extensions and written. Its connection line is still written,
+with a truncation stop at its first unreleased byte in each direction, reason `connection_cut`. The
+account's `processing.aggregate` counts the connections cut in `connections_cut` and the transfers
+discarded for them in `input_cut`. The session goes on, other connections are untouched, and the next
+connection on the same TLS handle is processed as usual.
 
 **Order is guaranteed within a connection only.** An extension receives one connection's exchanges in
 order, one at a time. Exchanges of different connections are interleaved, and the order they arrive in

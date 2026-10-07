@@ -350,6 +350,8 @@ type routed struct {
 // source is where a worker takes its entries from.
 type source interface {
 	take() (routed, bool)
+	// waiting reports whether an entry is queued for the worker now.
+	waiting() bool
 }
 
 // direct is one worker taking straight from the intake, routing for itself.
@@ -357,6 +359,8 @@ type direct struct {
 	intake *intake.Store
 	router router
 }
+
+func (d *direct) waiting() bool { return d.intake.Stats().Queued > 0 }
 
 func (d *direct) take() (routed, bool) {
 	e := d.intake.Take()
@@ -405,6 +409,12 @@ func (q *queue) push(items []routed) {
 	case q.wake <- struct{}{}:
 	default:
 	}
+}
+
+func (q *queue) waiting() bool {
+	q.mutex.Lock()
+	defer q.mutex.Unlock()
+	return len(q.items) > 0
 }
 
 func (q *queue) take() (routed, bool) {

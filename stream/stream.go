@@ -13,7 +13,9 @@ package stream
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/evandukss/edge-observer/fragment"
@@ -56,6 +58,30 @@ type Part struct {
 	// Bytes is exactly Length bytes when Gap is GapNone, nil otherwise, aliasing
 	// the record's payload.
 	Bytes []byte
+}
+
+// ErrInvalidPart is what every Part.Validate failure wraps.
+var ErrInvalidPart = errors.New("invalid stream part")
+
+// Validate reports what would make this part unusable to a reader that takes a
+// direction one part at a time: a part covers at least one offset, its gap is
+// one this package names, it carries exactly Length bytes when it is not a gap
+// and none when it is, and its last offset fits in a uint64. Assemble produces
+// only parts that pass.
+func (p Part) Validate() error {
+	switch {
+	case p.Length == 0:
+		return fmt.Errorf("%w: it covers no offsets", ErrInvalidPart)
+	case p.Gap > GapTruncated:
+		return fmt.Errorf("%w: %s is not a kind of hole", ErrInvalidPart, p.Gap)
+	case p.Gap == GapNone && uint64(len(p.Bytes)) != p.Length:
+		return fmt.Errorf("%w: %d bytes for %d offsets", ErrInvalidPart, len(p.Bytes), p.Length)
+	case p.Gap != GapNone && len(p.Bytes) != 0:
+		return fmt.Errorf("%w: a %s hole carrying %d bytes", ErrInvalidPart, p.Gap, len(p.Bytes))
+	case p.Offset > math.MaxUint64-p.Length:
+		return fmt.Errorf("%w: offset %d and length %d run past the last offset", ErrInvalidPart, p.Offset, p.Length)
+	}
+	return nil
 }
 
 // Conflict is a run of offsets two records covered with different bytes: a

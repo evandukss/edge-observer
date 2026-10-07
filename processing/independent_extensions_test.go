@@ -577,18 +577,20 @@ func TestIndependentExtensionWorkerSetsIDsAndWireOrder(t *testing.T) {
 				}
 				switch m["type"] {
 				case "exchange":
-					key := m["ids"].(map[string]any)["first"].(string)
+					key, ok := m["connection_id"].(string)
+					if !ok || key == "" {
+						t.Fatalf("exchange has no connection identity: %v", m)
+					}
 					id := m["id"].(string)
 					if pending[key] != "" || done[key] {
 						t.Error("overlap or exchange after connection_done")
 					}
 					index := int(m["index"].(float64))
-					first, err1 := strconv.ParseUint(key, 10, 64)
-					issued, err2 := strconv.ParseUint(id, 10, 64)
-					if err1 != nil || err2 != nil || issued != first+uint64(index) || !seen[issued] {
-						t.Errorf("wire id %s does not map to its issued range and index %d", id, index)
+					issued, err := strconv.ParseUint(id, 10, 64)
+					if err != nil || !seen[issued] {
+						t.Errorf("wire id %s is not an issued id", id)
 					}
-					if line := lineOf[issued]; line == "" || indexes[line][index] != issued {
+					if line := lineOf[issued]; line != key || indexes[key][index] != issued {
 						t.Errorf("wire id %s at index %d is not the id on the line of its connection at that index", id, index)
 					}
 					if index != next[key] {
@@ -598,9 +600,15 @@ func TestIndependentExtensionWorkerSetsIDsAndWireOrder(t *testing.T) {
 					pending[key] = id
 					byID[id] = key
 				case "connection_done":
-					key := m["ids"].(map[string]any)["first"].(string)
+					key, ok := m["connection_id"].(string)
+					if !ok || key == "" {
+						t.Fatalf("connection_done has no connection identity: %v", m)
+					}
 					if pending[key] != "" || next[key] != 4 {
 						t.Errorf("early connection_done for %s", key)
+					}
+					if done[key] || m["count"] != "4" {
+						t.Errorf("duplicate connection_done or wrong issued count: %v", m)
 					}
 					done[key] = true
 				}
@@ -916,7 +924,8 @@ func TestIndependentExtensionAdmissionBoundsSkipBusy(t *testing.T) {
 			if which == "waiting-bytes" {
 				shape.Connections = 8
 				shape.RequestBodyBytes = 12000
-				intakeBytes = 128 << 10
+				// Intake, parser and policy copies must fit before admission is tested.
+				intakeBytes = 512 << 10
 			}
 			f := independentStart(t, bin, "loop", "", []string{"request.line"}, 4, 0, intakeBytes, c)
 			pump := independentPump(t, f, c)

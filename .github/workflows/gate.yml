@@ -155,9 +155,35 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The privileged test container shares this runner's kernel. Make its
+      # TLS ULP available here; the sendfile test measures whether kTLS works.
+      - name: Make kernel TLS available
+        run: |
+          if ! sudo modprobe tls; then
+            echo "Kernel TLS module unavailable; the sendfile test must report its precondition."
+          fi
       - run: uname -srm && .github/gate/run.sh attach
         env:
           GATE_OUT: ${{ runner.temp }}/gate
+      # Successful jobs keep their console, not the uploaded failure logs.
+      # Preserve only this test's measured count, including an UNPROVED skip.
+      - name: Report sendfile precondition
+        if: always()
+        env:
+          GATE_OUT: ${{ runner.temp }}/gate
+        run: |
+          awk '
+            /^=== RUN   TestProducerSendfileMovementLeavesNumberedHole$/ { active = 1; next }
+            /^--- (PASS|FAIL|SKIP): TestProducerSendfileMovementLeavesNumberedHole / { active = 0 }
+            active && /producer_certification_test[.]go:[0-9]+: (PRECONDITIONS |UNPROVED: )/ &&
+              /kTLS_enabled_connections=/ && /successful_sendfile_byte_moves=/ { print; count++ }
+            END {
+              if (count != 1) {
+                print "::error::Expected one sendfile precondition count; found " (count + 0)
+                exit 1
+              }
+            }
+          ' "$GATE_OUT/attach/run.log"
       - if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

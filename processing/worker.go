@@ -2,6 +2,110 @@
 // Capture callbacks only write intake. One owner takes its entries: a Worker
 // takes them itself, or a Run routes them to several workers, each owning the
 // connections routed to it.
+//
+// # Held work and the shared allowance
+//
+// The intake's limit, MaxEvents * MaxEventPayloadBytes
+// (activation.RecordingIntake), is one allowance of accounted bytes for the
+// whole session (intake.Store). Every worker of a Run and every connection
+// draw on the same one. The intake charges its entries; a worker charges what
+// it keeps besides them, to two owners, each for its own representations.
+//
+// Parsing (intake.Parsing) charges, for each connection read:
+//
+//   - its reading state, readingCharge, from its first read until its reading
+//     is let go: the pairing, its two parsers, and the worker's own reading
+//     state for the connection, at their fixed sizes;
+//   - what its pairing and parsers retain, as they ask for it
+//     (http1.Reserver): an http1.Charge costs its Bytes plus messageCharge for
+//     each of its Messages;
+//   - each exchange the pairing hands over, at the charge it is handed over
+//     with, until the worker lets it go: once its lines are written - after
+//     every extension, where the plan configures them - or it is excluded or
+//     not released, or the connection is let go.
+//
+// Policy (intake.Policy) charges each copy of an exchange a pipeline makes to
+// apply its slots, none or many, from before the copy is made until it is
+// dropped: until the exchange's lines are written - after every extension,
+// where the plan configures them - or it is let go. A copy costs, for each
+// message it holds, messageCharge, the lengths of its method, target, protocol
+// and reason, fieldCharge plus the name and value lengths of each header and
+// trailer, and the length of its body, whether or not a string is shared with
+// its source. A step that changes a copy - a slot, an extension's replacement -
+// is measured again before the changed copy is kept, and growth past what is
+// charged is reserved first. What shrinks stays charged until the copy is
+// dropped.
+//
+// So a source and its copies each consume the allowance while they coexist:
+// an entry and a parser's copy of its bytes, an exchange handed over and a
+// pipeline's copy of it. Giving back one gives back nothing of another.
+//
+// Outside the allowance, bounded by the process envelope as decoding is: what
+// one step builds and hands over or drops before it returns - a projection
+// (record.Reconstruction) built to encode a line or a message, and the line or
+// message encoded - and the structure derived from a body (jsonshape.Shape,
+// bounded per message by Limits.JSON), a pipeline's removal evidence, allocator
+// overhead and spare slice capacity, and a connection's bookkeeping apart from
+// its reading.
+//
+// What is handed over, and when a charge leaves:
+//
+//   - Submitting an extension call hands over only its encoded message. The
+//     worker keeps the exchange as parsed and as processed, still charged, and
+//     the captured input it was read from, still leased, to apply replacements
+//     and go on with the chain; that input goes back once the exchange's lines
+//     are written, each entry at its last retained byte. What the connection holds
+//     then - its entries, its reading and its copies - is its current charge
+//     (batch.charged), read at every call it makes.
+//   - From a successful extension.Supervisor.Submit until its result is taken,
+//     its call times out or its generation is retired, the message is the
+//     supervisor's: one representation, held in the generation's outstanding
+//     calls and its send queue, bounded by frame_bytes_to_extension
+//     (extension.FrameBytesToExtension) per message and in_flight
+//     (extension.InFlight) calls per extension. waiting_bytes
+//     (extension.WaitingBytes) bounds something else: the charges of the
+//     connections waiting on an extension, each read at its call
+//     (extension.Call.Bytes), never a message's length.
+//   - A result's replacements are the supervisor's frame
+//     (extension.FrameBytesFromExtension) until the worker applies them; what
+//     it keeps of them is its copy's growth, reserved first.
+//   - A line Output takes is the sink queue's, charged by its length against
+//     that queue's own bound (Writer).
+//   - A refusal, a Submit that returns a reason or an Output that refuses a
+//     line, hands nothing over: every charge stays with the worker until it
+//     lets go of what it holds.
+//
+// Event reservations, the delivery gate's slots, are apart from byte charges:
+// an entry's slot is returned exactly once, when the last of its bytes leaves
+// unfinished work, whatever the charges.
+//
+// # Exhaustion
+//
+//   - An insertion that does not fit beside every entry and work charge is
+//     refused whole and counted by the intake, and its connection's loss token
+//     stops it, as for any intake refusal.
+//   - A connection reaching Options.ConnectionInput is cut
+//     (Outcome.ConnectionsCut).
+//   - A work reservation that does not fit is refused, charging nothing, and
+//     counted against its owner (intake.Stats ParsingRefused, PolicyRefused).
+//     The connection it was for is cut as at its own bound: what it holds
+//     unreleased is let go and its events returned as cut, its later input is
+//     discarded on arrival, what it released stays, and its connection line is
+//     written alone, truncated from its first unreleased byte with reason
+//     connection_cut. It counts in Outcome.ConnectionsCut and InputCut as any
+//     cut does, and also in Outcome.AllowanceCut, which tells it from a cut at
+//     the connection's own bound. It never waits for room, so a reservation
+//     that fails where no new input will come - at Finish, or on an extension's
+//     result - is settled at once.
+//   - An exchange whose copies could not be charged is not released: every
+//     copy is charged before its id and index are issued, so it takes neither,
+//     and no line of it is written on any route.
+//   - Where the plan configures extensions, an exchange's copy is charged
+//     before its id is issued, as without them. A replacement whose growth
+//     does not fit fails at its extension as no_room: nothing of it is kept,
+//     the exchange goes on through the rest of its extensions and is written,
+//     and the connection is cut. Exchanges it had released still go through
+//     their extensions and are written.
 package processing
 
 import (
@@ -73,11 +177,119 @@ type Options struct {
 	// Supervision, where set, receives every step of every extension's
 	// supervision (extension.Event), on the supervisor's goroutine.
 	Supervision func(extension.Event)
-	// ConnectionInput is the most input entries one connection may hold while it
-	// waits to be processed. A connection reaching it is cut: what it holds is
-	// discarded and counted, and the rest of its input is discarded on arrival.
-	// Zero takes half the gate's event allowance; negative refuses.
+	// ConnectionInput bounds what one connection may hold unreleased: the
+	// messages its parsing has begun and not handed over, the messages of its
+	// exchanges still on their way through the extensions, and the fragments
+	// it holds that nothing vouches for yet, which wait for evidence or for
+	// the connection's retirement. A connection reaching
+	// it is cut: what it holds unreleased is discarded and counted, the rest of
+	// its input is discarded on arrival, and what it released stays. Completed
+	// exchanges are released, not held, so a long connection is not cut for its
+	// length. Zero takes half the gate's event allowance; negative refuses.
 	ConnectionInput int
+
+	// turns, where set, is told of every turn each worker ends, on that
+	// worker's goroutine. Only a test sets it.
+	turns func(turn)
+	// submits, where set, is told of every extension call a worker is about to
+	// submit, on that worker's goroutine. Only a test sets it.
+	submits func(submission)
+}
+
+// turnEntries is the most entries a worker takes from its queue in one turn
+// before it runs the connections that input made runnable: the declared bound
+// on the input a worker takes between a pair becoming ready and its release.
+const turnEntries = 256
+
+// turn is one round of a worker's scheduler, as it was when it ended: the
+// entries it took, the captured bytes it gave to parsing, the exchanges it
+// released, and whether the worker's queue still held entries.
+type turn struct {
+	// Worker is the worker's index in its Run, and Number counts its turns from
+	// one.
+	Worker int
+	Number uint64
+	// Taken is the entries the turn took from the worker's queue.
+	Taken int
+	// Fed is the captured bytes the turn gave to parsing.
+	Fed uint64
+	// Released is every exchange the turn issued an id to, in the order issued.
+	Released []released
+	// Backlog is whether the worker's queue held entries when the turn ended.
+	Backlog bool
+}
+
+// released is one exchange a turn released: its connection, its index on that
+// connection, the session-global id it was issued, and what its release came
+// to.
+type released struct {
+	Process    fragment.Process
+	Connection fragment.ConnectionID
+	Index      int
+	ID         uint64
+	Outcome    releaseOutcome
+}
+
+// releaseOutcome is what one exchange's release came to, over every line it
+// took: the first that applies of unauthorized, withdrawn, dropped and
+// enqueued, or excluded for an exchange no line was written for.
+type releaseOutcome uint8
+
+const (
+	releaseNone releaseOutcome = iota
+	// releaseEnqueued is every line of the exchange authorized and taken by the
+	// output.
+	releaseEnqueued
+	// releaseDropped is a line authorized and refused by the output: an output
+	// failure, counted. Its id and index stay issued.
+	releaseDropped
+	// releaseWithdrawn is a line the connection's capture loss refused before it
+	// was enqueued: recoverable, and only that connection's.
+	releaseWithdrawn
+	// releaseUnauthorized is a line the gate refused to authorize: the capture
+	// was invalidated before it, which is terminal for the session.
+	releaseUnauthorized
+	// releaseExcluded is an exchange issued an id with no line written: not
+	// eligible, or after one that was not.
+	releaseExcluded
+)
+
+func (o releaseOutcome) String() string {
+	switch o {
+	case releaseEnqueued:
+		return "enqueued"
+	case releaseDropped:
+		return "dropped"
+	case releaseWithdrawn:
+		return "withdrawn"
+	case releaseUnauthorized:
+		return "unauthorized"
+	case releaseExcluded:
+		return "excluded"
+	default:
+		return "none"
+	}
+}
+
+// worse is the outcome of an exchange with lines of both outcomes.
+func (o releaseOutcome) worse(other releaseOutcome) releaseOutcome {
+	rank := func(x releaseOutcome) int {
+		switch x {
+		case releaseUnauthorized:
+			return 4
+		case releaseWithdrawn:
+			return 3
+		case releaseDropped:
+			return 2
+		case releaseEnqueued:
+			return 1
+		}
+		return 0
+	}
+	if rank(other) > rank(o) {
+		return other
+	}
+	return o
 }
 
 // Outcome is cumulative for one worker, and for a Run the sum over its
@@ -102,10 +314,13 @@ type Options struct {
 // a useful prefix and also count a refusal of its suffix. OutputFailures counts
 // failed approved writes. Neither counts capture loss or policy suppression;
 // internal artifact-serialization defects return a terminal error, not a count.
-// ConnectionsCut counts connections cut at Options.ConnectionInput, and
-// InputCut the input entries discarded for those cuts: what each held when it
-// was cut, and what arrived for it afterwards. A cut connection's exchanges are
-// withheld as unknown.
+// ConnectionsCut counts connections cut because they could not hold more
+// unreleased work: at their own bound (Options.ConnectionInput), or with the
+// shared allowance full, a work reservation refused. AllowanceCut counts the
+// second kind alone, so ConnectionsCut - AllowanceCut is the first. InputCut
+// counts the input entries discarded for those cuts: what each held when it
+// was cut, and what arrived for it afterwards. A cut connection's exchanges not
+// released before the cut are withheld as unknown.
 // Pending counts connection batches still holding charged intake entries.
 // GateReason reports the gate's capture-wide diagnostic state at return, even
 // when no complete candidate reached authorization. It is never permission;
@@ -119,12 +334,13 @@ type Outcome struct {
 	ProcessingFailures uint64
 	OutputFailures     uint64
 	ConnectionsCut     uint64
+	AllowanceCut       uint64
 	InputCut           uint64
 	Pending            int
 	GateReason         probe.GateReason
-	// ExchangeIDs is how many exchange ids the run issued: one per exchange
-	// reconstructed from a dispatched batch where content is written, from 1,
-	// contiguously per connection. A Run's count, never a worker's.
+	// ExchangeIDs is how many exchange ids the run issued: one per exchange a
+	// connection's reading hands over where content is written, from 1, in
+	// wire order on each connection. A Run's count, never a worker's.
 	ExchangeIDs uint64
 	// Extensions is each configured extension's counts, in the order they
 	// run. A Run's counts, never a worker's: at every moment each one's
@@ -135,8 +351,9 @@ type Outcome struct {
 
 // Finalization is supplied only after capture authority has been withdrawn,
 // delivery callbacks have drained, and capture.Finish has published its records.
-// Both facts must be established for a still-open batch to become eligible.
-// Neither fact asserts a transport close. False facts discard pending payload.
+// Both facts must be established for a still-open connection to be settled.
+// Neither fact asserts a transport close. False facts discard pending payload;
+// an exchange its evidence vouches for is released whatever they say.
 type Finalization struct {
 	Withdrawn bool
 	Drained   bool
@@ -156,21 +373,28 @@ type Worker struct {
 	// extensions' results; nil for a Worker taking from the intake itself.
 	queue      *queue
 	extensions *extensions
-	// waiting is every batch whose lines wait on an extension's result.
-	waiting   map[*dispatch]struct{}
+	// waiting is every connection that has ended and whose lines wait for its
+	// exchanges to come through the extensions (batch.chain).
+	waiting   map[*batch]struct{}
 	pipelines []config.EffectivePipeline
 	routes    []config.DurableRoute
 	batches   map[batchKey]*batch
 	// batchesChurn and waitingChurn shed what processing leaves in batches and
-	// waiting, whose keys are connections and dispatches that never return.
+	// waiting, whose keys are connections that never return.
 	batchesChurn held.Churn
 	waitingChurn held.Churn
 	order        []batchKey
 	outcome      Outcome
 	terminal     error
 	finished     bool
-	// bound is the most fragments one connection may hold (Options.ConnectionInput).
+	// bound is what one connection may hold unreleased (Options.ConnectionInput).
 	bound int
+	// current is the turn in progress where Options.turns is set, and turns
+	// how many this worker has begun.
+	current *turn
+	turns   uint64
+	// runnable is the connections the turn in progress touched.
+	runnable []*batch
 }
 
 // New validates only Options. It performs no capture, parsing or durable write.
@@ -198,7 +422,7 @@ func (o Options) valid() bool {
 
 func newWorker(options Options, index int, from source, release *release, running *extensions) *Worker {
 	w := &Worker{options: options, index: index, source: from, release: release, extensions: running,
-		waiting: map[*dispatch]struct{}{}, pipelines: options.Plan.Pipelines(), routes: options.Plan.Routes(),
+		waiting: map[*batch]struct{}{}, pipelines: options.Plan.Pipelines(), routes: options.Plan.Routes(),
 		batches: make(map[batchKey]*batch), outcome: Outcome{Withheld: connection.Counted(0)},
 		bound: connectionInput(options)}
 	if q, ok := from.(*queue); ok {
@@ -207,46 +431,65 @@ func newWorker(options Options, index int, from source, release *release, runnin
 	return w
 }
 
-// Drain takes currently queued entries and processes ready closed batches.
+// Drain takes currently queued entries, in turns of at most turnEntries, and
+// after each turn reads and releases what its input made decidable on each
+// connection it touched.
+//
+// An exchange is released while its connection is open, once something
+// vouches for every byte of it: the evidence capture took at a fragment this
+// worker holds with every fragment before it (fragment.Evidence.Usable), or,
+// where none was taken, the connection's retirement. Each connection is read
+// once, a part at a time, in sequence order (reconstruct.Pairing), and each
+// exchange the reading hands over is released at once: complete and supported,
+// it is written as one exchange line per route with a session-global id and
+// its index on the connection, carrying the connection's provisional record;
+// otherwise it is excluded, and so is every exchange after it. Both take an id
+// and an index. Where the plan configures extensions, each exchange goes
+// through them first, one at a time on each connection, and its lines are
+// written once every extension has answered or skipped it; excluded exchanges
+// are held until their reason is decidable, and a connection is sent
+// connection_done once it has ended and its exchanges are through (chain).
+//
 // Callback FIFO order is not completeness evidence: a retirement can precede
 // a fragment. An entry for a connection id that was routed before, whose batch
 // this worker no longer holds, is late: it is released at once and withheld as
 // unknown, whatever its process, since a connection id is unique within a
-// capture session. A batch needs its matching (Process, ConnectionID) retirement,
-// a known nonnegative Fragments count, and every distinct sequence 1..count.
-// Zero is valid for a metadata-only batch. Duplicate/out-of-range sequences,
-// identity disagreement or invalid records fail that batch; missing sequences
-// wait. Fragment.Validate and connection.Record.Validate are applied, and
+// capture session. A connection's connection line needs its matching (Process,
+// ConnectionID) retirement, a known nonnegative Fragments count, and every
+// distinct sequence 1..count. Zero is valid for a metadata-only connection.
+// Duplicate/out-of-range sequences, identity disagreement, evidence that
+// disagrees with what came before it or with the retirement, and invalid
+// records refuse what was not yet released; missing sequences wait.
+// Fragment.Validate and connection.Record.Validate are applied, and
 // contract/record projection errors refuse output rather than copying input.
 // Offset + uint64(Length) must not wrap. Within each direction, ranges in
 // sequence order must not overlap or move backward; either condition refuses
-// the batch rather than choosing between conflicting bytes. A hole limits
+// the connection rather than choosing between conflicting bytes. A hole limits
 // reconstruction to the established prefix before it; later bytes do not resume
 // parsing even if they resemble a new message.
-// A retained reconstruction prefix carries ReconstructionTruncation: each
-// affected direction names where approved messages stop, where the stopping
-// evidence lies, and its structural reason. Its suffix is indeterminate, never
-// absent; Reconstruction.Unplaced is undetermined rather than a numeric zero.
-// A placement cutoff is reported even if no subsequent bytes were observed.
-// This boundary does not change Connection.Ending or assert a transport close.
-// Each direction carrying bytes needs an explicit valid Placement. Only bytes
-// established by that placement can contribute to an approved message.
+// A connection line carries ReconstructionTruncation: each affected direction
+// names where released messages stop, where the stopping evidence lies, and
+// its structural reason. Its suffix is indeterminate, never absent. A placement
+// cutoff is reported even if no subsequent bytes were observed. This boundary
+// does not change Connection.Ending or assert a transport close. Each direction
+// carrying bytes needs an explicit valid Placement. Only bytes established by
+// that placement can contribute to an approved message.
 //
-// A closed batch has HandleReleasedEnding or SocketClosed. Other endings wait
-// for Finish. Parsing must establish complete, framed, unholed, unelided HTTP/1
-// messages; unsupported encodings and undecidable tails are withheld. Complete
-// exchanges preceding a bad tail remain candidates. Capture end never completes
-// a close-delimited response. Supported versions are HTTP/1.0 and HTTP/1.1;
-// Content-Encoding must be absent or identity, and Transfer-Encoding absent or
-// solely chunked. CONNECT, Upgrade and informational responses are withheld,
-// because this parser does not model protocol switching or interim pairing.
-// Both request and response must be present and complete for an exchange to be
-// emitted. No source bytes or parser error text are logged.
+// A closed connection has HandleReleasedEnding or SocketClosed. Other endings
+// wait for Finish. Parsing must establish complete, framed, unholed, unelided
+// HTTP/1 messages; unsupported encodings and undecidable tails are withheld.
+// Complete exchanges preceding a bad tail are released. Capture end never
+// completes a close-delimited response. Supported versions are HTTP/1.0 and
+// HTTP/1.1; Content-Encoding must be absent or identity, and Transfer-Encoding
+// absent or solely chunked. CONNECT, Upgrade and informational responses are
+// withheld, because this parser does not model protocol switching or interim
+// pairing. Both request and response must be present and complete for an
+// exchange to be emitted. No source bytes or parser error text are logged.
 //
 // Pipelines execute in compiled order on separate input copies, and slots in
 // their compiled order, including zero-slot pipelines. Connection inputs receive
 // metadata only. All output follows the compiled Routes. A slot failure drops
-// that pipeline's output for the batch and is counted.
+// that pipeline's output for the rest of the connection and is counted once.
 // Every removal - a header, a body, a body's values, a query, a parameter or
 // a JSON member - is recorded in Artifact.PolicyExclusions with its exchange,
 // request/response, field and disposition, once per entry and without its
@@ -256,7 +499,8 @@ func newWorker(options Options, index int, from source, release *release, runnin
 // New artifacts carry an explicit empty array when nothing was excluded,
 // including metadata routes; older artifacts without the member are unavailable.
 // Every candidate calls Gate.Authorize after processing, immediately before the
-// approved write. No eligibility snapshot authorizes anything.
+// approved write, stating what its own input and lifecycle establish. No
+// eligibility snapshot authorizes anything.
 //
 // Returns the cumulative outcome and a non-nil error for cancellation, output
 // failure or an unusable worker. Processing refusals are in Outcome. After an
@@ -278,12 +522,19 @@ func (w *Worker) Drain(ctx context.Context) (Outcome, error) {
 	if w.terminal != nil {
 		return w.snapshot(), w.terminal
 	}
-	err := w.drain(ctx, false)
+	err := w.drain(ctx, false, true)
 	return w.snapshot(), err
 }
 
 // Finish drains the final queue once, processes eligible final batches and
 // discards every remainder, releasing all leases. It permanently ends the worker.
+// With both finalization facts it first waits for every exchange still on its
+// way through the extensions, each call bounded by its extension's timeout; a
+// connection issued ids whose retirement is not ready is sent connection_done
+// and withheld as unsettled once its exchanges are through.
+// Without both finalization facts it settles nothing - no connection line is
+// written and no still-open connection is retired - and still releases what
+// the final queue's evidence vouches for, as any drain would.
 // A canceled context stops further authorization; controller deadlines and an
 // incomplete terminal account are owned by the caller, not invented here.
 func (w *Worker) Finish(ctx context.Context, final Finalization) (Outcome, error) {
@@ -297,14 +548,25 @@ func (w *Worker) Finish(ctx context.Context, final Finalization) (Outcome, error
 	if err == nil {
 		err = w.release.failure()
 	}
-	if err == nil && final.Withdrawn && final.Drained {
-		err = w.drain(ctx, true)
-		// Every batch waiting on an extension is written once its results
+	if err == nil && (!final.Withdrawn || !final.Drained) {
+		// Without both facts nothing is settled: the final queue is still
+		// read for what evidence vouches for, as a drain would read it, so
+		// whether a pair completed before Finish is written does not depend
+		// on whether a drain ran in between.
+		err = w.drain(ctx, false, false)
+	} else if err == nil {
+		err = w.drain(ctx, true, true)
+		if err == nil {
+			err = w.endUnsettled(ctx)
+		}
+		// Every connection waiting on an extension is written once its results
 		// arrive; each call is bounded by its extension's timeout.
 		for err == nil && len(w.waiting) > 0 {
 			select {
 			case <-w.queue.wake:
+				w.begin()
 				err = w.settle(ctx)
+				w.end()
 				if err != nil {
 					w.stop(err)
 				}
@@ -332,7 +594,7 @@ func (w *Worker) Close() error {
 	return nil
 }
 
-// connectionInput is the most fragments one connection may hold: the option, or
+// connectionInput is what one connection may hold unreleased: the option, or
 // half the gate's event allowance, so that one connection reaches its own bound
 // before it can fill the session's.
 func connectionInput(options Options) int {
@@ -345,12 +607,13 @@ func connectionInput(options Options) int {
 
 // Retained is what this worker holds now, store by store: the connections
 // whose input it holds, with their entries and the fragments indexed from them,
-// the order it examines them in, and the connections waiting on an extension's
-// result, with the exchanges each keeps as parsed and as processed, the
-// capacity of the slices holding them, and what policy did to their bodies. A
-// dispatch's bodies are a map, which Go gives no capacity for, so only their
-// count is read. A dispatch that is not waiting is let go of when its lines are
-// written, so nothing else of one is kept. Its owner reads it, never while
+// the order it examines them in, and the connections with exchanges on their
+// way through the extensions, with the exchanges each keeps as parsed and as
+// processed, the capacity of the slices holding them, and what policy did to
+// their bodies. A dispatch's bodies are a map, which Go gives no capacity for,
+// so only their count is read. An exchange is let go of when its lines are
+// written, so nothing else of one is kept. processing.waiting's rebuilds are
+// those of the connections that ended waiting. Its owner reads it, never while
 // Drain or Finish runs.
 func (w *Worker) Retained() ([]held.Occupancy, error) {
 	if w == nil {
@@ -358,23 +621,36 @@ func (w *Worker) Retained() ([]held.Occupancy, error) {
 	}
 	entries, fragments := 0, 0
 	for _, b := range w.batches {
-		entries += len(b.entries)
-		fragments += len(b.fragments)
+		entries += b.entries()
+		fragments += len(b.unfed)
 	}
-	exchanges, capacity, bodies := 0, 0, 0
-	for d := range w.waiting {
-		exchanges += len(d.source.Exchanges) + len(d.processed.Exchanges)
-		capacity += cap(d.source.Exchanges) + cap(d.processed.Exchanges)
-		if d.run != nil {
-			bodies += len(d.run.bodies)
+	waiting, exchanges, capacity, bodies := 0, 0, 0, 0
+	chained := func(b *batch) {
+		if len(b.chain) == 0 && !b.calling {
+			return
 		}
+		waiting++
+		capacity += cap(b.chain)
+		for _, d := range b.chain {
+			exchanges += 1 + len(d.processed.Exchanges)
+			capacity += cap(d.processed.Exchanges)
+			if d.run != nil {
+				bodies += len(d.run.bodies)
+			}
+		}
+	}
+	for _, b := range w.batches {
+		chained(b)
+	}
+	for b := range w.waiting {
+		chained(b)
 	}
 	return []held.Occupancy{
 		{Store: "processing.batches", Held: len(w.batches), Rebuilds: w.batchesChurn.Rebuilds()},
 		{Store: "processing.entries", Held: entries},
 		{Store: "processing.fragments", Held: fragments},
 		{Store: "processing.order", Held: len(w.order)},
-		{Store: "processing.waiting", Held: len(w.waiting), Rebuilds: w.waitingChurn.Rebuilds()},
+		{Store: "processing.waiting", Held: waiting, Rebuilds: w.waitingChurn.Rebuilds()},
 		{Store: "processing.waiting_exchanges", Held: exchanges},
 		{Store: "processing.waiting_exchanges_capacity", Held: capacity},
 		{Store: "processing.waiting_bodies", Held: bodies},
@@ -399,18 +675,45 @@ func (w *Worker) snapshot() Outcome {
 func (w *Worker) discard() {
 	for id, b := range w.batches {
 		w.withhold(connection.Uncounted("unsettled_input"))
+		w.drop(b)
 		b.release(held.Discarded)
 		delete(w.batches, id)
 	}
 	w.order = nil
-	for d := range w.waiting {
+	for b := range w.waiting {
 		// Its results may still arrive, and are counted; nothing of it is
 		// written.
-		d.dead = true
 		w.withhold(connection.Uncounted("unsettled_input"))
-		d.b.release(held.Discarded)
-		delete(w.waiting, d)
+		w.drop(b)
+		b.release(held.Discarded)
+		delete(w.waiting, b)
 	}
+}
+
+// endUnsettled ends, at Finish, every connection still held that was issued
+// exchange ids and whose retirement is not ready: its held excluded exchanges
+// are decided from what it read, its chain is taken through, and it is sent
+// connection_done and withheld as unsettled, writing no connection line.
+// Connections issued no id are left to discard.
+func (w *Worker) endUnsettled(ctx context.Context) error {
+	if w.extensions == nil {
+		return nil
+	}
+	for _, key := range w.order {
+		b := w.batches[key]
+		if b == nil || b.parse == nil || b.parse.exchanges == 0 {
+			continue
+		}
+		b.ended, b.unsettled = true, true
+		w.decideTail(b)
+		w.batches = held.Deleted(w.batches, key, &w.batchesChurn)
+		w.waiting[b] = struct{}{}
+		if err := w.advanceChain(ctx, b); err != nil {
+			w.stop(err)
+			return err
+		}
+	}
+	return nil
 }
 
 // stop makes err terminal for this worker and every worker of its Run.
@@ -444,6 +747,7 @@ func (o Outcome) plus(other Outcome) Outcome {
 	o.ProcessingFailures += other.ProcessingFailures
 	o.OutputFailures += other.OutputFailures
 	o.ConnectionsCut += other.ConnectionsCut
+	o.AllowanceCut += other.AllowanceCut
 	o.InputCut += other.InputCut
 	o.Pending += other.Pending
 	if o.GateReason == "" {
@@ -452,25 +756,78 @@ func (o Outcome) plus(other Outcome) Outcome {
 	return o
 }
 
-func (w *Worker) drain(ctx context.Context, final bool) error {
-	if err := w.settle(ctx); err != nil {
-		w.stop(err)
-		return err
+// begin starts a turn where one is observed.
+func (w *Worker) begin() {
+	if w.options.turns == nil {
+		return
 	}
-	for {
-		if err := ctx.Err(); err != nil {
+	w.turns++
+	w.current = &turn{Worker: w.index, Number: w.turns}
+}
+
+// end reports the turn in progress, if any.
+func (w *Worker) end() {
+	if w.current == nil {
+		return
+	}
+	t := *w.current
+	w.current = nil
+	t.Backlog = w.source.waiting()
+	w.options.turns(t)
+}
+
+// drain runs turns until the worker's queue is empty. Each takes at most
+// turnEntries entries, then reads and releases what that input made decidable
+// on every connection it touched, and retires those now ready, so a pair that
+// becomes ready is released before the next turn takes more input. A last pass
+// over every connection applies a capture loss and retires what is ready: at
+// Finish (final), every connection holding its retirement. Where settled is
+// false nothing is retired or settled - no connection line, no extension
+// result - and only what evidence vouches for is released.
+func (w *Worker) drain(ctx context.Context, final, settled bool) error {
+	w.begin()
+	defer w.end()
+	if settled {
+		if err := w.settle(ctx); err != nil {
+			w.stop(err)
 			return err
 		}
-		r, ok := w.source.take()
-		if !ok {
+	}
+	for {
+		taken := 0
+		for taken < turnEntries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			r, ok := w.source.take()
+			if !ok {
+				break
+			}
+			taken++
+			if w.current != nil {
+				w.current.Taken++
+			}
+			if b := w.accept(r); b != nil && !b.runnable {
+				b.runnable = true
+				w.runnable = append(w.runnable, b)
+			}
+		}
+		if err := w.run(ctx, final, settled); err != nil {
+			w.stop(err)
+			return err
+		}
+		if taken < turnEntries {
 			break
 		}
-		w.accept(r)
+		w.end()
+		w.begin()
 	}
-	// Inspect all callbacks already queued before evaluating completeness.
+	if !settled {
+		return nil
+	}
 	remaining := make([]batchKey, 0, len(w.order))
-	for _, id := range w.order {
-		b := w.batches[id]
+	for _, key := range w.order {
+		b := w.batches[key]
 		if b == nil {
 			continue
 		}
@@ -478,25 +835,69 @@ func (w *Worker) drain(ctx context.Context, final bool) error {
 			b.lose()
 		}
 		if !b.ready(final) {
-			remaining = append(remaining, id)
+			remaining = append(remaining, key)
 			continue
 		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		w.outcome.Batches++
-		waits, err := w.process(ctx, b)
-		if !waits {
-			b.release(processedUnless(err))
-		}
-		w.batches = held.Deleted(w.batches, id, &w.batchesChurn)
-		if err != nil {
+		if err := w.retire(ctx, key, b, final); err != nil {
 			w.stop(err)
 			return err
 		}
 	}
 	w.order = remaining
 	return nil
+}
+
+// run reads and releases what this turn's input made decidable on each
+// connection it touched, and retires those now ready where settled.
+func (w *Worker) run(ctx context.Context, final, settled bool) error {
+	runnable := w.runnable
+	w.runnable = w.runnable[:0]
+	for i, b := range runnable {
+		runnable[i] = nil
+		b.runnable = false
+		key := batchKey{process: b.process, id: b.id}
+		if w.batches[key] != b {
+			continue
+		}
+		if b.loss.Reason() != "" {
+			// Capture lost input of this connection: nothing more of it is
+			// read.
+			b.lose()
+		}
+		if settled && b.ready(final) {
+			// Its retirement vouches for all of it now, so all of it is placed
+			// before any of it is released.
+			if err := w.retire(ctx, key, b, final); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := w.advance(ctx, b); err != nil {
+			return err
+		}
+		if w.extensions != nil {
+			if err := w.advanceChain(ctx, b); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// retire processes a ready batch to its lines and lets it go, unless its
+// lines now wait on an extension, which keeps its leases.
+func (w *Worker) retire(ctx context.Context, key batchKey, b *batch, final bool) error {
+	w.outcome.Batches++
+	b.final = final
+	waits, err := w.process(ctx, b)
+	if !waits {
+		b.release(processedUnless(err))
+	}
+	w.batches = held.Deleted(w.batches, key, &w.batchesChurn)
+	return err
 }
 
 func deliveryOutcome(o Outcome, output Output) Outcome {

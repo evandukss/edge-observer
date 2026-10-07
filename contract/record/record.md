@@ -21,52 +21,85 @@ ids are unique within a session and mean nothing across sessions.
 
 ## Approved line envelope
 
-Durable approved output is LF-terminated JSON, version `observer.approved/3`.
-Each line is fully processed under its `policy_revision`. Stable files append
-across sessions, so `session` is required on every line.
+Durable approved output is LF-terminated JSON. This section is version
+`observer.approved/4`; where version 3 differs it says so, and versions 1 and 2
+remain readable under their original rules. Each line is fully processed under
+its `policy_revision`. Stable files append across sessions, so `session` is
+required on every line.
 
 | Member | Meaning |
 |---|---|
-| `version` | `observer.approved/3` |
+| `version` | `observer.approved/4` |
 | `record` | `exchange` or `connection` |
 | `session` | the session that authorized this line |
 | `policy_revision` | the configuration revision applied before release |
 | `route` | the compiled `pipeline`, `sink` and route `kind` |
-| `connection` | connection metadata in the record contract below |
+| `connection` | connection metadata in the record contract below: the PROVISIONAL record on an exchange line, the FINAL record on a connection line |
 | `exchange_id` | exchange lines only: a positive decimal string, unique within the session |
 | `index` | exchange lines only: the zero-based index within the connection |
 | `reconstruction` | exchange lines only: exactly one complete, processed request/response pair; its exchange index equals `index` |
-| `reconstruction_truncation` | retirement lines only, where an incomplete suffix is known |
+| `reconstruction_truncation` | connection lines only, where an incomplete suffix is known |
+| `reconstruction_unplaced` | connection lines only, always: the connection's unplaced total |
 | `policy_exclusions` | a present list of fields removed from captured content |
 | `extension_outcomes` | a present list of each extension's outcome for this exchange |
 | `replacement_exclusions` | a present list of fields removed from extension replacement content |
 
-Exchange lines go only on the `exchanges` route. Metadata never asserts an
-observed close without evidence. One
-connection line is emitted at retirement, only on the `connections` route. It
-carries final metadata, no exchange id, index or reconstruction, and empty
+Exchange lines go only on the `exchanges` route. An exchange line can be
+written while its connection is still open, so it carries the connection's
+provisional record: `provisional: true`, its identity, and none of its
+lifecycle or totals ([connection](#connection)). Metadata never asserts an
+observed close without evidence. One connection line is emitted at
+retirement, session-end settlement included, only on the `connections` route.
+It carries the final record, with `provisional` absent and every lifecycle and
+totals member present, no exchange id, index or reconstruction, and empty
 evidence lists. On an exchange, all three evidence lists refer only to that
-exchange's index; no exclusions means `[]`, not an absent or null list.
+exchange's index; no exclusions means `[]`, not an absent or null list. An
+exchange line's `reconstruction.unplaced` is a total over the whole connection,
+so it is `{"state": "undetermined", "unit": "bytes", "why": "provisional"}`,
+and the connection line states the total as `reconstruction_unplaced`: the
+offsets of the connection's established prefix, over both directions, that were
+never read as part of a message, in the unit and form `reconstruction.unplaced`
+has. It is determined, with a decimal `value` and no `why`, where the
+connection's content was read to its retirement, and undetermined, with a `why`
+and no `value`, where it was not: `connection_cut` for a connection cut, the
+capture loss's own reason where capture lost some of its input, and
+`not_read` where no pipeline reads content. A reader refuses an exchange line
+whose record is not provisional or carries any lifecycle or totals member, or
+whose `reconstruction.unplaced` is anything else; a connection line whose record
+is provisional or lacks one, or that lacks a well-formed
+`reconstruction_unplaced`; `reconstruction_unplaced` on any other line; and a
+provisional record in any version before 4.
 
-A retirement line's truncation has `state: "truncated"`, `suffix: "indeterminate"`
+A connection line's truncation has `state: "truncated"`, `suffix: "indeterminate"`
 and one or two `stops`, ordered sent then received without repetition. Each stop
 names `direction`, the decimal `offset` of the first excluded byte, a `reason`,
 and the decimal `evidence_offset` at or after that offset. Reasons are
 `capture_hole`, `positions_unknown`, `incomplete_message`, `malformed_message`,
 `ambiguous_framing`, `processing_limit`, `unsupported_message`, `unpaired_exchange`,
 `unparsed_suffix` or `connection_cut`. This evidence describes an incomplete suffix,
-independently of the connection's actual ending. `connection_cut` is a connection that
-held as much input as one connection may while it waited to be processed: its input
-was discarded from its first byte, so the stop's `offset` is `0` and its
-`evidence_offset` is how far that direction's discarded input ran. Only complete pairs appear in exchange lines.
+independently of the connection's actual ending. The suffix begins after the
+last exchange released on the connection, so `offset` is the first byte of a
+direction no exchange line carries. `connection_cut` is a connection cut because it
+could not hold more unreleased work, for either of two causes: it reached its own
+bound on what one connection may hold, or the session's shared allowance for held
+work was full and refused the growth its processing needed. What it held unreleased
+was discarded, so the stop's `offset` is the first unreleased byte of that
+direction - `0` where nothing was released - and its `evidence_offset` is how far
+that direction's discarded input ran. Only complete pairs appear in exchange lines.
 
 Ids are issued monotonically before delivery and never reused. The same exchange
 has the same id and connection index on every route and in every extension.
-No exchange line is released before its connection's retirement. A dropped line cannot
-renumber later exchanges. With `write_content` false, no exchange line is emitted
-and no exchange id is issued; the retirement line remains. Version 3 has no
-`exchange_ids` range. Historical versions 1 and 2 remain readable under their
-original rules; version 2 carries its connection's contiguous id range.
+Indexes on one connection rise across releases, a line the output dropped
+included, and a dropped line never renumbers a later exchange. A connection
+line never repeats an exchange an exchange line carried, and a line once
+written is never changed. With `write_content` false, no exchange line is
+emitted and no exchange id is issued; the connection line remains. Version 4,
+like version 3, has no `exchange_ids` range.
+
+In version 3 no exchange line is released before its connection's retirement:
+every line carries the final record, an exchange line carries its connection's
+determined `unplaced`, and no line carries `provisional`. Version 2 carries its
+connection's contiguous id range.
 
 Only immutable, policy-eligible encoded lines enter the bounded delivery queue.
 Enqueue is authorized in one ordering with invalidation; a line already queued
@@ -200,8 +233,20 @@ call, not a message boundary.
 
 ## connection
 
+A connection record comes in two forms. The FINAL record is the connection's
+retirement and carries every field below; `provisional` is absent. The
+PROVISIONAL record describes a connection that may still be open: `provisional`
+is `true`, it carries only the fields that stay true for the whole of the
+connection - `id`, `handle`, `instance`, `process`, `process_network`,
+`first_seen` and `opened` - and each of them equals the final record's. Its
+lifecycle and totals - `ending`, `associations`, `placements`, `fragments`,
+`early` and `early_unmeasured` - are ABSENT, not empty: an empty list would say
+nothing was observed, and nothing on a provisional record says how the
+connection ended, how it was bound or how much it carried.
+
 | Field | Class | Meaning |
 |---|---|---|
+| `provisional` | form | `true` on the provisional record only; absent on the final record |
 | `id` | identity | stable for the record's life whatever its association says |
 | `handle.instance`, `handle.address`, `handle.generation` | identity | the occupancy: an execution, a library handle address, and the generation separating this occupancy of the address from the next |
 | `instance.key` | identity | the admitted execution that held the handle |

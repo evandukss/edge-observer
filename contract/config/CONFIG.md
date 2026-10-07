@@ -61,7 +61,7 @@ document at another version is refused as `unknown_version`, naming the version 
 | `write_content` | `true` writes exchanges and connection records. `false` writes connection records only; **plaintext is still read into memory and processed, and never written** |
 | `remove`, `mask`, `truncate` | the rules, below |
 | `extensions` | the extensions to run, in order, each a `name`, a `command`, the `fields` it receives and `timeout_ms` (below) |
-| `limits` | `events`, the most captured events held at once while they wait to be processed (one connection may hold at most half of them and is cut past that; `docs/extensions.md` says what that costs); `state_every_seconds`, how often the log restates the session's state; `workers`, the fixed number of processing workers, each holding a share of the connections (default 1; measurements are in the Processing capacity section of `docs/extensions.md`) |
+| `limits` | `events`, which bounds the work held at once: at most that many captured events, and an allowance of that many times 4096 bytes shared by the captured events and the copies processing makes of them, so large bodies hold fewer events at once (one connection may hold at most half of `events` unreleased messages and transfers and is cut past that; `docs/extensions.md` says what that costs); `state_every_seconds`, how often the log restates the session's state; `workers`, the fixed number of processing workers, each holding a share of the connections (default 1; measurements are in the Processing capacity section of `docs/extensions.md`) |
 
 **A watch entry's conditions are matched as the observer's admission reads them.** `exe` is an absolute
 path. `args` are the arguments after `argv[0]`; an empty list means a process run with none, and absent
@@ -282,7 +282,7 @@ removes that field on the exchanges route. A plan that does not is refused as `i
 observer's defect, and it fails closed. A mask or a truncation satisfies no removal. Connection records
 carry metadata only and cannot contain these fields.
 
-**Every removal is recorded in the approved output**, `observer.approved/3`, as an entry naming the
+**Every removal is recorded in the approved output**, `observer.approved/4`, as an entry naming the
 exchange, the message, the field and a disposition - `removed`, `values_removed`, or
 `removed_undecidable` for a whole body or query a field rule could not decide - and only where the
 component was present, which is what separates excluded from never present. A mask and a truncation add

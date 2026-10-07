@@ -14,10 +14,12 @@
 // where it ends), so the next message is still found. A hole anywhere else
 // stops the parse; the rest is reported as unplaced rather than
 // resynchronised on a guess.
+//
+// Parse reads a direction already whole. A Parser reads one as it arrives, a
+// part at a time, by the same rules: Parse runs on it.
 package http1
 
 import (
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -260,216 +262,86 @@ func ParseResponses(s stream.Stream, limits Limits, bodiless []bool) Parsed {
 }
 
 func parse(s stream.Stream, kind Kind, limits Limits, bodiless []bool) Parsed {
-	limits = limits.orDefaults()
-
-	cursor := stream.NewCursor(s)
+	p := newParser(kind, limits, unaccounted{})
 	var parsed Parsed
 
-	for !cursor.AtEnd() {
-		noBody := len(bodiless) > len(parsed.Messages) && bodiless[len(parsed.Messages)]
-
-		message := one(cursor, kind, limits, noBody)
-		parsed.Messages = append(parsed.Messages, message)
-
-		// An unframed message's end is unknown, so nothing after it can be placed.
-		if !message.Framed {
-			break
+	// take keeps a message handed over, and reports whether the parse is over.
+	take := func(progress Progress) bool {
+		if progress.Message == nil || progress.Result == Head {
+			return false
 		}
+		m := *progress.Message
+		if progress.Result == Unsupported && m.Framing == FramingUntilClose {
+			// A reader of an open connection stops at this body; Parse has the whole
+			// stream, so the body is the rest of it.
+			cursor := stream.NewCursor(s)
+			if _, _, err := cursor.Take(m.End-s.Start, 0); err == nil {
+				m.readUntilClose(cursor, p.limits)
+				m.End = cursor.Offset()
+			}
+			parsed.Messages = append(parsed.Messages, m)
+			parsed.Unplaced = s.End - m.End
+			return true
+		}
+		parsed.Messages = append(parsed.Messages, m)
+		return false
 	}
 
-	parsed.Unplaced = cursor.Remaining()
+	for _, part := range s.Parts {
+		for part.Length > 0 {
+			progress, err := p.Feed(part)
+			if err != nil {
+				// Parts Assemble produced always pass; a hand-made stream that does not
+				// is read as far as it was fed.
+				return finish(parsed, s, p)
+			}
+			consumed := progress.Consumed
+			if progress.Result == Head && kind == Response {
+				method := ""
+				if len(bodiless) > len(parsed.Messages) && bodiless[len(parsed.Messages)] {
+					method = "HEAD"
+				}
+				progress, _ = p.Answer(method)
+			}
+			if take(progress) {
+				return parsed
+			}
+			part.Offset, part.Length = part.Offset+consumed, part.Length-consumed
+			if part.Gap == stream.GapNone {
+				part.Bytes = part.Bytes[consumed:]
+			}
+		}
+	}
+	if take(p.End()) {
+		return parsed
+	}
+	return finish(parsed, s, p)
+}
+
+// finish counts what follows the last message as unplaced.
+func finish(parsed Parsed, s stream.Stream, p *Parser) Parsed {
+	p.End()
+	parsed.Unplaced = s.End - s.Start
+	if n := len(parsed.Messages); n > 0 {
+		parsed.Unplaced = s.End - parsed.Messages[n-1].End
+	}
 	return parsed
 }
 
-func one(cursor *stream.Cursor, kind Kind, limits Limits, noBody bool) Message {
-	message := Message{Kind: kind, Offset: cursor.Offset()}
+// unaccounted grants everything: Parse reads a stream already whole, and its
+// holder bounds it.
+type unaccounted struct{}
 
-	line, err := cursor.ReadLine(limits.MaxStartLine)
-	if err != nil {
-		return refused(message, cursor, defectOf(err), "reading the start line: "+err.Error())
-	}
-
-	switch kind {
-	case Request:
-		if !message.readRequestLine(string(line)) {
-			return refused(message, cursor, DefectMalformed, "the first line is not a request line")
-		}
-	case Response:
-		if !message.readStatusLine(string(line)) {
-			return refused(message, cursor, DefectMalformed, "the first line is not a status line")
-		}
-	default:
-		return refused(message, cursor, DefectMalformed, "no kind of message was asked for")
-	}
-
-	headerBytes := 0
-	for {
-		line, err := cursor.ReadLine(limits.MaxHeaderLine)
-		if err != nil {
-			return refused(message, cursor, defectOf(err), "reading a field line: "+err.Error())
-		}
-		if len(line) == 0 {
-			break
-		}
-		if len(message.Headers) >= limits.MaxHeaders {
-			return refused(message, cursor, DefectLimit, fmt.Sprintf("more than %d field lines", limits.MaxHeaders))
-		}
-		headerBytes += len(line)
-		if headerBytes > limits.MaxHeaderBytes {
-			return refused(message, cursor, DefectLimit, fmt.Sprintf("more than %d bytes of field lines", limits.MaxHeaderBytes))
-		}
-		header, ok := readHeader(string(line))
-		if !ok {
-			return refused(message, cursor, DefectMalformed, "a field line no strict endpoint would accept")
-		}
-		message.Headers = append(message.Headers, header)
-	}
-
-	framing, length, detail := message.frame(kind, noBody)
-	message.Framing = framing
-
-	switch framing {
-	case FramingAmbiguous:
-		// Two disagreeing framings put the next boundary in two places.
-		return refused(message, cursor, DefectAmbiguousFraming, detail)
-
-	case FramingNone:
-		if detail != "" {
-			return refused(message, cursor, DefectMalformed, detail)
-		}
-		message.Framed, message.Complete = true, true
-
-	case FramingContentLength:
-		message.readCounted(cursor, limits, length)
-
-	case FramingChunked:
-		message.readChunked(cursor, limits)
-
-	case FramingUntilClose:
-		message.readUntilClose(cursor, limits)
-	}
-
-	message.End = cursor.Offset()
-	return message
-}
-
-// readCounted reads a body whose length the message declared.
-func (m *Message) readCounted(cursor *stream.Cursor, limits Limits, length uint64) {
-	m.BodyLength = length
-
-	reach := min(length, cursor.Remaining())
-	body, holed, err := cursor.Take(reach, limits.MaxBodyBytes)
-	if err != nil {
-		m.Defect, m.Detail = defectOf(err), "reading a declared body: "+err.Error()
-		return
-	}
-	m.Body, m.BodyHoled = body, holed
-	m.BodyElided = reach - holed - uint64(len(body))
-
-	switch {
-	case reach < length:
-		m.Detail = fmt.Sprintf("the stream ends %d bytes into a body of %d", reach, length)
-		m.Defect = DefectStreamEnded
-	case holed > 0:
-		// The declared length still says where this message ends: the body is lost,
-		// not the structure.
-		m.Framed = true
-		m.Detail = fmt.Sprintf("%d of the body's %d bytes were never captured", holed, length)
-		m.Defect = DefectHole
-	default:
-		m.Framed, m.Complete = true, true
-	}
-}
-
-// readChunked reads a body framed by its chunks, and the trailer section after
-// them.
-func (m *Message) readChunked(cursor *stream.Cursor, limits Limits) {
-	for chunks := 0; ; chunks++ {
-		if chunks >= limits.MaxChunks {
-			m.Defect, m.Detail = DefectLimit, fmt.Sprintf("more than %d chunks", limits.MaxChunks)
-			return
-		}
-
-		line, err := cursor.ReadLine(limits.MaxHeaderLine)
-		if err != nil {
-			m.Defect, m.Detail = defectOf(err), "reading a chunk size: "+err.Error()
-			return
-		}
-		size, ok := chunkSize(string(line))
-		if !ok {
-			m.Defect, m.Detail = DefectMalformed, "a chunk size no decoder would accept"
-			return
-		}
-		if size == 0 {
-			break
-		}
-		if size > cursor.Remaining() {
-			m.Defect = DefectStreamEnded
-			m.Detail = fmt.Sprintf("the stream ends inside a chunk of %d bytes", size)
-			return
-		}
-
-		body, holed, err := cursor.Take(size, limits.MaxBodyBytes-len(m.Body))
-		if err != nil {
-			m.Defect, m.Detail = defectOf(err), "reading a chunk: "+err.Error()
-			return
-		}
-		m.Body = append(m.Body, body...)
-		m.BodyLength += size
-		m.BodyHoled += holed
-		m.BodyElided += size - holed - uint64(len(body))
-
-		end, err := cursor.ReadN(2)
-		if err != nil {
-			m.Defect, m.Detail = defectOf(err), "reading the end of a chunk: "+err.Error()
-			return
-		}
-		if string(end) != "\r\n" {
-			m.Defect, m.Detail = DefectMalformed, "a chunk not followed by CRLF"
-			return
-		}
-	}
-
-	for {
-		line, err := cursor.ReadLine(limits.MaxHeaderLine)
-		if err != nil {
-			m.Defect, m.Detail = defectOf(err), "reading a trailer field: "+err.Error()
-			return
-		}
-		if len(line) == 0 {
-			break
-		}
-		if len(m.Trailers) >= limits.MaxTrailers {
-			m.Defect, m.Detail = DefectLimit, fmt.Sprintf("more than %d trailer fields", limits.MaxTrailers)
-			return
-		}
-		trailer, ok := readHeader(string(line))
-		if !ok {
-			m.Defect, m.Detail = DefectMalformed, "a trailer field no strict endpoint would accept"
-			return
-		}
-		m.Trailers = append(m.Trailers, trailer)
-	}
-
-	m.Framed = true
-	if m.BodyHoled > 0 {
-		m.Detail = fmt.Sprintf("%d of the body's %d bytes were never captured", m.BodyHoled, m.BodyLength)
-		m.Defect = DefectHole
-		return
-	}
-	m.Complete = true
-}
+func (unaccounted) Reserve(Charge) bool { return true }
+func (unaccounted) Release(Charge)      {}
 
 // readUntilClose reads a body that ends with the connection. It is never
 // complete: a fragment carries no close, so a closed connection and missing
 // bytes look alike.
 func (m *Message) readUntilClose(cursor *stream.Cursor, limits Limits) {
 	reach := cursor.Remaining()
-	body, holed, err := cursor.Take(reach, limits.MaxBodyBytes)
-	if err != nil {
-		m.Defect, m.Detail = defectOf(err), "reading a body framed by the close: "+err.Error()
-		return
-	}
+	// Take cannot fail asked for exactly the offsets that remain.
+	body, holed, _ := cursor.Take(reach, limits.MaxBodyBytes)
 	m.Body, m.BodyHoled, m.BodyLength = body, holed, reach
 	m.BodyElided = reach - holed - uint64(len(body))
 	m.Defect = DefectStreamEnded
@@ -635,23 +507,6 @@ func splitList(value string) []string {
 		out = append(out, strings.Trim(part, " \t"))
 	}
 	return out
-}
-
-func refused(m Message, cursor *stream.Cursor, defect Defect, detail string) Message {
-	m.Defect, m.Detail = defect, detail
-	m.End = cursor.Offset()
-	return m
-}
-
-func defectOf(err error) Defect {
-	switch {
-	case errors.Is(err, stream.ErrGap):
-		return DefectHole
-	case errors.Is(err, stream.ErrTooLong):
-		return DefectLimit
-	default:
-		return DefectStreamEnded
-	}
 }
 
 // isToken reports whether s is a field name or method: the visible ASCII that

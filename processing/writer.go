@@ -18,9 +18,9 @@ import (
 const (
 	ArtifactName = "approved.jsonl"
 	// ArtifactVersion is what the worker writes. The reader also reads
-	// ArtifactVersion1, under that version's rules; a reader of version 1
-	// alone refuses a version 2 artifact.
-	ArtifactVersion  = ArtifactVersion3
+	// versions 1 to 3, each under its own rules; a reader of an earlier
+	// version alone refuses a later one.
+	ArtifactVersion  = ArtifactVersion4
 	ArtifactVersion2 = "observer.approved/2"
 	ArtifactVersion1 = "observer.approved/1"
 )
@@ -50,6 +50,14 @@ var (
 
 // ArtifactVersion3 identifies one exchange per line, or a retirement line.
 const ArtifactVersion3 = "observer.approved/3"
+
+// ArtifactVersion4 is version 3's two lines, with an exchange line that may be
+// released while its connection is still open. So an exchange line carries the
+// connection's provisional record (record.FromIdentity), which states its
+// identity and none of its lifecycle or totals, and the connection line, at
+// retirement, carries the final record. Version 3 promised every exchange line
+// came after its connection's retirement, which version 4 does not.
+const ArtifactVersion4 = "observer.approved/4"
 
 const (
 	ArtifactExchange   = "exchange"
@@ -90,6 +98,13 @@ type Artifact struct {
 	Reconstruction           *record.Reconstruction    `json:"reconstruction,omitempty"`
 	ReconstructionTruncation *ReconstructionTruncation `json:"reconstruction_truncation,omitempty"`
 	PolicyExclusions         []PolicyExclusion         `json:"policy_exclusions"`
+	// ReconstructionUnplaced is, on a version 4 connection line and only there,
+	// the connection's unplaced total: the offsets of its established prefix,
+	// over both directions, that were never read as part of a message, as
+	// version 3 published it on every exchange line (record.Reconstruction's
+	// Unplaced). It is determined where the connection's content was read to
+	// its retirement, and undetermined with its reason where it was not.
+	ReconstructionUnplaced *record.Count `json:"reconstruction_unplaced,omitempty"`
 	// ExchangeIDs is historical version 2 data. Version 3 uses ExchangeID
 	// on each exchange line; versions 1 and 3 have no range.
 	ExchangeIDs *IDRange `json:"exchange_ids,omitempty"`
@@ -206,10 +221,12 @@ type ReconstructionTruncation struct {
 // malformed_message, ambiguous_framing, processing_limit, unsupported_message,
 // unpaired_exchange, unparsed_suffix, or connection_cut
 // (TruncationConnectionCut). These codes never describe source text.
-// TruncationConnectionCut is the stop of a connection cut because it held as
-// much input as one connection may while waiting to be processed: its input
-// was discarded from its first byte, so the stop's offset is zero and its
-// evidence offset is how far that direction's discarded input ran.
+// TruncationConnectionCut is the stop of a connection cut because it could not
+// hold more unreleased work: at its own bound (Options.ConnectionInput), or
+// with the session's shared allowance full, a work reservation refused. What
+// it held unreleased was discarded, so the stop's offset is the first byte of
+// that direction no exchange line carries - zero where nothing was released -
+// and its evidence offset is how far that direction's discarded input ran.
 const TruncationConnectionCut = "connection_cut"
 
 type TruncationStop struct {

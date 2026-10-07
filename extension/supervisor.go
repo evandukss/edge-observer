@@ -26,8 +26,9 @@ type Config struct {
 	Session      string
 	Revision     string
 	WriteContent bool
-	// WaitingBytes is the intake bytes connections waiting on this extension
-	// may hold together (WaitingBytes).
+	// WaitingBytes is the charge in the observer's shared allowance that the
+	// connections waiting on this extension may hold together, each as its
+	// Call.Bytes (WaitingBytes).
 	WaitingBytes int64
 	Clock        Clock
 	// Events receives every Event; nil discards them.
@@ -44,7 +45,11 @@ type Config struct {
 // Call is one exchange sent to an extension.
 type Call struct {
 	ID uint64
-	// Bytes is the intake bytes its connection holds while it waits.
+	// Bytes is its connection's charge in the observer's shared allowance when
+	// the call is made: its captured input, what its reading keeps and the
+	// copies of its exchanges, all of which it holds while it waits. It is
+	// what the call is admitted at against WaitingBytes, never the message's
+	// length.
 	Bytes int64
 	// Message is the exchange message, one JSON object and its line feed.
 	Message []byte

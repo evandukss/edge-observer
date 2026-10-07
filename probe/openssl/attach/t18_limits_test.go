@@ -34,8 +34,8 @@ func t18Settled(t *testing.T, binary string, c configured, s *t18Session, want u
 
 // Rows 4, 10 and 17, the event allowance, on the running program with real
 // traffic. With limits.events N, one connection is exchanged, closed,
-// processed and written, refunding its input, and four connections are kept
-// open and exchanged on in turn until events are refused at the allowance.
+// processed and written, refunding its input, and four unfinished request
+// bodies keep their event reservations until the shared allowance refuses.
 // What the allowance costs is those connections: the refusals are counted
 // apart from capture loss, the account names no reason the session ended
 // for, the session runs on, and a connection idle through the overload
@@ -46,12 +46,13 @@ func t18Settled(t *testing.T, binary string, c configured, s *t18Session, want u
 func TestT18TheAdmissionLimitCostsConnectionsAndTheSessionGoesOn(t *testing.T) {
 	binary := built(t)
 	const limit = 60
-	const exchanges = 40
+	const chunks = 80
 	const secret = "Bearer t18-limit-secret"
 	for _, limited := range []bool{true, false} {
 		name := map[bool]string{true: "at the limit", false: "under the default limit"}[limited]
 		t.Run(name, func(t *testing.T) {
-			port := t18Serving(t)
+			peer := unfinishedServing(t)
+			port := peer.port
 			decided := speaking(t, port)
 			undecided := t18OpenConnections(t, port, 4)
 			later := speaking(t, port)
@@ -71,13 +72,26 @@ func TestT18TheAdmissionLimitCostsConnectionsAndTheSessionGoesOn(t *testing.T) {
 				t.Fatalf("wiring, not the property: %d events were admitted before the open connections began, "+
 					"so the limit is not reached across them", admitted)
 			}
-			for asked := 0; asked < exchanges; asked++ {
-				t18Ask(t, undecided[asked%len(undecided)], fmt.Sprintf("/?asked=t18-undecided-%d", asked), "Authorization: "+secret)
+			for n, client := range undecided {
+				peer.begin(t, client, fmt.Sprintf("/?asked=t18-undecided-%d", n), "Authorization: "+secret, "X-Chunk-Size: 64")
 			}
-			overloaded := inspected(t, binary, c)
+			// Four headers and eighty separately acknowledged body calls exceed
+			// sixty events, while each connection has just one pending message.
+			// Small chunks keep bytes below the separate shared byte allowance.
+			for sent := 0; sent < chunks; sent++ {
+				peer.chunk(t, undecided[sent%len(undecided)], 64)
+			}
+			overloaded := t18Until(t, binary, c, 10*time.Second,
+				"wiring, not the property: unfinished bodies did not reach the admission allowance",
+				func(a account.Account) bool {
+					if limited {
+						return a.Seen != nil && a.Seen.GateRefused > 0
+					}
+					return t18Admitted(a) > limit
+				})
 			if limited && (overloaded.Seen == nil || overloaded.Seen.GateRefused == 0) {
-				t.Fatalf("wiring, not the property: %d exchanges on four open connections refused nothing at an allowance of %d: %+v",
-					exchanges, limit, overloaded.Seen)
+				t.Fatalf("wiring, not the property: %d body chunks on four unfinished requests refused nothing at an allowance of %d: %+v",
+					chunks, limit, overloaded.Seen)
 			}
 			if s.ended() {
 				t.Fatalf("the session ended at the allowance:\n%s", s.transcript())
@@ -88,8 +102,8 @@ func TestT18TheAdmissionLimitCostsConnectionsAndTheSessionGoesOn(t *testing.T) {
 			t18Until(t, binary, c, 20*time.Second, "the connection exchanged after the overload was never written",
 				func(a account.Account) bool { return t18Written(a) > t18Written(overloaded) })
 			sealed := s.stop(t, c)
-			t.Logf("%d exchanges on the open connections; %d events admitted; seen %+v; stopped record %v",
-				exchanges, t18Admitted(sealed), sealed.Seen, s.records("stopped"))
+			t.Logf("%d body chunks on unfinished requests; %d events admitted; seen %+v; stopped record %v",
+				chunks, t18Admitted(sealed), sealed.Seen, s.records("stopped"))
 
 			targets := t18Targets(t18Approved(t, s.directory(c)))
 			for _, want := range []string{"/?asked=t18-decided", "/?asked=t18-later"} {
@@ -133,8 +147,9 @@ func TestT18TheAdmissionLimitCostsConnectionsAndTheSessionGoesOn(t *testing.T) {
 // Rows 4 and 17, the other exhaustion. The volatile intake is charged each
 // record's metadata as well as its payload, so with events carrying a full
 // payload it fills before the event allowance does. Four connections are kept
-// open and read in calls larger than an event carries until the intake
-// refuses records, with nothing refused by the kernel or at the allowance. What
+// open with unfinished request bodies. Each separately acknowledged TLS write
+// fits one event, and both source and parser representations stay charged until
+// the intake refuses records. Nothing is refused by the kernel or at the allowance. What
 // that costs is those connections: the refusals are
 // counted, the account names no reason the session ended for, the session
 // runs on, and a connection idle through it exchanges afterwards and is
@@ -142,7 +157,8 @@ func TestT18TheAdmissionLimitCostsConnectionsAndTheSessionGoesOn(t *testing.T) {
 func TestT18AFullVolatileIntakeCostsConnectionsAndTheSessionGoesOn(t *testing.T) {
 	binary := built(t)
 	const allowance = 8192
-	port := t18Serving(t)
+	peer := unfinishedServing(t)
+	port := peer.port
 	open := t18OpenConnections(t, port, 4)
 	later := speaking(t, port)
 	c := configuring(t, target("client", open[0].process))
@@ -151,21 +167,25 @@ func TestT18AFullVolatileIntakeCostsConnectionsAndTheSessionGoesOn(t *testing.T)
 	t18Ask(t, open[0], "/?asked=t18-intake-first", "Authorization: Bearer t18-intake-secret")
 	t18Until(t, binary, c, 10*time.Second, "wiring, not the property: nothing was captured before the load",
 		func(a account.Account) bool { return a.Seen != nil && a.Seen.Records >= 2 })
-	asked := 0
+	for n, client := range open {
+		peer.begin(t, client, fmt.Sprintf("/?asked=t18-intake-%d", n), "Authorization: Bearer t18-intake-secret")
+	}
+	sent := 0
 	var full account.Account
-	for ; asked < 400; asked++ {
-		t18Ask(t, open[asked%len(open)], fmt.Sprintf("/mega?asked=t18-intake-%d", asked))
-		if asked%20 == 19 {
+	for sent < allowance {
+		peer.chunk(t, open[sent%len(open)], unfinishedChunk)
+		sent++
+		if sent%64 == 0 {
 			if full = inspected(t, binary, c); full.Seen != nil && full.Seen.IntakeRefused > 0 {
 				break
 			}
 		}
 	}
 	// The session goes on, so admissions keep growing as slots are returned; what
-	// shows the exhaustion is the intake's is that the allowance refused nothing.
+	// distinguishes intake exhaustion is that the event allowance refused nothing.
 	if full.Seen == nil || full.Seen.IntakeRefused == 0 || full.Seen.GateRefused != 0 {
-		t.Fatalf("wiring, not the property: after %d answers of a mebibyte the intake refused %+v at an allowance of %d, "+
-			"so the exhaustion reached is not the intake's alone", asked, full.Seen, allowance)
+		t.Fatalf("wiring, not the property: after %d unfinished-body bytes the intake refused %+v at an allowance of %d, "+
+			"so the exhaustion reached is not the intake's alone", sent*unfinishedChunk, full.Seen, allowance)
 	}
 	if s.ended() {
 		t.Fatalf("the session ended when the volatile intake was full:\n%s", s.transcript())
@@ -176,8 +196,8 @@ func TestT18AFullVolatileIntakeCostsConnectionsAndTheSessionGoesOn(t *testing.T)
 	t18Until(t, binary, c, 20*time.Second, "the connection exchanged after the full intake was never written",
 		func(a account.Account) bool { return t18Written(a) > t18Written(full) })
 	sealed := s.stop(t, c)
-	t.Logf("%d answers of a mebibyte; %d events admitted; seen %+v; processing %+v; seal %+v; stopped record %v",
-		asked, t18Admitted(sealed), sealed.Seen, sealed.Processing, sealed.Seal, s.records("stopped"))
+	t.Logf("%d unfinished-body bytes; %d events admitted; seen %+v; processing %+v; seal %+v; stopped record %v",
+		sent*unfinishedChunk, t18Admitted(sealed), sealed.Seen, sealed.Processing, sealed.Seal, s.records("stopped"))
 
 	if !slices.Contains(t18Targets(t18Approved(t, s.directory(c))), "/?asked=t18-intake-later") {
 		t.Errorf("the exchange after the full intake is not in the approved output")

@@ -67,8 +67,9 @@ func (f *cutLinesFixture) transfer(handle uint64, admitted bool) {
 	f.stamp++
 	f.numbers[handle]++
 	p, instance := cutLinesIdentity()
-	// Incomplete framing keeps input pending until the held-input bound.
-	const payload = "GET /waiting HTTP/1.1\r\n"
+	// Each framed request awaits a response, so pending message descriptors
+	// accumulate even after the worker has read every fragment.
+	const payload = "GET /waiting HTTP/1.1\r\nHost: test\r\n\r\n"
 	d := f.gate.Admit(probe.DeliveryTransfer, true)
 	if d.Admitted != admitted {
 		f.t.Fatalf("wiring, not the property: handle %d transfer %d admission=%v, want %v: %+v",
@@ -190,7 +191,7 @@ func (f *cutLinesFixture) check(out processing.Outcome, handles []uint64, cuts, 
 			}
 			if stop.Direction == "sent" {
 				found = true
-				// ACCOUNT.md processing and record.md require bound cuts at byte 0.
+				// No exchange was released, so the first unreleased byte is zero.
 				if cuts != 0 && (stop.Reason != "connection_cut" || stop.Offset != "0") {
 					f.t.Errorf("bound cut on handle %d must stop at 0 for connection_cut: %+v", handle, stop)
 				}

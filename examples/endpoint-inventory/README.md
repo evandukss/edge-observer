@@ -55,10 +55,11 @@ refusals before treating the file as complete.
 
 Totals always mean **exchanges this extension received**, including excluded,
 incomplete and one-sided exchanges. They do not count traffic skipped while the
-extension was unavailable or busy. Exchanges arrive when their connection ends
-(or the session ends). There is no latency estimate: the protocol has no
-per-request timing. Source ids resolve through the session's approved
-[exchange ranges](../../docs/approved-inspection.md#exchange-ids).
+extension was unavailable or busy. Exchanges arrive as the observer releases
+them, while their connection is open; excluded ones arrive once the connection
+ends or is cut. There is no latency estimate: the protocol has no per-request
+timing. Source ids resolve through the `exchange_id` of the session's
+[approved exchange lines](../../docs/approved-inspection.md#lines-and-exchange-ids).
 
 ## Checks
 
