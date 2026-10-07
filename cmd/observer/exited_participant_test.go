@@ -21,7 +21,9 @@ import (
 	"github.com/evandukss/edge-observer/process"
 )
 
-// catRunning is a process this test owns, running until its input closes.
+// catRunning is a process this test owns, running until its input closes. It
+// returns once /proc shows the process running cat, so a reader that looks at
+// once never finds it between its exec and its command line.
 func catRunning(t *testing.T) (*exec.Cmd, func()) {
 	t.Helper()
 	cat, err := exec.LookPath("cat")
@@ -41,6 +43,7 @@ func catRunning(t *testing.T) (*exec.Cmd, func()) {
 		_ = command.Wait()
 	}
 	t.Cleanup(end)
+	waitRunning(t, int32(command.Process.Pid), "cat", cat)
 	return command, end
 }
 
