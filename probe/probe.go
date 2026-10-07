@@ -17,6 +17,7 @@ import (
 
 	"github.com/evandukss/edge-observer/admission"
 	"github.com/evandukss/edge-observer/fragment"
+	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/process"
 )
 
@@ -59,12 +60,15 @@ type Transfer struct {
 	// different facts, and only the last may use the handle's earlier binding.
 	Outcome SocketOutcome
 
-	// Stamp is this observation's place in the backend's production order: the
-	// only thing that locates a loss. Stamps are consecutive, so a missing number
-	// is an observation produced and not delivered, which says which streams were
-	// live across the gap. Zero means the backend does not stamp: ordering
-	// evidence absent, not a lossless run.
+	// Stamp is this observation's place in the backend's session-wide production
+	// order, which counts what was produced. It does not locate a loss to a
+	// connection: two producers can take stamps in one order and deliver in the
+	// other. Sequence does. Zero means the backend does not stamp.
 	Stamp uint64
+
+	// Sequence is this transfer's place in its own occupancy of the handle, the
+	// evidence that locates a loss to this connection and direction.
+	Sequence Sequence
 
 	// Endpoint is the adapter's opaque handle for the connection: unique within a
 	// process while open, reusable afterwards (hence Closed).
@@ -91,6 +95,10 @@ type Transfer struct {
 	Measured bool
 
 	At time.Time
+
+	// Slot is the delivery gate's slot for this event, carried to whatever
+	// retains its input; nil where the event was delivered without one.
+	Slot held.Slot
 }
 
 // Connection is one connection ending, letting an endpoint be reused without
@@ -108,8 +116,131 @@ type Connection struct {
 	// Stamp is this ending's production-order place: an ending can be lost too.
 	Stamp uint64
 
+	// Sequence is the occupancy this ending closes. Its Number is zero: an ending
+	// takes no place among the transfers.
+	Sequence Sequence
+
+	// Final is what the occupancy had taken in each direction when its handle was
+	// released, which settles whether its last transfers arrived.
+	Final Final
+
 	Endpoint uint64
 	At       time.Time
+
+	// Slot is the delivery gate's slot for this event, as on a Transfer.
+	Slot held.Slot
+}
+
+// Sequence is an observation's place in a producer-owned occupancy of a
+// handle. An occupancy runs from the handle's birth, or from the first call the
+// producer recorded on it, to its release, and the producer numbers it whether
+// or not anything downstream sees the release: a handle address reused after a
+// lost ending is a different occupancy.
+//
+// Numbers are kept per direction and count byte-moving calls from one, so a
+// number missing on arrival is a call that moved bytes and was not delivered,
+// located to this occupancy and direction. A call that moved no bytes takes no
+// number.
+type Sequence struct {
+	// Occupancy is the producer's name for the occupancy, unique within one
+	// producer while the producer runs. Zero is an observation the producer could
+	// keep no occupancy for, whose place nothing can check.
+	Occupancy uint64
+
+	// Number is this transfer's place among its occupancy's transfers in its
+	// direction, from one. Zero on an ending, and on a transfer with no occupancy.
+	Number uint64
+
+	// Born says the occupancy began at its handle's observed birth, so number one
+	// is the handle's first transfer in each direction. Without it the occupancy
+	// began at the first call the producer recorded on an existing handle.
+	Born bool
+
+	// Overlapped says two calls in this direction were in flight on the handle at
+	// once, which OpenSSL's supported use forbids, so the order of their bytes is
+	// not established.
+	Overlapped bool
+
+	// Unlocated is how many losses the producer could not place in any occupancy,
+	// counted when this observation was produced. It only grows, so a rise between
+	// two observations says such a loss fell between them.
+	Unlocated uint64
+
+	// BeginUnlocated is the unlocated count when this occupancy began.
+	// A non-born occupancy beginning after a loss may have missed its first bytes.
+	BeginUnlocated uint64
+
+	// Dropped is how many of this transfer's direction had their event refused a
+	// ring reservation, counted when this observation was produced: the drops that
+	// lie below this number. It only grows within an occupancy. Settling an open
+	// tail counts the occupancy's final dropped total less this, so a drop already
+	// located below a delivered number is not counted a second time, and a non-drop
+	// gap below the tail does not hide a tail drop.
+	Dropped uint64
+}
+
+// Terminal is one direction's last number when an occupancy's numbers were read.
+type Terminal struct {
+	// Last is the last number taken in this direction; zero is none taken.
+	Last uint64
+
+	// Dropped is how many of this direction's numbers were lost to a refused ring
+	// reservation (a byte-moving call whose event did not fit). It is the only part
+	// of an open connection's undelivered tail that settles as a located loss
+	// (decision 476): the rest - a call still in flight, an event submitted but not
+	// drained, a return refused for a lost grant, a nested call nothing numbers -
+	// is an explicitly incomplete tail, counted on its own counter, not here.
+	Dropped uint64
+
+	// InFlight says a call in this direction had not returned when Last was read,
+	// so the call's bytes, if any, are numbered after Last.
+	InFlight bool
+}
+
+// Final is an occupancy's last numbers in each direction. Known is false where
+// the producer held nothing for the occupancy when it was asked. Exited says the
+// occupancy ended because its execution did (an exit, or an exec replacing its
+// image) while it still held the handle, not by a release of the handle.
+type Final struct {
+	Known    bool
+	Sent     Terminal
+	Received Terminal
+	Exited   bool
+}
+
+// Handle names one handle of one admitted execution, which is what a producer
+// keys an occupancy by.
+type Handle struct {
+	Instance admission.Key
+	Endpoint uint64
+}
+
+// Settlement is what a producer holds for one handle when asked: the occupancy
+// it holds there now and that occupancy's last numbers. Occupancy zero is no
+// occupancy held.
+type Settlement struct {
+	Occupancy uint64
+	Final     Final
+}
+
+// Settler answers, once production has stopped, what a producer still holds:
+// the settled terminal evidence for a connection whose ending never arrived.
+type Settler interface {
+	// Settled is the occupancy the producer holds for handle, or an error where
+	// that cannot be read (never a zero Settlement standing in for one).
+	Settled(handle Handle) (Settlement, error)
+
+	// Unlocated is the producer's count of losses it could not place in any
+	// occupancy, read now.
+	Unlocated() (uint64, error)
+}
+
+// Settling is an attachment that is also a Settler. One that cannot answer is
+// honest by not implementing it; every connection still open at the end then
+// has an unsettled tail.
+type Settling interface {
+	Attachment
+	Settler
 }
 
 // Sink is where an attached adapter puts what it sees. Both methods run on the
@@ -194,6 +325,37 @@ type Request struct {
 	// Deny is what an exclusion denies: those instances and their subtrees, given
 	// with Admit so the adapter enforces the denial where admissions are decided.
 	Deny []admission.Denial
+
+	// Ended, where set, is told once of every admitted execution the attachment
+	// establishes as ended, as it lets go of what it kept for it. It runs on the
+	// attachment's own goroutines and must return quickly.
+	Ended func(Ended)
+}
+
+// Ended is an admitted execution established as ended. An attachment keeps
+// nothing for it afterwards: it is counted under its target (Ending), and this
+// is the only record of its identity.
+type Ended struct {
+	Selection admission.Selection
+
+	// Evidence is what established the end.
+	Evidence string
+	At       time.Time
+}
+
+// EndedCount is how many admissions under one target an attachment has
+// established as ended and let go of.
+type EndedCount struct {
+	Target string
+	Number int
+	Count  int
+}
+
+// Ending is an attachment that lets go of an admission once its execution is
+// established as ended, and counts it under its target instead.
+type Ending interface {
+	Attachment
+	EndedCounts() ([]EndedCount, error)
 }
 
 // Unmet is why a capability does not satisfy this request, nil where it does.
@@ -273,6 +435,14 @@ type Capability struct {
 	// no probe on, by name, since a reader acts on which function is unwatched.
 	Unobserved []string `json:"unobserved,omitempty"`
 
+	// Unprobed names the entry points capture requires - byte-moving or lifecycle
+	// (SSL_new, SSL_free) - that were present to probe and could not be. While it is
+	// non-empty capture is not live: no transfer is sequenced and no exchange is
+	// certified across the whole attachment, though metadata still flows. Empty is
+	// capture live. An export absent from the library is not here; it withdraws only
+	// its own claim, not sequencing.
+	Unprobed []string `json:"unprobed,omitempty"`
+
 	// SocketEvidence is whether this attachment establishes the socket from the
 	// object the kernel acquired for a call's own I/O, rather than from a table of
 	// descriptors it watched being created. A separate axis from Binding.
@@ -325,6 +495,7 @@ func Weakest(capabilities ...Capability) Capability {
 
 	folded := capabilities[0]
 	folded.Unobserved = slices.Clone(capabilities[0].Unobserved)
+	folded.Unprobed = slices.Clone(capabilities[0].Unprobed)
 	folded.Withheld = slices.Clone(capabilities[0].Withheld)
 	for _, next := range capabilities[1:] {
 		folded.Payload = folded.Payload && next.Payload
@@ -352,6 +523,14 @@ func Weakest(capabilities ...Capability) Capability {
 		for _, symbol := range next.Unobserved {
 			if !slices.Contains(folded.Unobserved, symbol) {
 				folded.Unobserved = append(folded.Unobserved, symbol)
+			}
+		}
+		// The not-live state is the whole set's if any member has it: a reader of the
+		// combined capability must see every member's unprobed entry points, whatever
+		// the order the members fold in.
+		for _, symbol := range next.Unprobed {
+			if !slices.Contains(folded.Unprobed, symbol) {
+				folded.Unprobed = append(folded.Unprobed, symbol)
 			}
 		}
 	}
@@ -809,24 +988,6 @@ type Admitting interface {
 	// Retract takes back grants Admit wrote, for a program found not to be the
 	// one resolved.
 	Retract(granted []admission.Selection)
-}
-
-// Consumed is how many production-order places an attachment took and
-// delivered nothing for. ReserveFailed is an event produced and lost; Refused
-// is a transfer refused deliberately so its gap invalidates. Watching only the
-// first would suppress an intended invalidation.
-type Consumed struct {
-	ReserveFailed int64
-	Refused       int64
-}
-
-// Consuming is an attachment that can say what it took out of the production
-// order; which refusal paths take a number is the backend's knowledge alone.
-// Without it the consumer confirms every gap.
-type Consuming interface {
-	Attachment
-
-	Consumed() (Consumed, error)
 }
 
 // Counting is an attachment that can say what its capture lost. One that

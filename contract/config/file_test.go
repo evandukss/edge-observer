@@ -111,7 +111,7 @@ func TestAbsentKeysResolveToTheirDefaults(t *testing.T) {
 		t.Fatal(findings)
 	}
 	if file.Log != LogStdout || !file.WriteContent || file.Watch[0].Children != ChildrenAll ||
-		file.Limits != (Limits{DefaultApprovedOutputBoundMiB, DefaultAdmittedEventLimit, DefaultStateEverySeconds,
+		file.Limits != (Limits{DefaultAdmittedEventLimit, DefaultStateEverySeconds,
 			DefaultWorkers}) || file.Extensions != nil {
 		t.Errorf("defaults: %+v", file)
 	}
@@ -129,7 +129,7 @@ func TestTheContractExampleCompilesInTheFixedOrder(t *testing.T) {
 	    "bodies": [], "body_values": []},
 	  "mask": {"headers": {"x-api-key": "withheld"}, "json": {"response": {"/email": "withheld"}}},
 	  "truncate": {"headers": {"x-trace-id": 8}},
-	  "limits": {"output_mib": 64, "events": 16384, "state_every_seconds": 30, "workers": 1}}`)
+	  "limits": {"events": 16384, "state_every_seconds": 30, "workers": 1}}`)
 	want := []string{RemoveHeaders, RemoveQueryParameters, RequestBodyFields, RemoveJSONFields, ReplaceHeaderValues,
 		ReplaceJSONValues, TruncateHeaderValues}
 	if got := implementations(exchangeSlots(t, c)); !slices.Equal(got, want) {

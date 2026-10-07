@@ -123,8 +123,10 @@ and that its major version is 3.
 
 The functions the observer attaches to are listed in `probe/catalog.go`, with the OpenSSL release that
 introduced each: `SSL_read`, `SSL_write`, the `_ex` forms of both, `SSL_write_ex2`, the two TLS 1.3
-early-data functions, and `SSL_free` to tell one connection from the next. `SSL_peek` and
-`SSL_peek_ex` are catalogued and not attached, because the next read returns the same bytes again.
+early-data functions, `SSL_free` to tell one connection from the next, and `SSL_new` so a connection's
+transfers are numbered from its first. `SSL_peek` and `SSL_peek_ex` are catalogued and not attached,
+because the next read returns the same bytes again. A library policy that approves symbols by offset
+names `SSL_new` too.
 
 **A process with no `libssl.so` mapped is reported unsupported and is not observed**: OpenSSL linked
 statically into the program, or any TLS implementation that is not a `libssl.so`. The observer does not
@@ -148,8 +150,7 @@ endpoints could read a message differently, it refuses the message and says why 
 **There is no parser for any other protocol, HTTP/2 included.** Such traffic can enter the bounded
 volatile intake; the intake does not parse it or make it eligible for durable output.
 
-Reconstruction runs when a finished session is read back with `observer inspect`, never while it is
-capturing.
+Reconstruction runs while capturing, not when a session is read back.
 
 ## Not required
 

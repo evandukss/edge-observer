@@ -186,6 +186,24 @@ func (a Adapter) Inspect(p process.Process) probe.Support {
 			})
 		}
 	}
+	// Uncatalogued byte-moving routes are resolved the same way; one not exported
+	// by this library is simply not placed, not a defect.
+	for _, function := range a.Runtime.Uncatalogued {
+		if !function.Probed {
+			continue
+		}
+		route, err := probe.SymbolOffsets(library.Through, []string{function.Symbol})
+		if err != nil {
+			continue
+		}
+		if offset, resolved := route[function.Symbol]; resolved {
+			found.Probes = append(found.Probes, probe.Probe{
+				Symbol: function.Symbol,
+				Path:   library.Through,
+				Offset: offset,
+			})
+		}
+	}
 	slices.SortFunc(found.Probes, func(x, y probe.Probe) int { return strings.Compare(x.Symbol, y.Symbol) })
 
 	// Catalogued for this version and not exported: a short resolution, not an old

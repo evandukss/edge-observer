@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/evandukss/edge-observer/admission"
-	"github.com/evandukss/edge-observer/capture"
 	"github.com/evandukss/edge-observer/connection"
 	"github.com/evandukss/edge-observer/fragment"
 	"github.com/evandukss/edge-observer/probe"
@@ -51,15 +50,6 @@ func execution(namespace admission.Namespace, pid int32, generation admission.Ge
 	}
 }
 
-// stamped hands out consecutive production-order places; a test makes a loss
-// by skipping a number. Consecutive observations lost nothing: the control.
-type stamped struct{ next uint64 }
-
-func (o *stamped) take() uint64 { o.next++; return o.next }
-
-// skip drops n places, as n observations produced and never delivered would.
-func (o *stamped) skip(n uint64) { o.next += n }
-
 func transfer(p fragment.Process, endpoint uint64, direction fragment.Direction, length uint32) probe.Transfer {
 	return probe.Transfer{
 		Process:   p,
@@ -70,12 +60,6 @@ func transfer(p fragment.Process, endpoint uint64, direction fragment.Direction,
 		Measured:  true,
 		At:        at,
 	}
-}
-
-// order is the stamp source, per test.
-func ordered(t *testing.T) *stamped {
-	t.Helper()
-	return &stamped{}
 }
 
 // running is the admitted execution a test process stands for.
@@ -93,16 +77,16 @@ func ending(p fragment.Process, endpoint uint64) probe.Connection {
 
 // finished is the connection records after sealing, when open connections get
 // one.
-func finished(s *capture.Session) []connection.Record {
-	s.Finish(at, connection.Counted(0))
+func finished(s *producer) []connection.Record {
+	s.Finish(at)
 	return s.Records()
 }
 
-func session(t *testing.T) (*capture.Session, *collected) {
+func session(t *testing.T) (*producer, *collected) {
 	t.Helper()
 
 	sink := &collected{}
-	return capture.New(sink), sink
+	return produced(sink, nil), sink
 }
 
 func TestTheFragmentsOfOneStreamAreOrderedAndTheirOffsetsAdvanceByWhatMoved(t *testing.T) {
@@ -276,7 +260,7 @@ func TestACallThatMovedNoBytesProducesNoRecordAndIsCounted(t *testing.T) {
 // A refusing sink is counted and capture carries on.
 func TestASinkThatRefusesDoesNotStopCapture(t *testing.T) {
 	sink := &collected{refuse: true}
-	s := capture.New(sink)
+	s := produced(sink, nil)
 
 	s.Transfer(transfer(worker, 0x18, fragment.Sent, 10))
 	s.Transfer(transfer(worker, 0x18, fragment.Sent, 10))
@@ -401,223 +385,6 @@ func TestAConnectionThatCarriedNothingEarlyIsMarkedWithNothing(t *testing.T) {
 	}
 }
 
-// A stream that lost an observation is placeable below the gap and not at or
-// above it. The control, in the same run: a connection that ended before the
-// loss keeps every offset.
-func TestALocatedLossInvalidatesTheStreamsLiveAcrossItAndNoOthers(t *testing.T) {
-	sink := &collected{}
-	s := capture.Recording(sink, nil)
-	order := ordered(t)
-
-	// The control: transfers and ends before the loss.
-	ended := transfer(worker, 0x18, fragment.Sent, 10)
-	ended.Stamp = order.take()
-	s.Transfer(ended)
-	s.Closed(probe.Connection{Process: worker, Instance: running(worker), Stamp: order.take(), Endpoint: 0x18, At: at})
-
-	// The subject: live across the loss.
-	live := transfer(worker, 0x20, fragment.Sent, 10)
-	live.Stamp = order.take()
-	s.Transfer(live)
-
-	// Three observations produced and never delivered.
-	order.skip(3)
-
-	after := transfer(worker, 0x20, fragment.Sent, 7)
-	after.Stamp = order.take()
-	s.Transfer(after)
-
-	s.Finish(at, connection.Counted(int64(order.next)))
-
-	records := s.Records()
-	if len(records) != 3 {
-		t.Fatalf("%d connection records, want the ended one, the interrupted one and its successor", len(records))
-	}
-
-	control := records[0]
-	if !control.Placeable(fragment.Sent) {
-		t.Error("a connection that ended before the loss lost its placeable prefix")
-	}
-	if control.How != connection.HandleReleasedEnding {
-		t.Errorf("the control ended as %s", control.How)
-	}
-
-	interrupted := records[1]
-	held, found := interrupted.Placement(fragment.Sent)
-	if !found {
-		t.Fatal("the interrupted connection carries no placement for the direction that lost bytes")
-	}
-	if held.Positions != connection.PositionsUnknownFrom {
-		t.Fatalf("the interrupted connection's positions are %s", held.Positions)
-	}
-	if held.From != 10 {
-		t.Errorf("its positions are unknown from offset %d, and it had captured 10 bytes", held.From)
-	}
-	if held.Because != connection.ObservationLost {
-		t.Errorf("it says its positions went because %s", held.Because)
-	}
-	if held.Lost.Known {
-		t.Errorf("it claims %s of the missing observations were its own", held.Lost)
-	}
-	if interrupted.Placeable(fragment.Sent) {
-		t.Error("the interrupted connection reports itself placeable")
-	}
-	for _, offset := range []uint64{0, 9} {
-		if !held.Placeable(offset) {
-			t.Errorf("offset %d, captured before the loss, is not placeable", offset)
-		}
-	}
-	for _, offset := range []uint64{10, 11} {
-		if held.Placeable(offset) {
-			t.Errorf("offset %d, at or after the loss, is placeable", offset)
-		}
-	}
-
-	if got, want := s.Stats().Lost, int64(3); got != want {
-		t.Errorf("Lost = %d, want %d", got, want)
-	}
-	if got, want := s.Stats().Interrupted, int64(1); got != want {
-		t.Errorf("Interrupted = %d, want %d", got, want)
-	}
-}
-
-// A lost observation may have been a connection's end, so later traffic is a
-// new connection whose association is unknown because of the loss.
-func TestTrafficAfterALocatedLossIsANewConnectionWhoseBindingMayHaveGoneMissing(t *testing.T) {
-	sink := &collected{}
-	s := capture.Recording(sink, nil)
-	order := ordered(t)
-
-	before := transfer(worker, 0x18, fragment.Sent, 10)
-	before.Stamp = order.take()
-	s.Transfer(before)
-
-	order.skip(1)
-
-	after := transfer(worker, 0x18, fragment.Sent, 7)
-	after.Stamp = order.take()
-	s.Transfer(after)
-
-	s.Finish(at, connection.Counted(int64(order.next)))
-
-	if sink.at(0).Connection == sink.at(1).Connection {
-		t.Fatal("traffic after a lost observation continued the stream it may have ended")
-	}
-	if sink.at(1).Offset != 0 {
-		t.Errorf("the new connection's stream begins at offset %d", sink.at(1).Offset)
-	}
-
-	records := s.Records()
-	if len(records) != 2 {
-		t.Fatalf("%d connection records, want the interrupted one and its successor", len(records))
-	}
-	if records[0].How != connection.EndingUnobserved {
-		t.Errorf("the interrupted connection ended as %s", records[0].How)
-	}
-	if records[0].Handle.Generation == records[1].Handle.Generation {
-		t.Error("the successor reuses the interrupted connection's occupancy of the handle")
-	}
-
-	successor, found := records[1].Association(fragment.Sent)
-	if !found {
-		t.Fatal("the successor carries no association")
-	}
-	if successor.State != connection.Unknown {
-		t.Fatalf("the successor's association is %s", successor.State)
-	}
-	if successor.Reason != connection.ObservationLost {
-		t.Errorf("the successor's association is unknown because %s, and an observation was lost",
-			successor.Reason)
-	}
-	if records[1].Joinable(fragment.Sent) {
-		t.Error("a connection begun after a loss is joinable")
-	}
-}
-
-// An unstamped observation costs the run its ordering: streams are
-// unplaceable throughout, counted as their own state and never as a loss.
-func TestAnObservationWithNoPlaceInTheOrderCostsTheRunItsLocatedGaps(t *testing.T) {
-	sink := &collected{}
-	s := capture.Recording(sink, nil)
-	order := ordered(t)
-
-	first := transfer(worker, 0x18, fragment.Sent, 10)
-	first.Stamp = order.take()
-	s.Transfer(first)
-
-	unplaced := transfer(worker, 0x18, fragment.Sent, 5)
-	unplaced.Stamp = 0
-	s.Transfer(unplaced)
-
-	order.skip(2)
-	after := transfer(worker, 0x18, fragment.Sent, 5)
-	after.Stamp = order.take()
-	s.Transfer(after)
-
-	s.Finish(at, connection.Counted(int64(order.next)))
-
-	if got, want := s.Stats().Unstamped, int64(1); got != want {
-		t.Errorf("Unstamped = %d, want %d", got, want)
-	}
-	records := s.Records()
-	if len(records) == 0 {
-		t.Fatal("no connection records")
-	}
-	held, found := records[0].Placement(fragment.Sent)
-	if !found {
-		t.Fatal("the interrupted connection carries no placement")
-	}
-	if held.Positions != connection.PositionsUnknownThroughout {
-		t.Fatalf("positions are %s, and nothing in this run can locate a gap", held.Positions)
-	}
-	for _, offset := range []uint64{0, 1, 10} {
-		if held.Placeable(offset) {
-			t.Errorf("offset %d is placeable in a run with no usable ordering", offset)
-		}
-	}
-}
-
-// Observations lost after the last one delivered leave no gap; only the
-// backend's production count reveals them, and an unreadable count leaves
-// every open stream unplaceable.
-func TestALossAfterTheLastObservationIsFoundFromWhatTheBackendProduced(t *testing.T) {
-	for _, one := range []struct {
-		name      string
-		produced  connection.Count
-		positions connection.Positions
-	}{
-		{"a trailing loss the backend can count", connection.Counted(4), connection.PositionsUnknownFrom},
-		{"a produced count nobody could read", connection.Uncounted("the allocator is gone"), connection.PositionsUnknownThroughout},
-		{"nothing missing at all", connection.Counted(1), connection.PositionsEstablished},
-	} {
-		t.Run(one.name, func(t *testing.T) {
-			s := capture.Recording(&collected{}, nil)
-			order := ordered(t)
-
-			only := transfer(worker, 0x18, fragment.Sent, 10)
-			only.Stamp = order.take()
-			s.Transfer(only)
-
-			s.Finish(at, one.produced)
-
-			records := s.Records()
-			if len(records) != 1 {
-				t.Fatalf("%d connection records, want 1", len(records))
-			}
-			held, found := records[0].Placement(fragment.Sent)
-			if !found {
-				t.Fatal("the connection carries no placement")
-			}
-			if held.Positions != one.positions {
-				t.Fatalf("positions are %s, want %s", held.Positions, one.positions)
-			}
-			if err := records[0].Validate(); err != nil {
-				t.Errorf("the record is not usable: %v", err)
-			}
-		})
-	}
-}
-
 // bound is a transfer that established a descriptor.
 func bound(p fragment.Process, endpoint uint64, direction fragment.Direction, length uint32,
 	descriptor int32, generation uint64) probe.Transfer {
@@ -632,7 +399,7 @@ func bound(p fragment.Process, endpoint uint64, direction fragment.Direction, le
 // An established binding is reported with its descriptor, occupancy and
 // interval. The control for the cases below.
 func TestAConnectionThatEstablishedABindingSaysWhatItWasBoundTo(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
+	s := produced(&collected{}, nil)
 
 	s.Transfer(bound(worker, 0x18, fragment.Sent, 10, 7, 3))
 	records := finished(s)
@@ -667,7 +434,7 @@ func TestAConnectionThatEstablishedABindingSaysWhatItWasBoundTo(t *testing.T) {
 
 // Descriptor zero is real; zero must not be the unknown sentinel.
 func TestABindingOnDescriptorZeroIsABinding(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
+	s := produced(&collected{}, nil)
 
 	s.Transfer(bound(worker, 0x18, fragment.Sent, 10, 0, 3))
 	records := finished(s)
@@ -687,7 +454,7 @@ func TestABindingOnDescriptorZeroIsABinding(t *testing.T) {
 // Socket work on two descriptors is ambiguous and carries both, rather than
 // guessing the first.
 func TestACallWhoseWindowHeldTwoDescriptorsIsAmbiguousAndNotTheFirst(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
+	s := produced(&collected{}, nil)
 
 	// The control: one descriptor, established.
 	s.Transfer(bound(worker, 0x18, fragment.Sent, 10, 7, 3))
@@ -722,7 +489,7 @@ func TestACallWhoseWindowHeldTwoDescriptorsIsAmbiguousAndNotTheFirst(t *testing.
 // A descriptor replaced under a live handle (dup2) invalidates the binding,
 // which stays visible as invalidated.
 func TestADescriptorReplacedUnderALiveHandleInvalidatesTheBinding(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
+	s := produced(&collected{}, nil)
 
 	s.Transfer(bound(worker, 0x18, fragment.Sent, 10, 7, 3))
 	replaced := transfer(worker, 0x18, fragment.Sent, 10)
@@ -752,7 +519,7 @@ func TestADescriptorReplacedUnderALiveHandleInvalidatesTheBinding(t *testing.T) 
 // connection that never established one says so differently: it marks a
 // process whose socket calls this run cannot see.
 func TestACallWithNoSocketWorkDoesNotUnmakeTheHandlesBinding(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
+	s := produced(&collected{}, nil)
 
 	s.Transfer(bound(worker, 0x18, fragment.Sent, 10, 7, 3))
 	buffered := transfer(worker, 0x18, fragment.Sent, 5)
@@ -790,7 +557,7 @@ func TestACallWithNoSocketWorkDoesNotUnmakeTheHandlesBinding(t *testing.T) {
 // No endpoint producer here, so nothing joins; the binding and the join are
 // separate axes, each with its own reason.
 func TestTheExecutionsNamespaceIsRecordedWithoutBecomingTheSocketsAndNothingJoins(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
+	s := produced(&collected{}, nil)
 
 	s.Transfer(bound(worker, 0x18, fragment.Sent, 10, 7, 3))
 	records := finished(s)
@@ -826,7 +593,7 @@ func TestTheExecutionsNamespaceIsRecordedWithoutBecomingTheSocketsAndNothingJoin
 // A connection with no binding says so on both axes; its join reason is the
 // missing binding, not a failed producer.
 func TestAConnectionWithNoBindingSaysSoOnBothAxes(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
+	s := produced(&collected{}, nil)
 
 	s.Transfer(transfer(worker, 0x18, fragment.Sent, 10))
 	records := finished(s)
@@ -844,26 +611,24 @@ func TestAConnectionWithNoBindingSaysSoOnBothAxes(t *testing.T) {
 	}
 }
 
-// A call that returns to a withdrawn grant is refused and delivers nothing
-// but its production-order place, like a lost observation: its stream stops
-// being placeable from there. The control: a connection that ended before
+// A call that returns to a withdrawn grant is refused and delivers nothing,
+// and the producer takes its number all the same: settled against what the
+// producer holds once production stopped, its stream stops being placeable
+// where the refused bytes began. The control: a connection that ended before
 // production stopped keeps every offset.
 func TestATransferRefusedWhenProductionStoppedLeavesItsStreamUnplaceable(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
-	order := ordered(t)
+	s := produced(&collected{}, nil)
 
-	ended := transfer(worker, 0x18, fragment.Sent, 10)
-	ended.Stamp = order.take()
-	s.Transfer(ended)
-	s.Closed(probe.Connection{Process: worker, Instance: running(worker), Stamp: order.take(), Endpoint: 0x18, At: at})
+	s.Transfer(transfer(worker, 0x18, fragment.Sent, 10))
+	s.Closed(ending(worker, 0x18))
 
 	live := transfer(worker, 0x20, fragment.Sent, 10)
-	live.Stamp = order.take()
 	s.Transfer(live)
 
-	// Production stops; the call in flight returns to a withdrawn grant.
-	order.skip(1)
-	s.Finish(at, connection.Counted(int64(order.next)))
+	// Production stops; the call in flight returns to a withdrawn grant and takes
+	// the next number in its occupancy without delivering anything.
+	s.numbers[numbered{handle: handleOf(live), direction: fragment.Sent}]++
+	s.Finish(at)
 
 	records := s.Records()
 	if len(records) != 2 {
@@ -880,14 +645,19 @@ func TestATransferRefusedWhenProductionStoppedLeavesItsStreamUnplaceable(t *test
 		t.Fatal("the interrupted connection carries no placement")
 	}
 	if held.Positions != connection.PositionsUnknownFrom {
-		t.Fatalf("its positions are %s, and a refused transfer's bytes are missing from it",
+		t.Fatalf("its positions are %s, and the refused transfer's bytes are missing from it",
 			held.Positions)
 	}
 	if held.From != 10 {
 		t.Errorf("its positions are unknown from offset %d, and it had captured 10 bytes", held.From)
 	}
-	if held.Because != connection.ObservationLost {
+	// An open connection's undelivered tail at the stop is unsettled, not a located
+	// capture loss: the refused call is counted on its own counter, not here.
+	if held.Because != connection.TerminalUnsettled {
 		t.Errorf("it says its positions went because %s", held.Because)
+	}
+	if held.Lost.Known {
+		t.Errorf("it counts %v transfers lost, and an undelivered tail at a stop is counted elsewhere", held.Lost)
 	}
 	if records[1].Placeable(fragment.Sent) {
 		t.Error("the interrupted connection reports itself placeable")
@@ -898,7 +668,7 @@ func TestATransferRefusedWhenProductionStoppedLeavesItsStreamUnplaceable(t *test
 // missing. A custom BIO produces exactly this, since the setter never runs.
 // The control: a connection with nothing observed still reports Unknown.
 func TestAmbiguityIsReportedEvenWhenNoBindingWasEverEstablished(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
+	s := produced(&collected{}, nil)
 
 	contended := transfer(worker, 0x18, fragment.Sent, 10)
 	contended.Descriptor = 7
@@ -947,7 +717,7 @@ func TestAmbiguityIsReportedEvenWhenNoBindingWasEverEstablished(t *testing.T) {
 // An invalidation is an observation too, even when the establishing call left
 // no record.
 func TestAnInvalidationIsReportedEvenWhenTheBindingItReplacedWasNeverSeen(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
+	s := produced(&collected{}, nil)
 
 	replaced := transfer(worker, 0x18, fragment.Sent, 10)
 	replaced.Descriptor = 7
@@ -966,74 +736,11 @@ func TestAnInvalidationIsReportedEvenWhenTheBindingItReplacedWasNeverSeen(t *tes
 	}
 }
 
-// A stream begun after a located loss is unplaceable: its first byte's place
-// in the connection is not established. The control: a connection that ended
-// before the loss keeps every offset.
-func TestAStreamBegunAfterALocatedLossPlacesNoOffsetAtAll(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
-	order := ordered(t)
-
-	// The control: opened, transferred and ended before the loss.
-	ended := transfer(worker, 0x18, fragment.Sent, 10)
-	ended.Stamp = order.take()
-	s.Transfer(ended)
-	s.Closed(probe.Connection{Process: worker, Instance: running(worker), Stamp: order.take(), Endpoint: 0x18, At: at})
-
-	// A connection live across the loss, and its successor.
-	live := transfer(worker, 0x20, fragment.Sent, 10)
-	live.Stamp = order.take()
-	s.Transfer(live)
-
-	order.skip(2)
-
-	after := transfer(worker, 0x20, fragment.Sent, 7)
-	after.Stamp = order.take()
-	s.Transfer(after)
-
-	s.Finish(at, connection.Counted(int64(order.next)))
-
-	records := s.Records()
-	if len(records) != 3 {
-		t.Fatalf("%d connection records, want the control, the interrupted one and its successor",
-			len(records))
-	}
-
-	if !records[0].Placeable(fragment.Sent) {
-		t.Error("the control, which ended before the loss, lost its placeable offsets")
-	}
-
-	successor := records[2]
-	held, found := successor.Placement(fragment.Sent)
-	if !found {
-		t.Fatal("the successor carries no placement for the direction that transferred")
-	}
-	if held.Positions != connection.PositionsUnknownThroughout {
-		t.Fatalf("the successor's positions are %s, and nothing establishes where its first byte "+
-			"sits in the connection", held.Positions)
-	}
-	if held.Because != connection.ObservationLost {
-		t.Errorf("it says its positions went because %s", held.Because)
-	}
-	// No offset at all; offset 0 is what a default-established fold would claim.
-	for _, offset := range []uint64{0, 1, 7} {
-		if held.Placeable(offset) {
-			t.Errorf("offset %d is placeable on a stream whose own beginning may be what was lost",
-				offset)
-		}
-	}
-	if successor.Placeable(fragment.Sent) {
-		t.Error("the successor reports itself placeable")
-	}
-	if err := successor.Validate(); err != nil {
-		t.Errorf("the successor's record is not usable: %v", err)
-	}
-}
-
 // The open time is the socket's, not the first transfer's. Both halves are
 // asserted: one alone passes against copying firstSeen, the other against
 // never setting Opened.
 func TestTheConnectionsOpenTimeIsTheSocketsAndNotTheFirstTransfer(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
+	s := produced(&collected{}, nil)
 
 	opened := time.Date(2026, 9, 8, 11, 59, 58, 0, time.UTC)
 	one := bound(worker, 0x18, fragment.Sent, 10, 7, 3)
@@ -1063,7 +770,7 @@ func TestTheConnectionsOpenTimeIsTheSocketsAndNotTheFirstTransfer(t *testing.T) 
 // A socket this run did not see open has no open time; it must never become
 // firstSeen under another name.
 func TestASocketThisRunDidNotSeeOpenHasNoOpenTimeRatherThanTheFirstTransfers(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
+	s := produced(&collected{}, nil)
 
 	// Everything else established; the socket predates the probes.
 	one := bound(worker, 0x18, fragment.Sent, 10, 7, 3)
@@ -1124,7 +831,7 @@ func TestEachWayOfNotJoiningNamesItsOwnReason(t *testing.T) {
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			s := capture.Recording(&collected{}, nil)
+			s := produced(&collected{}, nil)
 			one := bound(worker, 0x18, fragment.Sent, 10, 7, 3)
 			one.Ends = c.ends
 			s.Transfer(one)
@@ -1144,200 +851,5 @@ func TestEachWayOfNotJoiningNamesItsOwnReason(t *testing.T) {
 				t.Errorf("it does not join because %q, want %q", held.JoinReason, c.want)
 			}
 		})
-	}
-}
-
-// A gap the backend took no number for is the producer's race; a gap it did
-// take one for (a refused transfer) still invalidates. Asserted together: the
-// reorder case alone passes against suppressing every gap.
-func TestAGapIsAReorderOnlyWhenTheBackendTookNoNumberForIt(t *testing.T) {
-	for _, c := range []struct {
-		name    string
-		after   probe.Consumed
-		retired bool
-	}{
-		{name: "nothing was taken, so the gap is the stamp race", after: probe.Consumed{}, retired: false},
-		{name: "a reservation failed, so the gap is a loss",
-			after: probe.Consumed{ReserveFailed: 1}, retired: true},
-		{name: "a refusal took a place in the order, so the gap still invalidates",
-			after: probe.Consumed{Refused: 1}, retired: true},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			counted := probe.Consumed{}
-			s := capture.Recording(&collected{}, nil, capture.Consumes(func() (probe.Consumed, error) {
-				return counted, nil
-			}))
-			order := ordered(t)
-
-			live := transfer(worker, 0x18, fragment.Sent, 10)
-			live.Stamp = order.take()
-			s.Transfer(live)
-
-			// A number the consumer never sees, and the backend's account of it.
-			order.skip(1)
-			counted = c.after
-
-			after := transfer(worker, 0x18, fragment.Sent, 7)
-			after.Stamp = order.take()
-			s.Transfer(after)
-
-			s.Finish(at, connection.Counted(int64(order.next)))
-			records := s.Records()
-
-			// The guard: without a record nothing below measures anything.
-			if len(records) == 0 {
-				t.Fatal("wiring, not the property: the session produced no connection record")
-			}
-			if c.retired && len(records) != 2 {
-				t.Fatalf("a confirmed gap left %d records, and it retires the live stream and "+
-					"starts a new one for what followed", len(records))
-			}
-			if !c.retired && len(records) != 1 {
-				t.Fatalf("a tolerated reorder split one stream into %d records", len(records))
-			}
-
-			placeable := records[0].Placeable(fragment.Sent)
-			if c.retired && placeable {
-				t.Errorf("a gap the backend took a number for left the stream placeable")
-			}
-			if !c.retired && !placeable {
-				t.Errorf("a gap that was only the stamp race cost the stream its positions")
-			}
-			if got := s.Stats().Tolerated; !c.retired && got != 1 {
-				t.Errorf("a tolerated reorder was counted %d times, want 1", got)
-			}
-			if got := s.Stats().Disordered; got != 0 {
-				t.Errorf("a gap was counted as an observation arriving behind one already seen "+
-					"%d times, and none did", got)
-			}
-			if got := s.Stats().Interrupted; c.retired && got != 1 {
-				t.Errorf("a confirmed gap retired %d streams, want 1", got)
-			}
-			// A gap the backend explained is not unexplained, whichever way it answered.
-			if got := s.Stats().Unexplained; got != 0 {
-				t.Errorf("a gap the backend answered was counted as unexplained %d times", got)
-			}
-		})
-	}
-}
-
-// A backend that cannot answer confirms the gap: an unanswered question does
-// not license suppression.
-func TestAGapIsConfirmedWhenNothingCanSayWhetherANumberWasTaken(t *testing.T) {
-	for _, c := range []struct {
-		name string
-		read func() (probe.Consumed, error)
-	}{
-		{name: "no reader at all", read: nil},
-		{name: "a reader that could not answer",
-			read: func() (probe.Consumed, error) { return probe.Consumed{}, errors.New("unreadable") }},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			options := []capture.Option{}
-			if c.read != nil {
-				options = append(options, capture.Consumes(c.read))
-			}
-			s := capture.Recording(&collected{}, nil, options...)
-			order := ordered(t)
-
-			live := transfer(worker, 0x18, fragment.Sent, 10)
-			live.Stamp = order.take()
-			s.Transfer(live)
-			order.skip(1)
-			after := transfer(worker, 0x18, fragment.Sent, 7)
-			after.Stamp = order.take()
-			s.Transfer(after)
-
-			s.Finish(at, connection.Counted(int64(order.next)))
-			if got := s.Stats().Interrupted; got != 1 {
-				t.Errorf("a gap nothing could explain retired %d streams, want 1", got)
-			}
-			// It says why it was confirmed.
-			if got := s.Stats().Unexplained; got != 1 {
-				t.Errorf("a gap confirmed with nothing able to say was counted %d times, want 1", got)
-			}
-		})
-	}
-}
-
-// A tolerated gap and a backward observation are counted separately; only the
-// backward one costs the run its ordering. Asserted together, since either
-// alone passes against incrementing both.
-func TestAToleratedRaceAndABackwardStampAreCountedApart(t *testing.T) {
-	t.Run("a gap tolerated as the race", func(t *testing.T) {
-		s := capture.Recording(&collected{}, nil, capture.Consumes(func() (probe.Consumed, error) {
-			return probe.Consumed{}, nil
-		}))
-		order := ordered(t)
-
-		live := transfer(worker, 0x18, fragment.Sent, 10)
-		live.Stamp = order.take()
-		s.Transfer(live)
-		order.skip(1)
-		after := transfer(worker, 0x18, fragment.Sent, 7)
-		after.Stamp = order.take()
-		s.Transfer(after)
-		s.Finish(at, connection.Counted(int64(order.next)))
-
-		stats := s.Stats()
-		if stats.Tolerated != 1 {
-			t.Errorf("a gap tolerated as the race was counted %d times, want 1", stats.Tolerated)
-		}
-		if stats.Disordered != 0 {
-			t.Errorf("a tolerated gap was counted as an observation arriving behind one already "+
-				"seen %d times, and no observation arrived out of order", stats.Disordered)
-		}
-		if !s.Records()[0].Placeable(fragment.Sent) {
-			t.Error("a tolerated race cost the stream its positions")
-		}
-	})
-
-	t.Run("an observation behind one already seen", func(t *testing.T) {
-		s := capture.Recording(&collected{}, nil, capture.Consumes(func() (probe.Consumed, error) {
-			return probe.Consumed{}, nil
-		}))
-		order := ordered(t)
-
-		first := transfer(worker, 0x18, fragment.Sent, 10)
-		first.Stamp = order.take()
-		s.Transfer(first)
-		second := transfer(worker, 0x18, fragment.Sent, 7)
-		second.Stamp = order.take()
-		s.Transfer(second)
-
-		// The one behind a stamp already seen.
-		behind := transfer(worker, 0x18, fragment.Sent, 5)
-		behind.Stamp = first.Stamp
-		s.Transfer(behind)
-		s.Finish(at, connection.Counted(int64(order.next)))
-
-		stats := s.Stats()
-		if stats.Disordered != 1 {
-			t.Errorf("an observation behind one already seen was counted %d times, want 1", stats.Disordered)
-		}
-		if stats.Tolerated != 0 {
-			t.Errorf("a backward stamp was counted as a tolerated race %d times, and no gap was "+
-				"tolerated", stats.Tolerated)
-		}
-	})
-}
-
-// The observations a located loss accounted for reach a reader.
-func TestTheObservationsALocatedLossAccountedForReachAReader(t *testing.T) {
-	s := capture.Recording(&collected{}, nil)
-	order := ordered(t)
-
-	live := transfer(worker, 0x18, fragment.Sent, 10)
-	live.Stamp = order.take()
-	s.Transfer(live)
-	order.skip(3)
-	after := transfer(worker, 0x18, fragment.Sent, 7)
-	after.Stamp = order.take()
-	s.Transfer(after)
-	s.Finish(at, connection.Counted(int64(order.next)))
-
-	if got := s.Stats().Lost; got != 3 {
-		t.Errorf("the run accounts for %d lost observations, and three were produced and never "+
-			"delivered", got)
 	}
 }

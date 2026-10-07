@@ -1,0 +1,11 @@
+/var/lib/observer/approved.jsonl /var/lib/observer/derived-*.jsonl /var/log/observer/observer.log {
+    daily
+    rotate 7
+    missingok
+    notifempty
+    create 0600 root root
+    sharedscripts
+    postrotate
+        /opt/observer/observer reopen /etc/observer/observer.config.json
+    endscript
+}

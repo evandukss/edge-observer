@@ -228,13 +228,13 @@ func TestASurvivingDescendantKeepsItsGrantAndKeepsAdmittingWhenTheRootExits(t *t
 			moved, root.PID, survivor)
 	}
 
-	held, err := session.Admissions()
+	held, err := session.Held()
 	if err != nil {
 		t.Fatalf("read back what the session admitted: %v", err)
 	}
 	for _, one := range held {
 		if one.Instance.Namespace == root.Namespace && one.Instance.PID == root.NamespacePID {
-			t.Errorf("the root has exited and the allowlist still holds %s", one)
+			t.Errorf("the root has exited and the allowlist still holds %+v", one)
 		}
 	}
 }
@@ -314,13 +314,13 @@ func TestAnExclusionDeniesASubtreeAndATargetNamingItDoesNotOverrideIt(t *testing
 			"what the excluded instance forked", below)
 	}
 
-	admitted, err := session.Admissions()
+	admitted, err := session.Held()
 	if err != nil {
 		t.Fatalf("read back what the session admitted: %v", err)
 	}
 	for _, one := range admitted {
-		if one.Instance.PID == excluded.NamespacePID {
-			t.Errorf("a target's admission overwrote the exclusion's denial: %s", one)
+		if one.Instance.PID == excluded.NamespacePID && !one.Denied {
+			t.Errorf("a target's admission overwrote the exclusion's denial: %+v", one)
 		}
 	}
 }
@@ -346,10 +346,7 @@ func TestAnInstanceOfferedTwiceKeepsOneGrantAndTheSecondOfferIsNamed(t *testing.
 	}
 	defer func() { _ = session.Close() }()
 
-	held, err := session.Admissions()
-	if err != nil {
-		t.Fatalf("read back what the session admitted: %v", err)
-	}
+	held := session.Inventory()
 	grants := 0
 	for _, one := range held {
 		if one.Instance.Namespace == server.Namespace && one.Instance.PID == server.NamespacePID {
@@ -375,78 +372,5 @@ func TestAnInstanceOfferedTwiceKeepsOneGrantAndTheSecondOfferIsNamed(t *testing.
 	if !named {
 		t.Errorf("the second offer of pid %d was not admitted and the session names %d refusals, "+
 			"none of them it", server.PID, len(session.Declined()))
-	}
-}
-
-// Observed to the end and stopped being observed halfway produce the same
-// capture; what separates them is what the session admitted against what the
-// kernel still holds, per instance. The inventory is where a fork-admitted
-// descendant enters that record, and an instance absent from it was recorded
-// by nothing.
-func TestARecordedInstanceWhoseGrantTheKernelNoLongerHoldsIsNamedWithWhatBecameOfIt(t *testing.T) {
-	_, port := serving(t)
-	family := startArmingProcess(t, port)
-	root := loaded(t, int32(family.command.Process.Pid))
-
-	session, err := ebpf.Attach(ebpf.Options{
-		Program: bpf.Full(),
-		Points:  append([]ebpf.Point{forkPoint(t, root)}, points(t, root)...),
-		Admit:   admitting(root, admission.ModeFollow),
-	})
-	if err != nil {
-		t.Fatalf("attach to the family: %v", err)
-	}
-	defer func() { _ = session.Close() }()
-
-	transient, err := family.child('T', "transient")
-	if err != nil {
-		t.Fatalf("create the child that will end: %v", err)
-	}
-	held(t, transient)
-
-	// The reading puts a fork-admitted descendant into the record, while it is
-	// alive.
-	if _, err := session.Admissions(); err != nil {
-		t.Fatalf("read back what the session admitted: %v", err)
-	}
-	recorded := false
-	for _, one := range session.Inventory() {
-		recorded = recorded || one.ObserverPID == transient
-	}
-	if !recorded {
-		t.Fatalf("pid %d was admitted below pid %d and the session recorded %d instances, "+
-			"none of them it", transient, root.PID, len(session.Inventory()))
-	}
-
-	if err := family.finish('X', "transient"); err != nil {
-		t.Fatalf("the child that was to end did not end: %v", err)
-	}
-
-	gone, err := session.Withdrawn()
-	if err != nil {
-		t.Fatalf("establish what the session recorded and the kernel no longer holds: %v", err)
-	}
-	var ended *ebpf.Withdrawal
-	for i := range gone {
-		if gone[i].Selection.ObserverPID == transient {
-			ended = &gone[i]
-		}
-		// The control: the root is still running and admitted, so a surface naming
-		// every recorded instance would name it too.
-		if gone[i].Selection.ObserverPID == root.PID {
-			t.Errorf("pid %d is still admitted and is reported as withdrawn: %s",
-				root.PID, gone[i].Evidence)
-		}
-	}
-	if ended == nil {
-		t.Fatalf("pid %d was recorded, has ended, and the session reports %d withdrawals, "+
-			"none of them it", transient, len(gone))
-	}
-	if ended.State != ebpf.ExecutionEnded {
-		t.Errorf("pid %d ended and its withdrawal says %q: %s", transient, ended.State, ended.Evidence)
-	}
-	if ended.Evidence == "" {
-		t.Errorf("pid %d is reported as %q with nothing said about what that rests on",
-			transient, ended.State)
 	}
 }

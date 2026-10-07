@@ -66,8 +66,8 @@ func TestT20EvidenceDistinguishesEveryState(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			a, _, text := t20Exchange(t, t20Plan(t, tc.op.implementation, tc.op.arguments), tc.request, tc.response)
 			t20Absent(t, text, t20Card)
-			if a.Version != processing.ArtifactVersion || processing.ArtifactVersion != "observer.approved/2" {
-				t.Fatalf("PROPERTY: the artifact is %q, not observer.approved/2", a.Version)
+			if a.Version != processing.ArtifactVersion || processing.ArtifactVersion != "observer.approved/3" {
+				t.Fatalf("PROPERTY: the artifact is %q, not observer.approved/3", a.Version)
 			}
 			if a.PolicyExclusions == nil || len(a.PolicyExclusions) != len(tc.entries) {
 				t.Fatalf("PROPERTY: evidence entries: got %+v, want %v", a.PolicyExclusions, tc.entries)

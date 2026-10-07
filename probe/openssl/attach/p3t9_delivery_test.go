@@ -22,11 +22,17 @@ type p3t9Collected struct {
 }
 
 func (c *p3t9Collected) Write(r fragment.Record) error {
+	if r.Slot != nil {
+		r.Slot.Keep()
+	}
 	c.fragments = append(c.fragments, r)
 	return nil
 }
 
 func (c *p3t9Collected) Connection(r connection.Record) error {
+	if r.Slot != nil {
+		r.Slot.Keep()
+	}
 	c.connections = append(c.connections, r)
 	return nil
 }
@@ -44,17 +50,23 @@ func p3t9Delivery(t *testing.T, n uint64) (*ebpfAttachment, *capture.Session, *p
 }
 
 func p3t9Event(stamp uint64, payload string) ebpf.Event {
-	return ebpf.Event{
+	e := ebpf.Event{
 		Kind: ebpf.Transfer, Stamp: stamp, PID: 69171, NamespacePID: 69171,
 		Namespace: admission.Namespace{Device: 69, Inode: 171}, Generation: 1,
-		SSL: 9, Direction: fragment.Sent, Measured: true,
+		Sequence: probe.Sequence{Occupancy: 1, Number: stamp, Born: true},
+		SSL:      9, Direction: fragment.Sent, Measured: true,
 		Length: uint32(len(payload)), Payload: []byte(payload), At: time.Unix(100, int64(stamp)),
 	}
+	if payload == "" {
+		e.Sequence.Number = 0
+	}
+	return e
 }
 
 func p3t9Close(stamp uint64) ebpf.Event {
 	e := p3t9Event(stamp, "")
 	e.Kind, e.Measured = ebpf.Closed, false
+	e.Final = probe.Final{Known: true, Sent: probe.Terminal{Last: stamp - 1}}
 	return e
 }
 
@@ -93,10 +105,16 @@ func TestP3T9DeliveryWitnessAndMeasuredNeighbor(t *testing.T) {
 			middle.Measured = measured
 			if !measured {
 				middle.Length, middle.Payload = 0, nil
+				middle.Sequence.Number = 0
 			}
 			a.deliverEvent(middle)
-			a.deliverEvent(p3t9Event(3, parts[2]))
-			a.deliverEvent(p3t9Close(4))
+			tail, ending := p3t9Event(3, parts[2]), p3t9Close(4)
+			if !measured {
+				tail.Sequence.Number = 2
+				ending.Final.Sent.Last = 2
+			}
+			a.deliverEvent(tail)
+			a.deliverEvent(ending)
 			if measured {
 				p3t9Reason(t, g, 4, "")
 				if c.Stats().Closed != 1 || len(collected.connections) != 1 || collected.connections[0].How != connection.HandleReleasedEnding {
@@ -122,7 +140,7 @@ func TestP3T9DeliveryWitnessAndMeasuredNeighbor(t *testing.T) {
 				}
 				// Finish can still manufacture a capture-end record. It must not
 				// revive authorization; a real worker test must assert no output.
-				c.Finish(time.Unix(101, 0), connection.Counted(4))
+				c.Finish(time.Unix(101, 0))
 				if len(collected.connections) != 1 {
 					t.Fatal("pending retirement was not exercised")
 				}
@@ -148,11 +166,25 @@ func TestP3T9DrainedAdmissionBoundaryAndPendingRetirement(t *testing.T) {
 				}
 			}()
 			defer close(input)
-			events := []ebpf.Event{p3t9Event(1, "GET / HTTP/1.1\r\n\r\n"), p3t9Event(2, ""), p3t9Close(3), p3t9Event(4, "GET /pending HTTP/1.1\r\n\r\n"), p3t9Event(5, "tail")}
-			// Event 3 is an unmatched ordinary close; it must still be charged.
-			events[2].SSL = 123
-			// A novel identity/handle makes downstream growth observable at N+1.
+			// Empty input and an unmatched close return their reservations.
+			input <- p3t9Event(1, "")
+			<-ack
+			unmatched := p3t9Close(2)
+			unmatched.SSL = 123
+			unmatched.Sequence, unmatched.Final = probe.Sequence{}, probe.Final{}
+			input <- unmatched
+			<-ack
+			if g.Snapshot().Held != 0 {
+				t.Fatal("non-retained controls held reservations")
+			}
+			events := make([]ebpf.Event, 5)
+			for i := range events {
+				events[i] = p3t9Event(uint64(i+3), "retained")
+				events[i].Sequence.Number = uint64(i + 1)
+			}
+			// A novel identity makes downstream growth observable at N+1.
 			events[4].PID, events[4].NamespacePID, events[4].SSL = 69172, 69172, 456
+			events[4].Sequence = probe.Sequence{Occupancy: 2, Number: 1, Born: true}
 			var atN capture.Stats
 			for i := 0; i < count; i++ {
 				input <- events[i]
@@ -161,31 +193,33 @@ func TestP3T9DrainedAdmissionBoundaryAndPendingRetirement(t *testing.T) {
 					atN = c.Stats()
 				}
 			}
-			reason, charged := probe.GateReason(""), uint64(count)
-			if count == 5 {
-				reason, charged = probe.GateInputLimit, 4
+			// The event past the bound is refused and counted, reserves nothing, and
+			// costs only its own connection: no reason, no withdrawal.
+			charged := uint64(min(count, 4) + 2)
+			p3t9Reason(t, g, charged, "")
+			if refused := g.Snapshot().InputRefused; refused != uint64(count-min(count, 4)) {
+				t.Fatalf("%d events past the bound were counted refused, want %d", refused, count-min(count, 4))
 			}
-			p3t9Reason(t, g, charged, reason)
 			if c.Stats().Empty != 1 || c.Stats().EndingsUnmatched != 1 || len(a.known) != 1 {
 				t.Fatalf("charged controls missing or tail grew cache: stats %+v identities %d", c.Stats(), len(a.known))
 			}
-			if count == 5 && c.Stats() != atN {
+			if after := c.Stats(); count == 5 && (after.Transfers != atN.Transfers || after.Records != atN.Records || after.Connections != atN.Connections) {
 				t.Fatalf("N+1 changed capture state: before %+v after %+v", atN, c.Stats())
 			}
-			wantRecords := 1
-			if count >= 4 {
-				wantRecords = 2
+			wantRecords := min(count, 4)
+			if g.Snapshot().Held != uint64(wantRecords) {
+				t.Fatalf("retained population not charged: %+v", g.Snapshot())
 			}
 			if len(collected.fragments) != wantRecords || len(collected.connections) != 0 {
 				t.Fatal("pending input population differs from the declared fixture")
 			}
-			c.Finish(time.Unix(101, 0), connection.Counted(int64(count)))
+			c.Finish(time.Unix(101, 0))
 			if len(collected.connections) != 1 {
 				t.Fatal("pending batch was not retired at Finish")
 			}
 			d := g.Authorize(probe.ReleaseEvidence{InputsSettled: true, LifecycleSettled: true})
-			if d.Authorized != (count <= 4) || d.Reason != reason {
-				t.Fatalf("pending authorization after Finish: %+v", d)
+			if !d.Authorized || d.Reason != "" {
+				t.Fatalf("the pending batch of a connection the refusal did not touch was not authorized after Finish: %+v", d)
 			}
 		})
 	}

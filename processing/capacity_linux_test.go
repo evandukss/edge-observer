@@ -5,7 +5,9 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	outputsink "github.com/evandukss/edge-observer/sink"
 	"os"
+	"path/filepath"
 	"runtime"
 	"syscall"
 	"testing"
@@ -30,7 +32,9 @@ var (
 
 type capacityBuffer struct{ bytes.Buffer }
 
-func (*capacityBuffer) Close() error { return nil }
+func (b *capacityBuffer) Write(_ context.Context, p []byte) (int, error) { return b.Buffer.Write(p) }
+func (*capacityBuffer) Reopen(context.Context) error                     { return nil }
+func (*capacityBuffer) Close(context.Context) error                      { return nil }
 
 // BenchmarkCapacity measures repeated processing sessions, including intake
 // copies, worker startup and finalization, reconstruction, gate authorization,
@@ -75,7 +79,11 @@ func capacity(b *testing.B, input *workload.Workload, plan *config.ProcessingPla
 			b.Fatal(err)
 		}
 	} else {
-		output = &Writer{file: &memory, stats: WriterStats{LimitBytes: outputLimit}, exhausted: make(chan struct{})}
+		var err error
+		output, err = OpenWriter(WriterOptions{Directory: b.TempDir(), QueueBytes: outputLimit, OpenSink: func(string) outputsink.Sink { return &memory }})
+		if err != nil {
+			b.Fatal(err)
+		}
 	}
 	b.Cleanup(func() {
 		if err := output.Close(); err != nil {
@@ -94,11 +102,11 @@ func capacity(b *testing.B, input *workload.Workload, plan *config.ProcessingPla
 			b.Fatal(err)
 		}
 		gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 1 << 40,
-			IntakeExhausted: store.Exhausted(), StorageExhausted: output.Exhausted()})
+			IntakeExhausted: store.Exhausted()})
 		if err != nil {
 			b.Fatal(err)
 		}
-		run, err := Start(Options{Plan: plan, PolicyRevision: "capacity", Intake: store,
+		run, err := Start(Options{Session: "capacity", Plan: plan, PolicyRevision: "capacity", Intake: store,
 			Gate: gate, Output: output, Workers: workers})
 		if err != nil {
 			b.Fatal(err)
@@ -114,6 +122,10 @@ func capacity(b *testing.B, input *workload.Workload, plan *config.ProcessingPla
 		if err != nil {
 			b.Fatal(err)
 		}
+		if err := output.Drain(context.Background()); err != nil {
+			b.Fatal(err)
+		}
+		o = run.Snapshot()
 		s := store.Stats()
 		if s.FragmentsRefused != 0 || s.ConnectionsRefused != 0 || s.Exhausted || s.Bytes != 0 || s.Queued != 0 || s.Leased != 0 || o.Pending != 0 || o.OutputFailures != 0 || o.GateReason != "" {
 			b.Fatalf("refusal or undrained input: intake=%+v outcome=%+v", s, o)
@@ -121,7 +133,7 @@ func capacity(b *testing.B, input *workload.Workload, plan *config.ProcessingPla
 		if o.Batches != uint64(len(input.Connections)) || o.Authorized != o.Written {
 			b.Fatalf("incomplete processing: %+v", o)
 		}
-		if input.Shape.DefectShare == 0 && (o.ProcessingFailures != 0 || !o.Withheld.Known || o.Withheld.Value != 0 || o.ExchangeIDs != uint64(input.Exchanges) || o.Written != uint64(2*len(input.Connections))) {
+		if input.Shape.DefectShare == 0 && (o.ProcessingFailures != 0 || !o.Withheld.Known || o.Withheld.Value != 0 || o.ExchangeIDs != uint64(input.Exchanges) || o.Written != uint64(input.Exchanges+len(input.Connections))) {
 			b.Fatalf("processing clipped: %+v", o)
 		}
 		last = o
@@ -157,11 +169,11 @@ func capacity(b *testing.B, input *workload.Workload, plan *config.ProcessingPla
 		b.Fatal(err)
 	}
 	s := output.Stats()
-	if s.Refused != 0 || s.Exhausted {
+	if s.Refused != 0 {
 		b.Fatalf("writer clipped: %+v", s)
 	}
 	if sink == "file" {
-		stat, err := output.file.(*os.File).Stat()
+		stat, err := os.Stat(filepath.Join(output.directory, ArtifactName))
 		if err != nil {
 			b.Fatal(err)
 		}

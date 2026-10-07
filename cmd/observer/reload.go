@@ -219,6 +219,10 @@ func unchanged(root string, p process.Process, read probe.Reading) (string, bool
 	case err != nil:
 		return fmt.Sprintf("it could not be read again, so whether it still runs what the reload command read "+
 			"is not known: %v", err), false
+	case p.ArgumentEvidence != process.ArgumentsKnown ||
+		read.Exec.ArgumentEvidence != process.ArgumentsKnown || now.ArgumentEvidence != process.ArgumentsKnown ||
+		read.Exec.Cmdline == "" || now.Cmdline == "":
+		return fmt.Sprintf("pid %d: arguments undetermined during reload validation", p.PID), false
 	case now.StartTime != p.StartTime || now.StartTime != read.Exec.StartTime:
 		return fmt.Sprintf("the pid is held by a process that started at tick %d, and the reload command read "+
 			"the one that started at tick %d", now.StartTime, read.Exec.StartTime), false
@@ -247,6 +251,9 @@ func (d *daemon) reload(at time.Time, body []byte) reloadRecord {
 	if err := json.Unmarshal(body, &request); err != nil {
 		return refuse(fmt.Sprintf("the request carries no reading this session can use (%v): the reload "+
 			"command reads the candidate for a session that cannot read it itself after attaching", err))
+	}
+	if err := request.Resolution.Err(); err != nil {
+		return refuse(err.Error())
 	}
 	candidate, err := loadProcessing(d.path)
 	if err != nil {
@@ -365,7 +372,9 @@ func (d *daemon) reload(at time.Time, body []byte) reloadRecord {
 					attempt.Capability = capability
 				}
 			}
+			d.planMutex.Lock()
 			d.plan.Processes = append(d.plan.Processes, attachment.Describe(attempt))
+			d.planMutex.Unlock()
 		}
 	}
 
@@ -421,6 +430,10 @@ func readForReload(candidate policy.Policy) (reloadRequest, error) {
 		if err != nil || exec.StartTime != p.StartTime {
 			request.Unread[p.PID] = "it exited or its pid was reused while the reload command read it"
 			continue
+		}
+		if exec.ArgumentEvidence != process.ArgumentsKnown || exec.Cmdline == "" {
+			return reloadRequest{}, process.ArgumentsRefusal{PID: p.PID, Executable: p.Executable,
+				Detail: "the command line could not be established during reload validation"}
 		}
 		reading := probe.Reading{Report: catalog.Inspect(p), Exec: exec}
 		if reading.Report.Supported {

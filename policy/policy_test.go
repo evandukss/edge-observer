@@ -74,7 +74,7 @@ func compiled(t *testing.T, document map[string]any) policy.Policy {
 func whole(t *testing.T) map[string]any {
 	document := example(t)
 	document["log"], document["output"] = "/var/log/observer/observer.log", "/var/lib/observer"
-	document["limits"] = map[string]any{"output_mib": 32, "state_every_seconds": 10}
+	document["limits"] = map[string]any{"events": 32, "state_every_seconds": 10}
 	document["watch"] = []any{
 		watching("gateway", map[string]any{"exe": "/usr/bin/php", "args": []any{"/srv/gateway/main.php"}}, "all"),
 		watching("worker", map[string]any{"cgroup": "/system.slice/worker.service"}, "existing"),
@@ -99,12 +99,12 @@ func TestTheNoRulesExampleIsRead(t *testing.T) {
 		t.Fatalf("the contract's no-rules example is refused: %v", err)
 	}
 	if len(read.Approval.Rules) != 1 || read.Approval.Rules[0].Name != "api-server" ||
-		read.Approval.Rules[0].Executable != "/usr/bin/php" ||
-		!slices.Equal(read.Approval.Rules[0].Arguments, []string{"/srv/api/main.php"}) {
+		read.Approval.Rules[0].Executable != "/usr/local/bin/api-server" ||
+		!slices.Equal(read.Approval.Rules[0].Arguments, []string{"--listen", "8443"}) {
 		t.Errorf("its watch entry read as %+v", read.Approval.Rules)
 	}
 	if read.Settings.Log != policy.Stdout || read.Settings.Directory != "/var/lib/observer" ||
-		read.Settings.ApprovedOutputBoundMiB != 64 || read.Settings.StateEvery != 30*time.Second {
+		read.Settings.AdmittedEventLimit != 16384 || read.Settings.StateEvery != 30*time.Second {
 		t.Errorf("its settings read as %+v", read.Settings)
 	}
 }
@@ -116,7 +116,7 @@ func TestTheFileIsReadWhole(t *testing.T) {
 
 	settings := read.Settings
 	if settings.Log != "/var/log/observer/observer.log" || settings.Directory != "/var/lib/observer" ||
-		settings.ApprovedOutputBoundMiB != 32 || settings.StateEvery != 10*time.Second {
+		settings.AdmittedEventLimit != 32 || settings.StateEvery != 10*time.Second {
 		t.Errorf("settings read as %+v", settings)
 	}
 
@@ -173,7 +173,7 @@ func TestTheRevisionNamesTheContent(t *testing.T) {
 	first := compiled(t, whole(t))
 	again := compiled(t, whole(t))
 	changed := whole(t)
-	member(changed, "limits")["output_mib"] = 33
+	member(changed, "limits")["events"] = 33
 	other := compiled(t, changed)
 	if first.Revision != again.Revision {
 		t.Errorf("one file read twice gave revisions %q and %q", first.Revision, again.Revision)
@@ -217,7 +217,7 @@ func TestAKeyInAnotherCaseIsRefused(t *testing.T) {
 	for name, content := range map[string]string{
 		"the version in capitals":  strings.Replace(base, `"version"`, `"VERSION"`, 1),
 		"a second spelling of log": strings.Replace(base, `"log"`, `"Log":"stdout","log"`, 1),
-		"a nested key":             strings.Replace(base, `"output_mib"`, `"Output_MiB"`, 1),
+		"a nested key":             strings.Replace(base, `"events"`, `"Events"`, 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if content == base {
@@ -259,8 +259,8 @@ func TestAFileThatSaysSomethingElseIsRefused(t *testing.T) {
 			d["output"] = "state"
 			return encoded(t, d)
 		},
-		"an output allowance of zero": func(d map[string]any) string {
-			member(d, "limits")["output_mib"] = 0
+		"an event allowance of zero": func(d map[string]any) string {
+			member(d, "limits")["events"] = 0
 			return encoded(t, d)
 		},
 	}

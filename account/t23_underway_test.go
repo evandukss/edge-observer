@@ -68,7 +68,7 @@ func TestALossIsPrintedOnTheLineThatSaysTheSessionSealed(t *testing.T) {
 		},
 		"records the intake refused": {
 			losses: probe.Losses{UnderWay: t23Known}, rejected: 13, unrecorded: 1,
-			seal: "LOST 13 records the volatile intake refused, 1 connection records the volatile intake refused",
+			seal: "LOST 13 input records refused, 1 connection input records refused",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

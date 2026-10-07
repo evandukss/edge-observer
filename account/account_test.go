@@ -300,3 +300,21 @@ func TestCoverageListsEveryUngrantedAdmissionOnceAndAnUnreadGrantIsUnknown(t *te
 type errFixed string
 
 func (e errFixed) Error() string { return string(e) }
+
+// Decision 477 item 2: a byte mover that could not be probed leaves capture not
+// live, and Describe says so where a user reads it - naming the function and the
+// consequence that the whole attachment sequences nothing. With every byte mover
+// probed, no such line appears.
+func TestDescribeNamesTheNotLiveStateWhenAByteMoverIsUnprobed(t *testing.T) {
+	notLive := account.Describe(probe.Capability{Backend: probe.BPF, Program: "full", Payload: true,
+		Unprobed: []string{"SSL_write", "SSL_sendfile"}})
+	for _, want := range []string{"SSL_write", "SSL_sendfile", "capture is not live", "sequences nothing"} {
+		if !strings.Contains(notLive, want) {
+			t.Errorf("Describe does not name %q for an unprobed byte mover: %q", want, notLive)
+		}
+	}
+	live := account.Describe(probe.Capability{Backend: probe.BPF, Program: "full", Payload: true})
+	if strings.Contains(live, "not live") {
+		t.Errorf("Describe reports not live with every byte mover probed: %q", live)
+	}
+}

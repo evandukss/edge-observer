@@ -281,6 +281,25 @@ const (
 	// address may be reused unseen: bytes are kept, the association invalidated,
 	// and no claim is made about when a reuse happened.
 	HandleLifetimeUnobservable
+
+	// The reasons a direction's positions are not established, beside
+	// ObservationLost (a transfer produced and never delivered). None of them is a
+	// reason an association can hold.
+
+	// TerminalUnsettled is a direction whose last transfers nothing settled: its
+	// connection's ending was not delivered, or the producer could not say what
+	// it had taken when production stopped. Whether anything was lost is unknown.
+	TerminalUnsettled
+	// SequenceUnavailable is a direction carrying a transfer the producer kept no
+	// sequence for, so whether anything is missing around it cannot be checked.
+	SequenceUnavailable
+	// OperationsOverlapped is a direction in which two calls were in flight on one
+	// handle at once, which OpenSSL's supported use forbids: the order of their
+	// bytes is not established.
+	OperationsOverlapped
+	// LengthUnmeasured is a direction holding a transfer whose length nothing
+	// measured, so nothing after it has an offset.
+	LengthUnmeasured
 )
 
 func (r Reason) String() string {
@@ -319,6 +338,14 @@ func (r Reason) String() string {
 		return "the handle was released or recycled"
 	case HandleLifetimeUnobservable:
 		return "no probe that could observe the handle's release was placed"
+	case TerminalUnsettled:
+		return "nothing settled whether the direction's last transfers arrived"
+	case SequenceUnavailable:
+		return "the producer kept no sequence for a transfer of the direction"
+	case OperationsOverlapped:
+		return "two calls in the direction were in flight on the handle at once"
+	case LengthUnmeasured:
+		return "a transfer of the direction moved a length nothing measured"
 	default:
 		return "no reason"
 	}

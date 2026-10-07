@@ -10,6 +10,7 @@ import (
 
 	"github.com/evandukss/edge-observer/connection"
 	"github.com/evandukss/edge-observer/fragment"
+	"github.com/evandukss/edge-observer/held"
 )
 
 var (
@@ -48,11 +49,10 @@ type Stats struct {
 // it. The process execution envelope separately bounds those costs.
 //
 // An insertion exceeding the shared limit is refused whole with ErrLimit.
-// Exhaustion is permanent; subsequent writes fail even after Release. There
-// is no eviction, spill, parsing, structural validation or gate operation.
+// The refused record's loss token stops its connection outside this queue.
+// Release makes capacity available again; Exhausted remains a diagnostic that
+// at least one insertion was refused. There is no eviction, spill or parsing.
 // Callers may store malformed or incomplete records for the worker to judge.
-// The controller consumes Exhausted to stop capture; pending entries are not
-// evidence of complete input after a storage refusal.
 type Store struct {
 	mutex      sync.Mutex
 	stats      Stats
@@ -73,6 +73,9 @@ type Entry struct {
 	next       *Entry
 	bytes      int64
 	released   bool
+	// slot is the delivery gate's slot for the event the record came from,
+	// returned when the entry is released.
+	slot held.Slot
 }
 
 // New requires a positive limitBytes. It has no filesystem effects.
@@ -98,13 +101,25 @@ func (s *Store) Write(record fragment.Record) error {
 	budget := allowance{left: s.stats.LimitBytes - s.stats.Bytes}
 	if !budget.add(1, unsafe.Sizeof(Entry{})+unsafe.Sizeof(record)) || !budget.add(len(record.Payload), 1) {
 		s.stats.FragmentsRefused++
+		record.Loss.Stop("intake_exhausted")
 		return s.full()
 	}
 	record.Payload = copySlice(record.Payload)
 	record.At = record.At.UTC()
-	s.append(&Entry{Fragment: &record}, s.stats.LimitBytes-s.stats.Bytes-budget.left)
+	reserved := record.Slot
+	record.Slot = nil
+	s.append(&Entry{Fragment: &record, slot: kept(reserved)}, s.stats.LimitBytes-s.stats.Bytes-budget.left)
 	s.stats.Fragments++
 	return nil
+}
+
+// kept takes a stored record's slot into its entry, which returns it at
+// Release.
+func kept(reserved held.Slot) held.Slot {
+	if reserved != nil {
+		reserved.Keep()
+	}
+	return reserved
 }
 
 // Connection copies one retirement record, including its nested slices and
@@ -122,10 +137,13 @@ func (s *Store) Connection(record connection.Record) error {
 	budget := allowance{left: s.stats.LimitBytes - s.stats.Bytes}
 	if !budget.connection(record) {
 		s.stats.ConnectionsRefused++
+		record.Loss.Stop("intake_exhausted")
 		return s.full()
 	}
+	reserved := record.Slot
 	record = copyConnection(record)
-	s.append(&Entry{Connection: &record}, s.stats.LimitBytes-s.stats.Bytes-budget.left)
+	record.Slot = nil
+	s.append(&Entry{Connection: &record, slot: kept(reserved)}, s.stats.LimitBytes-s.stats.Bytes-budget.left)
 	s.stats.Connections++
 	return nil
 }
@@ -162,16 +180,21 @@ func (e *Entry) Bytes() int64 {
 	return e.bytes
 }
 
-// Release discards the entry and returns its charge. It is idempotent and safe
-// on nil. Only the single owner may access its data while Release runs.
-func (e *Entry) Release() {
+// Release discards the entry and returns its charge, as input given up
+// unprocessed (ReleaseAs, held.Discarded).
+func (e *Entry) Release() { e.ReleaseAs(held.Discarded) }
+
+// ReleaseAs discards the entry and returns its charge, and the slot of the
+// event it came from along path. It is idempotent and safe on nil. Only the
+// single owner may access its data while it runs.
+func (e *Entry) ReleaseAs(path held.Path) {
 	if e == nil || e.owner == nil {
 		return
 	}
 	s := e.owner
 	s.mutex.Lock()
-	defer s.mutex.Unlock()
 	if e.released {
+		s.mutex.Unlock()
 		return
 	}
 	e.released = true
@@ -179,6 +202,21 @@ func (e *Entry) Release() {
 	e.Connection = nil
 	s.stats.Bytes -= e.bytes
 	s.stats.Leased--
+	reserved := e.slot
+	e.slot = nil
+	s.mutex.Unlock()
+	// Returned outside the intake's lock: the gate takes its own.
+	if reserved != nil {
+		reserved.Refund(path)
+	}
+}
+
+// Retained is the entries this store holds now: queued for a worker, and
+// leased to one and not yet released. Its bound is in bytes (Stats), not
+// entries.
+func (s *Store) Retained() ([]held.Occupancy, error) {
+	stats := s.Stats()
+	return []held.Occupancy{{Store: "intake.entries", Held: int(stats.Queued + stats.Leased)}}, nil
 }
 
 func (s *Store) Stats() Stats {
@@ -192,7 +230,7 @@ func (s *Store) Stats() Stats {
 
 // Exhausted closes on the first storage-limit refusal; nil and zero stores
 // return an already-closed signal. No receiver is needed for a callback to
-// return. This requests controller action, not release authorization.
+// return. It is diagnostic, not a request to stop capture.
 func (s *Store) Exhausted() <-chan struct{} {
 	if s == nil || s.exhausted == nil {
 		return uninitialized
@@ -238,15 +276,14 @@ func (s *Store) ready() error {
 	if s.stats.Closed {
 		return ErrClosed
 	}
-	if s.stats.Exhausted {
-		return ErrLimit
-	}
 	return nil
 }
 
 func (s *Store) full() error {
-	s.stats.Exhausted = true
-	close(s.exhausted)
+	if !s.stats.Exhausted {
+		s.stats.Exhausted = true
+		close(s.exhausted)
+	}
 	return ErrLimit
 }
 

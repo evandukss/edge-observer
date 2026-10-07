@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
-	"os"
 	"regexp"
 	"slices"
 	"strconv"
@@ -17,6 +16,7 @@ import (
 	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/contract/record"
 	"github.com/evandukss/edge-observer/extension"
+	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/http1"
 	"github.com/evandukss/edge-observer/jsonshape"
 	"github.com/evandukss/edge-observer/reconstruct"
@@ -174,6 +174,12 @@ func (e *extensions) counts() []account.ExtensionCounts {
 		c.Restarts, c.StateResets, c.Late, c.Duplicate = lifecycle.Restarts, lifecycle.StateResets, lifecycle.Late, lifecycle.Duplicate
 		c.DerivedWritten, c.DerivedBytes, c.DerivedRefused = lifecycle.DerivedWritten, lifecycle.DerivedBytes, lifecycle.DerivedRefused
 		c.DerivedRefusedBy = lifecycle.DerivedRefusedBy
+		delivery := e.files[i].writer.DerivedStats(one.Name)
+		c.Delivery = delivery
+		c.DerivedWritten, c.DerivedBytes = delivery.Written, uint64(delivery.Bytes)
+		c.DerivedRefused += delivery.Failed + delivery.Discarded
+		c.DerivedRefusedBy[extension.DerivedWriteFailed] += delivery.Failed
+		c.DerivedRefusedBy[extension.DerivedStopped] += delivery.Discarded
 		c.StderrDropped = lifecycle.StderrDropped
 		out = append(out, c)
 	}
@@ -246,10 +252,14 @@ func (w *Worker) step(d *dispatch) (bool, error) {
 		if err != nil {
 			return false, errors.New("internal observer defect: cannot encode an exchange for an extension")
 		}
-		reason := exts.supervisors[k].Submit(extension.Call{ID: d.first + uint64(d.i), Bytes: d.bytes,
-			Message: message, Done: func(result extension.Result) {
-				w.queue.complete(completion{d: d, k: k, result: result})
-			}})
+		reason := extension.Unavailable
+		// Submit only enqueues; order that handoff against this connection's cut.
+		d.b.loss.Authorize(func() {
+			reason = exts.supervisors[k].Submit(extension.Call{ID: d.first + uint64(d.i), Bytes: d.bytes,
+				Message: message, Done: func(result extension.Result) {
+					w.queue.complete(completion{d: d, k: k, result: result})
+				}})
+		})
 		if reason == "" {
 			return true, nil
 		}
@@ -329,9 +339,9 @@ func (w *Worker) settle(ctx context.Context) error {
 		if waits {
 			continue
 		}
-		delete(w.waiting, d)
+		w.waiting = held.Deleted(w.waiting, d, &w.waitingChurn)
 		err = w.write(ctx, d)
-		d.b.release()
+		d.b.release(processedUnless(err))
 		if err != nil {
 			return err
 		}
@@ -750,38 +760,23 @@ func (w *Worker) rechain(d *dispatch, i int, name string, r replacement) {
 	}
 }
 
-// derivedFile is one extension's derived output. The Writer's mutex guards
-// it.
 type derivedFile struct {
 	writer *Writer
-	file   *os.File
-	// failed is a write that failed: a partial line may be in the file, so
-	// nothing more is written to it.
-	failed bool
+	name   string
 }
 
-func (f *derivedFile) close() error {
-	f.writer.mutex.Lock()
-	defer f.writer.mutex.Unlock()
-	if f.file == nil {
-		return nil
-	}
-	err := f.file.Close()
-	f.file = nil
-	return err
-}
+func (f *derivedFile) close() error { return nil }
 
 // writeDerived writes one derived line under the session's release and stop
 // gate, the same authorization the observer's own lines need, and within the
-// derived budget. A refusal is a reason, never a failure of the release.
+// bounded queue. A refusal is a reason, never a failure of the release.
 func (r *release) writeDerived(w *Writer, f *derivedFile, line []byte) string {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	if r.err != nil {
 		return extension.DerivedStopped
 	}
-	if decision := r.gate.Authorize(releaseEvidence); !decision.Authorized {
-		return extension.DerivedStopped
-	}
-	return w.writeDerived(f, line)
+	result := extension.DerivedStopped
+	r.gate.AuthorizeEnqueue(releaseEvidence, func() { result = w.writeDerived(f, line) })
+	return result
 }

@@ -7,33 +7,34 @@ package processing
 import (
 	"context"
 	"errors"
+	"github.com/evandukss/edge-observer/sink"
 
 	"github.com/evandukss/edge-observer/account"
 	"github.com/evandukss/edge-observer/connection"
 	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/extension"
 	"github.com/evandukss/edge-observer/fragment"
+	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/intake"
 	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/reconstruct"
 )
 
 var (
-	ErrNotImplemented = errors.New("processing implementation is not installed")
-	ErrOptions        = errors.New("invalid processing options")
-	ErrFinished       = errors.New("processing worker is finished")
+	ErrOptions  = errors.New("invalid processing options")
+	ErrFinished = errors.New("processing worker is finished")
 )
 
-// Output is the approved write boundary. Implementations must not retain the
-// argument after returning. The concrete Writer enforces the disk allowance.
-// An error means this record was not delivered; no raw fallback is permitted.
-// Context cancellation cannot undo a write that already crossed the boundary.
+// Output is the nonblocking enqueue boundary for already processed lines.
+// Implementations transfer immutable bytes to a bounded queue or refuse them;
+// they must never perform sink I/O here. Writer implements that boundary.
+// Authorization cannot be recalled after enqueue by a later invalidation.
 type Output interface {
 	WriteApproved(context.Context, Approved) error
 }
 
 // Options is fixed before capture admission. Plan, Intake, Gate and Output must
-// be non-nil, and PolicyRevision must be nonempty. Plan must be produced by
+// be non-nil, and PolicyRevision and Session must be nonempty. Plan must be produced by
 // config.Compile; its detached views are taken once at construction.
 // No raw configuration, exclusion revalidation or policy resolution occurs here.
 // Limits uses reconstruct's defaults for zero fields; negative fields refuse.
@@ -58,14 +59,12 @@ type Options struct {
 	// hold one worker in it.
 	Taken func(worker int, process fragment.Process, connection fragment.ConnectionID)
 
-	// Session is the session id. Extensions are sent it in start, and it is
-	// stamped on every derived line. Required when Plan configures an
-	// extension.
+	// Session is stamped on every approved and derived line, and sent to
+	// extensions at start. A nonempty session id is required.
 	Session string
 	// Derived is the writer whose directory holds the extensions' derived
-	// files, derived-<name>.jsonl, and whose allowance they share with the
-	// approved output: derived lines take at most half of it, and a refused
-	// derived line never exhausts it for approved lines. Required when Plan
+	// files, derived-<name>.jsonl. They share its bounded queue with approved
+	// output, with no cumulative output or half-budget cap. Required when Plan
 	// configures an extension; usually the same Writer as Output.
 	Derived *Writer
 	// Clock is what extension supervision reads time from. Nil is
@@ -74,6 +73,11 @@ type Options struct {
 	// Supervision, where set, receives every step of every extension's
 	// supervision (extension.Event), on the supervisor's goroutine.
 	Supervision func(extension.Event)
+	// ConnectionInput is the most input entries one connection may hold while it
+	// waits to be processed. A connection reaching it is cut: what it holds is
+	// discarded and counted, and the rest of its input is discarded on arrival.
+	// Zero takes half the gate's event allowance; negative refuses.
+	ConnectionInput int
 }
 
 // Outcome is cumulative for one worker, and for a Run the sum over its
@@ -98,17 +102,24 @@ type Options struct {
 // a useful prefix and also count a refusal of its suffix. OutputFailures counts
 // failed approved writes. Neither counts capture loss or policy suppression;
 // internal artifact-serialization defects return a terminal error, not a count.
+// ConnectionsCut counts connections cut at Options.ConnectionInput, and
+// InputCut the input entries discarded for those cuts: what each held when it
+// was cut, and what arrived for it afterwards. A cut connection's exchanges are
+// withheld as unknown.
 // Pending counts connection batches still holding charged intake entries.
 // GateReason reports the gate's capture-wide diagnostic state at return, even
 // when no complete candidate reached authorization. It is never permission;
 // an incomplete input can also have an independently counted processing failure.
 type Outcome struct {
+	Delivery           sink.Stats
 	Batches            uint64
 	Authorized         uint64
 	Written            uint64
 	Withheld           connection.Count
 	ProcessingFailures uint64
 	OutputFailures     uint64
+	ConnectionsCut     uint64
+	InputCut           uint64
 	Pending            int
 	GateReason         probe.GateReason
 	// ExchangeIDs is how many exchange ids the run issued: one per exchange
@@ -150,10 +161,16 @@ type Worker struct {
 	pipelines []config.EffectivePipeline
 	routes    []config.DurableRoute
 	batches   map[batchKey]*batch
-	order     []batchKey
-	outcome   Outcome
-	terminal  error
-	finished  bool
+	// batchesChurn and waitingChurn shed what processing leaves in batches and
+	// waiting, whose keys are connections and dispatches that never return.
+	batchesChurn held.Churn
+	waitingChurn held.Churn
+	order        []batchKey
+	outcome      Outcome
+	terminal     error
+	finished     bool
+	// bound is the most fragments one connection may hold (Options.ConnectionInput).
+	bound int
 }
 
 // New validates only Options. It performs no capture, parsing or durable write.
@@ -167,11 +184,11 @@ func New(options Options) (*Worker, error) {
 }
 
 func (o Options) valid() bool {
-	if o.Plan == nil || o.Intake == nil || o.Gate == nil || o.Output == nil || o.PolicyRevision == "" || o.Workers < 0 {
+	if o.Plan == nil || o.Intake == nil || o.Gate == nil || o.Output == nil || o.PolicyRevision == "" || o.Session == "" || o.Workers < 0 || o.ConnectionInput < 0 {
 		return false
 	}
 	h, j := o.Limits.HTTP, o.Limits.JSON
-	for _, n := range []int{h.MaxStartLine, h.MaxHeaderLine, h.MaxHeaders, h.MaxHeaderBytes, h.MaxBodyBytes, h.MaxMessages, h.MaxChunks, h.MaxTrailers, j.MaxDepth, j.MaxNodes, j.MaxFields, j.MaxElemShapes, j.MaxNameBytes, j.ShortStringBytes} {
+	for _, n := range []int{h.MaxStartLine, h.MaxHeaderLine, h.MaxHeaders, h.MaxHeaderBytes, h.MaxBodyBytes, h.MaxChunks, h.MaxTrailers, j.MaxDepth, j.MaxNodes, j.MaxFields, j.MaxElemShapes, j.MaxNameBytes, j.ShortStringBytes} {
 		if n < 0 {
 			return false
 		}
@@ -182,7 +199,8 @@ func (o Options) valid() bool {
 func newWorker(options Options, index int, from source, release *release, running *extensions) *Worker {
 	w := &Worker{options: options, index: index, source: from, release: release, extensions: running,
 		waiting: map[*dispatch]struct{}{}, pipelines: options.Plan.Pipelines(), routes: options.Plan.Routes(),
-		batches: make(map[batchKey]*batch), outcome: Outcome{Withheld: connection.Counted(0)}}
+		batches: make(map[batchKey]*batch), outcome: Outcome{Withheld: connection.Counted(0)},
+		bound: connectionInput(options)}
 	if q, ok := from.(*queue); ok {
 		w.queue = q
 	}
@@ -314,6 +332,55 @@ func (w *Worker) Close() error {
 	return nil
 }
 
+// connectionInput is the most fragments one connection may hold: the option, or
+// half the gate's event allowance, so that one connection reaches its own bound
+// before it can fill the session's.
+func connectionInput(options Options) int {
+	if options.ConnectionInput > 0 {
+		return options.ConnectionInput
+	}
+	allowance := options.Gate.Snapshot().MaxEvents
+	return int(max(allowance/2, 1))
+}
+
+// Retained is what this worker holds now, store by store: the connections
+// whose input it holds, with their entries and the fragments indexed from them,
+// the order it examines them in, and the connections waiting on an extension's
+// result, with the exchanges each keeps as parsed and as processed, the
+// capacity of the slices holding them, and what policy did to their bodies. A
+// dispatch's bodies are a map, which Go gives no capacity for, so only their
+// count is read. A dispatch that is not waiting is let go of when its lines are
+// written, so nothing else of one is kept. Its owner reads it, never while
+// Drain or Finish runs.
+func (w *Worker) Retained() ([]held.Occupancy, error) {
+	if w == nil {
+		return nil, nil
+	}
+	entries, fragments := 0, 0
+	for _, b := range w.batches {
+		entries += len(b.entries)
+		fragments += len(b.fragments)
+	}
+	exchanges, capacity, bodies := 0, 0, 0
+	for d := range w.waiting {
+		exchanges += len(d.source.Exchanges) + len(d.processed.Exchanges)
+		capacity += cap(d.source.Exchanges) + cap(d.processed.Exchanges)
+		if d.run != nil {
+			bodies += len(d.run.bodies)
+		}
+	}
+	return []held.Occupancy{
+		{Store: "processing.batches", Held: len(w.batches), Rebuilds: w.batchesChurn.Rebuilds()},
+		{Store: "processing.entries", Held: entries},
+		{Store: "processing.fragments", Held: fragments},
+		{Store: "processing.order", Held: len(w.order)},
+		{Store: "processing.waiting", Held: len(w.waiting), Rebuilds: w.waitingChurn.Rebuilds()},
+		{Store: "processing.waiting_exchanges", Held: exchanges},
+		{Store: "processing.waiting_exchanges_capacity", Held: capacity},
+		{Store: "processing.waiting_bodies", Held: bodies},
+	}, nil
+}
+
 func (w *Worker) snapshot() Outcome {
 	o := w.outcome
 	// No-candidate paths still report capture-wide invalidation. Snapshot is
@@ -323,13 +390,16 @@ func (w *Worker) snapshot() Outcome {
 	}
 	o.Pending = len(w.batches) + len(w.waiting)
 	o.ExchangeIDs = w.release.issued.Load()
+	if w.queue == nil {
+		o = deliveryOutcome(o, w.options.Output)
+	}
 	return o
 }
 
 func (w *Worker) discard() {
 	for id, b := range w.batches {
 		w.withhold(connection.Uncounted("unsettled_input"))
-		b.release()
+		b.release(held.Discarded)
 		delete(w.batches, id)
 	}
 	w.order = nil
@@ -338,7 +408,7 @@ func (w *Worker) discard() {
 		// written.
 		d.dead = true
 		w.withhold(connection.Uncounted("unsettled_input"))
-		d.b.release()
+		d.b.release(held.Discarded)
 		delete(w.waiting, d)
 	}
 }
@@ -373,6 +443,8 @@ func (o Outcome) plus(other Outcome) Outcome {
 	o.Withheld = sum(o.Withheld, other.Withheld)
 	o.ProcessingFailures += other.ProcessingFailures
 	o.OutputFailures += other.OutputFailures
+	o.ConnectionsCut += other.ConnectionsCut
+	o.InputCut += other.InputCut
 	o.Pending += other.Pending
 	if o.GateReason == "" {
 		o.GateReason = other.GateReason
@@ -402,6 +474,9 @@ func (w *Worker) drain(ctx context.Context, final bool) error {
 		if b == nil {
 			continue
 		}
+		if b.loss.Reason() != "" {
+			b.lose()
+		}
 		if !b.ready(final) {
 			remaining = append(remaining, id)
 			continue
@@ -410,11 +485,11 @@ func (w *Worker) drain(ctx context.Context, final bool) error {
 			return err
 		}
 		w.outcome.Batches++
-		held, err := w.process(ctx, b)
-		if !held {
-			b.release()
+		waits, err := w.process(ctx, b)
+		if !waits {
+			b.release(processedUnless(err))
 		}
-		delete(w.batches, id)
+		w.batches = held.Deleted(w.batches, id, &w.batchesChurn)
 		if err != nil {
 			w.stop(err)
 			return err
@@ -422,4 +497,12 @@ func (w *Worker) drain(ctx context.Context, final bool) error {
 	}
 	w.order = remaining
 	return nil
+}
+
+func deliveryOutcome(o Outcome, output Output) Outcome {
+	if writer, ok := output.(*Writer); ok {
+		o.Delivery = writer.DeliveryStats()
+		o.Authorized, o.Written, o.OutputFailures = o.Delivery.Authorized, o.Delivery.Written, o.Delivery.Failed
+	}
+	return o
 }

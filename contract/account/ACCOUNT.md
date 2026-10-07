@@ -19,7 +19,7 @@ It is domain-neutral. Nothing here names a business operation or a privacy rule.
 
 | Name here | What it is | Where | Version |
 |---|---|---|---|
-| **operational account** | the observer's own account of a session at three moments - planned, live, sealed - built by one set of functions and sealed beside approved output for new sessions or a raw spool for legacy sessions | `account`, `Account` | `Version` = 1 |
+| **operational account** | the observer's own account of a session at three moments - planned, live, sealed - built by one set of functions and sealed in the session directory; approved output uses stable paths, while legacy sessions may contain a raw spool | `account`, `Account` | `Version` = 1 |
 | **account** | this contract: the published form of a SEALED operational account, with the records it describes carried beside it in a bundle | `contract/account` | `observer.account/2-draft` |
 
 **The relation is one-way and versioned on the operational account's number.** An account at
@@ -59,8 +59,8 @@ it is - a control's `control` - a member is absent or empty (`""`,
 
 **None of the three absences is zero, and a block missing from the document is none of them.** A reader
 that cannot find a required block REFUSES with `required_block_absent`, naming the block's path. A missing
-`capture.ordering` never reads as nothing disordered, nothing tolerated, nothing retired and nothing
-unexplained: it is a document that does not say, and saying so is the whole of what a reader does with it.
+`capture.ordering` never reads as nothing lost, nothing cut and nothing retired: it is a document that
+does not say, and saying so is the whole of what a reader does with it.
 Presence is checked first; no verdict is read off a block until every required block has been found.
 
 Which states each moment permits:
@@ -161,8 +161,8 @@ What was asked for, what it resolved to, and what the session's coverage turned 
 | `exclusions[]` | `{number, roots[], denied[]}` |
 | `overlap` | block: `instances[]` `{instance, targets[]}` - every instance more than one target selected |
 | `instances` | block: `instances[]`, one per instance the scope named, `{instance, selected_by[], multiply_selected, excluded_by[], coverage, why, evidence[]}` (below) |
-| `placement` | block: `processes[]` `{pid, birth, pid_namespace, namespace_pid, executable, runtime, mode, capability, outcome, reason, requested, confirmed, partial, probes[], unattempted[], uncatalogued[], absent[]}`. `capability` is the capability facts of that process's attachment; `partial` where fewer probes were confirmed than requested; `probes[]` is `{symbol, path, offset, confirmed, through, refusal}` per entry point asked for; `unattempted[]` is what the catalogue attaches to and this session did not ask for, `uncatalogued[]` what the library exports that the catalogue does not name, `absent[]` what the catalogue expects and the library lacks |
-| `coverage` | block: `rule`, `covered`, `by_target[]` `{target, covered, ended, unknown}`, `coverage_ended[]` and `grant_unknown[]` `{instance, target, inherited, no_later_than, read_from, read_to, why}`; the three instants are undetermined where there is no reading |
+| `placement` | block: `processes[]` `{pid, birth, pid_namespace, namespace_pid, executable, runtime, mode, capability, outcome, reason, requested, confirmed, partial, probes[], unattempted[], uncatalogued[], absent[]}` and `ended`, a count of processes. A placed process whose execution is established as ended is dropped from `processes` and counted in `ended`; its identity is written once to the operational log when that is established, so the per-process record of an ended placement is only as durable as that log, which is best effort. `capability` is the capability facts of that process's attachment; `partial` where fewer probes were confirmed than requested; `probes[]` is `{symbol, path, offset, confirmed, through, refusal}` per entry point asked for; `unattempted[]` is what the catalogue attaches to and this session did not ask for, `uncatalogued[]` what the library exports that the catalogue does not name, `absent[]` what the catalogue expects and the library lacks |
+| `coverage` | block: `rule`, `covered`, `by_target[]` `{target, covered, ended, unknown}`, `coverage_ended[]` and `grant_unknown[]` `{instance, target, inherited, no_later_than, read_from, read_to, why}`; the three instants are undetermined where there is no reading. An admission whose execution is established as ended is counted in its target's `ended` and not listed: its identity is written once to the operational log when that is established, so the per-admission record is only as durable as that log, which is best effort. `coverage_ended[]` lists the admissions whose grant is gone while their execution may still run, so its length is bounded by what may still run |
 | `filters` | block: `filters[]` `{name, stage}`, `stage` `pre_capture` or `post_capture`. **A filter that needs reconstruction is `post_capture`**, and it is never evidence that anything it removed was not read |
 | `limits[]` | what this scope's coverage does not reach, one sentence each |
 
@@ -225,7 +225,7 @@ Every member is its own block, so one that could not be read is not read as the 
 | `loss` | `dropped`, `unmatched`, `occasion` `{first, last, handle, pid, tid}`: the first and last unmatched return on the monotonic clock, and the first one's handle, process and thread, each undetermined where no occasion was stated; and `under_way`. Losses only |
 | `loss.under_way` | calls that began before the probes were placed, which nothing in the kernel sees: no entry is recorded and their return fires nothing. The approved processes' threads are read before placement and after. `threads` is those blocked inside the same socket system call on the same descriptor in both readings and switched out no further, so the call each is inside began before the probes; it counts socket I/O, not TLS calls. `undetermined` is those that ran meanwhile, whose loss is not known and is never read as none. `first` `{pid, tid, fd, call}` names the first of `threads`, each undetermined where there is none. `unavailable` where a thread could not be read |
 | `admitted` | `descendants`. Not a loss |
-| `ordering` | `disordered`, `unstamped`, `tolerated`, `lost`, `retired`, `unexplained`. Never folded into `loss`: a session that could not order its observations has not lost them |
+| `ordering` | what each connection's own transfer sequence said: `lost`, transfers missing from their connections' sequences; `cut`, directions whose positions stopped being established; `retired`, connections ended because their producer began another occupancy of the handle, their own ending never delivered; `unsequenced`, transfers the producer kept no sequence for; `unlocated`, losses the producer could place in no connection. `gate_refused`, transfers refused by the admission gate; `intake_refused`, fragments refused at the volatile byte bound. Both count records, not bytes, separately from missing producer transfers. Never folded into `loss` |
 | `refused` | `reasons` `{reason: count}` |
 | `spool` | `written`, `dropped`, `refused`, `connections`, `connections_dropped`, `connections_refused`, `bytes`, `limit` |
 
@@ -233,8 +233,9 @@ The capability facts, in `provenance.observer` and `capture.capability` alike: `
 `minimum_kernel`, `payload`, `filtered`, `descendants`, `lifecycle`, `binding`, `socket_evidence`, `ipv6`,
 `unobserved[]`, and `withheld[]` `{claim, member, reason}`.
 
-`retired` is the streams a located loss ended. The seal's `interrupted` is a different fact - transfers
-refused at the read boundary - and the two never share a name here.
+`retired` is the connections ended because their producer began another occupancy of the handle. The
+seal's `interrupted` is a different fact - transfers refused at the read boundary - and the two never
+share a name here.
 
 ### reconstruction
 
@@ -251,27 +252,83 @@ accounted, not silent**: a record a predicate removed is counted under the compo
 it.
 
 An optional `aggregate` carries session totals when per-pipeline attribution was not measured:
-`{gate_reason, processing_failures, output_failures, authorized, written}`.
-The four counts are decimal strings. `authorized` and `written` count route records separately;
+`{gate_reason, processing_failures, output_failures, connections_cut, input_cut, authorized, written}`.
+The six counts are decimal strings. `authorized` and `written` count route records separately;
 permission does not assert write completion or durable flush. For each batch's processing refusals,
 `processing_failures` counts each affected durable route once: every route for a batch refusal, or
 the affected pipeline's routes for a pipeline refusal. This is not a count of unique routes, batches or exchanges; a route can write a useful
-prefix and also count a refused suffix. `output_failures` counts failed approved writes. An internal
+prefix and also count a refused suffix. `output_failures` counts failed approved writes.
+`connections_cut` counts connections, and `input_cut` input entries, one per captured transfer: a
+connection holding as much input as one connection may while it waits to be processed is cut there.
+What it held is discarded, what arrives for it afterwards is discarded on arrival, both are counted in
+`input_cut`, and its connection line's truncation stops at its first byte with reason `connection_cut`.
+A cut is neither a processing failure nor a capture loss, and the session goes on. An internal
 artifact-serialization defect instead terminates processing and names the binary defect in the seal
-reason; it does not increment either counter. Neither counter is policy suppression or capture loss,
-which retain their own dispositions and readings. `gate_reason` is empty when the gate has no
+reason; it does not increment `processing_failures` or `output_failures`. Neither of those is policy
+suppression or capture loss, which retain their own dispositions and readings. `gate_reason` is empty when the gate has no
 invalidation reason; otherwise it is one of the reasons `probe.GateReasons` classifies as invalidating
-the capture - `input_limit`, `storage_exhausted`, `intake_exhausted`, `unknown_length` and
-`unknown_kind` - and each remains distinguishable. `intake_exhausted` is the volatile intake refusing a
-record: capture's input is then incomplete, and nothing still pending is released.
+the capture - `unknown_length` and `unknown_kind` - and each remains distinguishable.
+`input_limit` and `intake_exhausted` cause located capture loss and leave the session running.
+The ordering and capture refusal counts report them separately; they do not set `gate_reason` or
+increment `connections_cut` and `input_cut`. Discarded input is released while its connection waits
+for retirement; the metadata line reports the loss with a `positions_unknown` truncation. A connection
+already cut at its input bound keeps its one `connection_cut` line even if it later loses input.
+The capture refusal `a decoded event could not record its withdrawn admission generation` counts
+an event's inventory recording only when its emitted generation is no longer granted and its
+process is established as still running. Ordinary process exit is not this refusal. The event
+carries its admission generation and process birth from emission and is delivered in either case;
+an absent grant never lets a late event recreate a withdrawn inventory row. An indeterminate
+process reading establishes no live withdrawal and is not counted as one.
 When only this aggregate is supplied, `pipelines` is empty because attribution was not supplied;
 that is not a per-pipeline zero. Aggregate counts must never be copied onto a synthetic pipeline
-or onto every pipeline. The aggregate adds no intake, writer-capacity or cleanup diagnostics.
+or onto every pipeline.
+
+#### Delivery counts by destination
+
+Live and sealed operational accounts use the same paths. The published account
+projects them as follows; counts in the operational account are JSON numbers,
+and counts in the published account are decimal strings.
+
+| Destination | Operational account JSON path | Published account JSON path |
+|---|---|---|
+| Approved file, `<output>/approved.jsonl` | `processing.delivery` | `processing.aggregate.delivery` |
+| Derived file, `<output>/derived-<name>.jsonl` | `processing.extensions[]` entry whose `name` is the configured extension name, then `delivery` | `processing.extensions["<name>"].delivery` |
+| Configured operational-log file | `log_destinations.file` | `log_destinations.file` |
+| Operational-log foreground stdout | `log_destinations.stdout` | `log_destinations.stdout` |
+
+`log_destinations` contains only destinations registered for the session: `file`
+when `log` names a file, and `stdout` in foreground operation. A foreground run
+with a configured log file has both entries. The optional `log_delivery` is the
+aggregate over those log destinations; one record sent to both is two attempts.
+It is not the per-file count. Planned and historical accounts may omit these
+optional delivery objects; absence does not mean zero. Current live and sealed
+accounts carry the registered destinations even when their counts are zero.
+
+Every delivery object has these JSON members: `authorized`, `written`, `failed`,
+`dropped`, `pending`, `discarded`, `bytes`, `pending_bytes`, `high_water_bytes`,
+and `limit_bytes`. `authorized = written + failed + dropped + pending`.
+`discarded` is the shutdown subset of `dropped`, at the same destination path;
+for example, `processing.aggregate.delivery.discarded` for the approved file
+in the published account and `log_destinations.file.discarded` for the log file.
+It is not an additional term in the identity. A failed attempt is not written,
+and failure does not prove that no bytes reached the file. `bytes` counts bytes
+accepted from line attempts before they were classified as discarded, not a
+file's current size. `pending_bytes` includes queued and in-flight encoded
+bytes, including LF; `high_water_bytes` is their maximum. `limit_bytes` is the
+shared queue's bound, not a separately reserved allowance for each destination.
+Approved and derived destinations share one queue; log destinations share another.
+
+After bounded shutdown, pending lines become discarded and `pending` is zero.
+A discarded in-flight line retains its byte charge until its write returns, so
+`pending_bytes` can remain nonzero. Its later completion cannot revise the
+sealed discarded count, and discarded does not prove absence from the file.
+The sealed account's log counts include the attempt to emit its stopped record.
+These counts are never an inventory of files; retention belongs to the operator.
 
 `exchange_ids` is the number of exchange ids the session issued: one per exchange the reconstructor
 produced from a dispatched batch where content is written, numbered from `"1"`
-([PROTOCOL.md](../extension/PROTOCOL.md), Ids). Every line of the approved output carries its connection's
-range, and the ranges together cover `"1"` to this count.
+([PROTOCOL.md](../extension/PROTOCOL.md), Ids). Every approved exchange line carries its session, connection, exchange id and index.
+Best-effort drops do not renumber these identities. Retirement lines carry no id range.
 
 `extensions` holds one entry per configured extension, keyed by its configured name, and `{}` where none is
 configured. **Every value in it is the observer's own count of what it did with the extension; an
@@ -294,7 +351,7 @@ error - is never carried here. Each entry:
 | `late`, `duplicate` | answers discarded: from a generation being retired, or a second answer to one id |
 | `derived_written`, `derived_bytes` | derived lines written to the extension's own file, and their bytes |
 | `derived_refused` | derived records refused |
-| `derived_refused_by` | `{reason: count}` with every reason of the protocol, each present: `malformed`, `unknown_source`, `rate`, `queue_full`, `budget`, `stopped`, `write_failed` |
+| `derived_refused_by` | `{reason: count}` with every reason of the protocol, each present: `malformed`, `unknown_source`, `rate`, `queue_full`, `stopped`, `write_failed` |
 | `stderr_dropped` | lines of its standard error not copied into the log |
 
 **The counts conserve**: `considered` = `changed` + `unchanged` + `failed` + `pending`, `failed` is the sum

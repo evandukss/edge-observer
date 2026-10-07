@@ -1,10 +1,12 @@
 package probe
 
-// GateReason identifies a gate refusal. GateInputLimit, GateStorageExhausted,
-// GateIntakeExhausted, GateUnknownLength and GateUnknownKind invalidate the
-// entire capture; the first such reason is retained until session end. GateUnsettled refuses one candidate
-// without invalidating the capture. GateUninitialized refuses work on a nil or
-// zero-value gate, which has no initialized capture to invalidate.
+// CaptureFailureExitStatus is the command's nonzero status after a terminal
+// capture fault. Graceful operator stops use zero.
+const CaptureFailureExitStatus = 1
+
+// GateReason identifies a refusal. Unknown length and kind invalidate the
+// capture until session end. Input and intake limits cut only affected input.
+// Unsettled refuses one candidate; uninitialized refuses an unusable gate.
 //
 // GateReasons enumerates the declared reasons. InvalidatesCapture classifies
 // them so callers can derive populations without maintaining another list.
@@ -13,13 +15,12 @@ package probe
 type GateReason string
 
 const (
-	GateInputLimit       GateReason = "input_limit"
-	GateStorageExhausted GateReason = "storage_exhausted"
-	GateIntakeExhausted  GateReason = "intake_exhausted"
-	GateUnknownLength    GateReason = "unknown_length"
-	GateUnknownKind      GateReason = "unknown_kind"
-	GateUnsettled        GateReason = "unsettled"
-	GateUninitialized    GateReason = "uninitialized"
+	GateInputLimit      GateReason = "input_limit"
+	GateIntakeExhausted GateReason = "intake_exhausted"
+	GateUnknownLength   GateReason = "unknown_length"
+	GateUnknownKind     GateReason = "unknown_kind"
+	GateUnsettled       GateReason = "unsettled"
+	GateUninitialized   GateReason = "uninitialized"
 )
 
 // Keep reason declarations and their classification together. The declaration
@@ -29,9 +30,8 @@ var gateReasonClasses = [...]struct {
 	reason             GateReason
 	invalidatesCapture bool
 }{
-	{GateInputLimit, true},
-	{GateStorageExhausted, true},
-	{GateIntakeExhausted, true},
+	{GateInputLimit, false},
+	{GateIntakeExhausted, false},
 	{GateUnknownLength, true},
 	{GateUnknownKind, true},
 	{GateUnsettled, false},

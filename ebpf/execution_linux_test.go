@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -38,6 +40,11 @@ func executionWrite(t *testing.T, name, content string) {
 // Field numbers come from proc stat's format, independently of its parser.
 // A comm containing spaces and both parentheses exercises its actual boundary.
 // Templates begin as one-task groups; syncThreads prepares the final membership.
+//
+// Field 9, the flags word, models PF_EXITING alone: set on an exited task, as
+// on every task that has been through do_exit, and clear otherwise. Its other
+// bits are not modelled. TestATaskThatHasExitedCarriesTheExitingFlag measures
+// the bit on the running kernel.
 func executionStat(tid int32, state string, birth uint64) string {
 	fields := make([]string, 52)
 	for i := range fields {
@@ -45,7 +52,60 @@ func executionStat(tid int32, state string, birth uint64) string {
 	}
 	fields[0], fields[1], fields[2] = fmt.Sprint(tid), "(service (worker) name)", state
 	fields[3], fields[19], fields[21] = "1", "1", fmt.Sprint(birth)
+	switch state {
+	case "Z", "X", "x":
+		fields[8] = fmt.Sprint(executionPFExiting)
+	}
 	return strings.Join(fields, " ") + "\n"
+}
+
+// executionPFExiting is PF_EXITING in include/linux/sched.h.
+const executionPFExiting = 0x4
+
+// executionExitingFlags is the flags word captured from /proc/<pid>/stat of
+// fourteen real processes caught inside do_exit after their grant was removed,
+// every one still in state R: PF_EXITING with PF_POSTCOREDUMP, PF_SIGNALED and
+// PF_RANDOMIZE.
+const executionExitingFlags = 4195340
+
+// exiting sets one task's flags word, and the group's own stat with it where
+// the task is the leader, leaving its state character as it was.
+func (f executionFixture) exiting(tid int32, flags uint64) {
+	f.t.Helper()
+	files := []string{f.at(fmt.Sprintf("task/%d/stat", tid))}
+	if tid == f.pid {
+		files = append(files, f.at("stat"))
+	}
+	for _, name := range files {
+		data, err := os.ReadFile(name)
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		end := strings.LastIndexByte(string(data), ')')
+		fields := strings.Fields(string(data[end+1:]))
+		fields[6] = fmt.Sprint(flags) // Field 9, after pid and comm.
+		executionWrite(f.t, name, string(data[:end+1])+" "+strings.Join(fields, " ")+"\n")
+	}
+}
+
+// flagsOf reads a task's flags word back out of the file the reader takes it
+// from (the group's own stat for the leader), independently of that reader.
+func (f executionFixture) flagsOf(tid int32) uint64 {
+	f.t.Helper()
+	name := f.at(fmt.Sprintf("task/%d/stat", tid))
+	if tid == f.pid {
+		name = f.at("stat")
+	}
+	data, err := os.ReadFile(name)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	fields := strings.Fields(string(data[strings.LastIndexByte(string(data), ')')+1:]))
+	flags, err := strconv.ParseUint(fields[6], 10, 64)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return flags
 }
 
 func executionStatus(tgid, tid, nsGroup, nsTID int32, state string) string {
@@ -296,6 +356,56 @@ func TestExecutionSiblingIsPositiveEvidenceAtTheSameThreadCount(t *testing.T) {
 					t.Errorf("all-zombie group reported running: %+v", got)
 				}
 			}
+		})
+	}
+}
+
+// A task inside do_exit still reads R, and its grant is already gone, so it
+// must read as exited or an ordinary exit counts as a live withdrawal. The flag
+// is per task: a group with one task exiting and another not is running.
+func TestExecutionTaskThatHasBegunExitingIsNoWitness(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		tasks   map[int32]string
+		exiting []int32
+		want    process.Liveness
+		witness int32
+	}{
+		{"leader alone, exiting", nil, []int32{4101}, process.LivenessTerminated, 0},
+		{"leader alone, control", nil, nil, process.LivenessRunning, 4101},
+		{"zombie leader and its last thread exiting", map[int32]string{4102: "R"}, []int32{4102}, process.LivenessTerminated, 0},
+		{"zombie leader and its last thread, control", map[int32]string{4102: "R"}, nil, process.LivenessRunning, 4102},
+		{"leader exiting beside a running thread", map[int32]string{4102: "S"}, []int32{4101}, process.LivenessRunning, 4102},
+		{"zombie leader, one thread exiting beside one running", map[int32]string{4102: "R", 4103: "S"}, []int32{4102}, process.LivenessRunning, 4103},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			leader := "R"
+			if len(tc.tasks) > 0 && !slices.Contains(tc.exiting, 4101) {
+				leader = "Z"
+			}
+			f := newExecutionFixture(t, leader)
+			for tid, state := range tc.tasks {
+				f.task(tid, state, 12000+uint64(tid), tid-4000)
+			}
+			for _, tid := range tc.exiting {
+				f.exiting(tid, executionExitingFlags)
+			}
+			for tid := range f.tasks {
+				want := slices.Contains(tc.exiting, tid) || (tid == f.pid && leader == "Z")
+				if got := f.flagsOf(tid)&executionPFExiting != 0; got != want {
+					t.Fatalf("wiring, not the property: task %d carries PF_EXITING %t in the fixture, want %t", tid, got, want)
+				}
+			}
+			read := f.inspect()
+			if read.Liveness != tc.want || read.Witness.TID != tc.witness {
+				t.Errorf("liveness %s with witness %d, want %s with witness %d: %s",
+					read.Liveness, read.Witness.TID, tc.want, tc.witness, read.Evidence())
+			}
+			want := ebpf.ExecutionEnded
+			if tc.want == process.LivenessRunning {
+				want = ebpf.GrantEndedWhileRunning
+			}
+			executionResult(t, f.selection(), read, want)
 		})
 	}
 }

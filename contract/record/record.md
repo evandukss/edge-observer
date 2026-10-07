@@ -19,6 +19,64 @@ extension's derived records, never to these.
 Every record carries `record` (its kind) and `version`. A record set covers ONE capture session: connection
 ids are unique within a session and mean nothing across sessions.
 
+## Approved line envelope
+
+Durable approved output is LF-terminated JSON, version `observer.approved/3`.
+Each line is fully processed under its `policy_revision`. Stable files append
+across sessions, so `session` is required on every line.
+
+| Member | Meaning |
+|---|---|
+| `version` | `observer.approved/3` |
+| `record` | `exchange` or `connection` |
+| `session` | the session that authorized this line |
+| `policy_revision` | the configuration revision applied before release |
+| `route` | the compiled `pipeline`, `sink` and route `kind` |
+| `connection` | connection metadata in the record contract below |
+| `exchange_id` | exchange lines only: a positive decimal string, unique within the session |
+| `index` | exchange lines only: the zero-based index within the connection |
+| `reconstruction` | exchange lines only: exactly one complete, processed request/response pair; its exchange index equals `index` |
+| `reconstruction_truncation` | retirement lines only, where an incomplete suffix is known |
+| `policy_exclusions` | a present list of fields removed from captured content |
+| `extension_outcomes` | a present list of each extension's outcome for this exchange |
+| `replacement_exclusions` | a present list of fields removed from extension replacement content |
+
+Exchange lines go only on the `exchanges` route. Metadata never asserts an
+observed close without evidence. One
+connection line is emitted at retirement, only on the `connections` route. It
+carries final metadata, no exchange id, index or reconstruction, and empty
+evidence lists. On an exchange, all three evidence lists refer only to that
+exchange's index; no exclusions means `[]`, not an absent or null list.
+
+A retirement line's truncation has `state: "truncated"`, `suffix: "indeterminate"`
+and one or two `stops`, ordered sent then received without repetition. Each stop
+names `direction`, the decimal `offset` of the first excluded byte, a `reason`,
+and the decimal `evidence_offset` at or after that offset. Reasons are
+`capture_hole`, `positions_unknown`, `incomplete_message`, `malformed_message`,
+`ambiguous_framing`, `processing_limit`, `unsupported_message`, `unpaired_exchange`,
+`unparsed_suffix` or `connection_cut`. This evidence describes an incomplete suffix,
+independently of the connection's actual ending. `connection_cut` is a connection that
+held as much input as one connection may while it waited to be processed: its input
+was discarded from its first byte, so the stop's `offset` is `0` and its
+`evidence_offset` is how far that direction's discarded input ran. Only complete pairs appear in exchange lines.
+
+Ids are issued monotonically before delivery and never reused. The same exchange
+has the same id and connection index on every route and in every extension.
+No exchange line is released before its connection's retirement. A dropped line cannot
+renumber later exchanges. With `write_content` false, no exchange line is emitted
+and no exchange id is issued; the retirement line remains. Version 3 has no
+`exchange_ids` range. Historical versions 1 and 2 remain readable under their
+original rules; version 2 carries its connection's contiguous id range.
+
+Only immutable, policy-eligible encoded lines enter the bounded delivery queue.
+Enqueue is authorized in one ordering with invalidation; a line already queued
+may be written after later invalidation. Full queues drop lines. Authorized,
+written, failed, dropped and pending counts are separate. A failed attempt may
+have written a prefix, is never counted as written, and is not retried. The next
+record starts on a new line; a damaged record is malformed on inspection. Reader
+selection over several explicit files filters by session without claiming
+continuity between those files.
+
 ## Encoding
 
 The tests use JSON. That is the encoding the observer already writes; it is not a choice of
@@ -155,7 +213,7 @@ call, not a message boundary.
 | `opened` | uncertainty | `crossed_from_monotonic`: when the socket beneath was created. Undetermined where the run did not see it created, which includes every descriptor inherited across a fork |
 | `ending.how` | uncertainty | `still_open`, `handle_released`, `socket_closed`, `unobserved`, `unestablished` |
 | `ending.at` | provenance | `observer_wall_read`: when the observer decoded the event that ended the record, for `handle_released` and `socket_closed`. ALWAYS undetermined for `unobserved`, `still_open` and `unestablished`, because none of them has an observed end |
-| `ending.detected` | provenance | present ONLY for `unobserved`: `observer_wall_read`, when the observer DETECTED the loss that retired the record. It is not when the connection ended, and nothing records that |
+| `ending.detected` | provenance | present ONLY for `unobserved`: `observer_wall_read`, when the observer DETECTED that the producer had begun another occupancy of the handle, which retired the record. It is not when the connection ended, and nothing records that |
 | `associations[]` | see below | one per direction the run said anything about. A direction with no entry had nothing observed, which is not a direction observed to have no binding |
 | `placements[]` | see below | one per direction that carried bytes |
 | `fragments` | loss | fragments placed, both directions; bounds neither transfers nor bytes |
@@ -196,11 +254,21 @@ Join reasons: `no_binding_to_join`, `endpoint_unreadable`, `no_endpoint_producer
 |---|---|---|
 | `positions` | uncertainty | `established`, `unknown_from`, `unknown_throughout` |
 | `from` | uncertainty | only on `unknown_from`: the first offset whose position is not established |
-| `because` | uncertainty | a reason from the association vocabulary; required unless `established` |
+| `because` | uncertainty | required unless `established`: `observation_lost`, or one of the placement reasons below |
 | `lost` | loss | observations of this direction known to be missing, in `events`; undetermined where no count exists |
 
-A gap located in the session's production order is `unknown_from`; one nothing located is
-`unknown_throughout`. Neither says which stream the missing observation belonged to.
+A transfer missing from the connection's own sequence is `observation_lost`, `unknown_from` the offset
+its bytes would have begun at, with `lost` counting this direction's missing transfers; a direction
+whose first transfer is missing is `unknown_throughout`. A loss the producer could place in no
+connection is `observation_lost` with `lost` undetermined, on every connection live across it from
+where each stood, and `unknown_throughout` on every connection begun after it.
+
+Placement reasons:
+
+    terminal_unsettled      nothing settled whether the direction's last transfers arrived
+    sequence_unavailable    the producer kept no sequence for a transfer of the direction
+    operations_overlapped   two calls in the direction were in flight on the handle at once
+    length_unmeasured       a transfer of the direction moved a length nothing measured
 
 ### One socket, more than one claimant
 
@@ -212,8 +280,8 @@ undetermined `ending.at` counting as still open. A socket inode is reused only a
 an overlap in time is one socket. A child the kernel admitted carries `allocator` `descent`.
 
 **Two records of ONE instance on one socket are not co-claimants.** They are successive occupancies of the
-handle - a record a located gap retired, ending `unobserved`, and the record that took over at the next
-handle generation. `valid.open` does not separate the two cases: the observer leaves it true on records that
+handle - a record retired when the producer began another occupancy, ending `unobserved`, and the
+record that took over at the next handle generation. `valid.open` does not separate the two cases: the observer leaves it true on records that
 have ended, so an interval test over `valid` reads every such pair as overlapping.
 
 ## reconstruction

@@ -59,16 +59,18 @@ type Block struct {
 
 // Account is one session's account.
 type Account struct {
-	Account        string         `json:"account"`
-	Session        string         `json:"session"`
-	Moment         Moment         `json:"moment"`
-	At             record.Instant `json:"at"`
-	Provenance     Provenance     `json:"provenance"`
-	Scope          Scope          `json:"scope"`
-	Capture        Capture        `json:"capture"`
-	Reconstruction Reconstruction `json:"reconstruction"`
-	Processing     Processing     `json:"processing"`
-	Seal           Seal           `json:"seal"`
+	LogDestinations map[string]SinkDelivery `json:"log_destinations,omitempty" account:"optional"`
+	LogDelivery     *SinkDelivery           `json:"log_delivery,omitempty" account:"optional"`
+	Account         string                  `json:"account"`
+	Session         string                  `json:"session"`
+	Moment          Moment                  `json:"moment"`
+	At              record.Instant          `json:"at"`
+	Provenance      Provenance              `json:"provenance"`
+	Scope           Scope                   `json:"scope"`
+	Capture         Capture                 `json:"capture"`
+	Reconstruction  Reconstruction          `json:"reconstruction"`
+	Processing      Processing              `json:"processing"`
+	Seal            Seal                    `json:"seal"`
 }
 
 // Provenance is what produced the account and against what configuration.
@@ -101,6 +103,7 @@ type Facts struct {
 	SocketEvidence bool       `json:"socket_evidence"`
 	IPv6           bool       `json:"ipv6"`
 	Unobserved     []string   `json:"unobserved"`
+	Unprobed       []string   `json:"unprobed"`
 	Withheld       []Withheld `json:"withheld"`
 }
 
@@ -258,6 +261,10 @@ type Overlapping struct {
 type Placement struct {
 	Block
 	Processes []Placed `json:"processes"`
+
+	// Ended is how many placed processes were dropped from Processes because
+	// their execution ended.
+	Ended string `json:"ended" account:"count"`
 }
 
 // Placed is one process's attachment. Its identity is not unique under pid
@@ -471,16 +478,17 @@ type Admitted struct {
 	Descendants string `json:"descendants,omitempty" account:"count"`
 }
 
-// Ordering is whether observations could be placed in production order, and
-// what a break cost. Never folded into Loss.
+// Ordering is whether each connection's transfers could be placed in their
+// producer's sequence, and what a break cost. Never folded into Loss.
 type Ordering struct {
 	Block
-	Disordered  string `json:"disordered,omitempty" account:"count"`
-	Unstamped   string `json:"unstamped,omitempty" account:"count"`
-	Tolerated   string `json:"tolerated,omitempty" account:"count"`
-	Lost        string `json:"lost,omitempty" account:"count"`
-	Retired     string `json:"retired,omitempty" account:"count"`
-	Unexplained string `json:"unexplained,omitempty" account:"count"`
+	Lost          string `json:"lost,omitempty" account:"count"`
+	Cut           string `json:"cut,omitempty" account:"count"`
+	Retired       string `json:"retired,omitempty" account:"count"`
+	Unsequenced   string `json:"unsequenced,omitempty" account:"count"`
+	Unlocated     string `json:"unlocated,omitempty" account:"count"`
+	GateRefused   string `json:"gate_refused" account:"count"`
+	IntakeRefused string `json:"intake_refused" account:"count"`
 }
 
 // Refusals is what the kernel program refused, by reason.
@@ -530,6 +538,7 @@ type Processing struct {
 // the sum of FailedBy and DerivedRefused of DerivedRefusedBy. The three maps
 // hold every member of their vocabulary.
 type ExtensionAccount struct {
+	Delivery         *SinkDelivery     `json:"delivery,omitempty" account:"optional"`
 	Effects          string            `json:"effects"`
 	Fields           []string          `json:"fields"`
 	TimeoutMS        string            `json:"timeout_ms" account:"count"`
@@ -558,16 +567,22 @@ type ExtensionAccount struct {
 // unique-route, batch or exchange count. A useful prefix can be written on a
 // route whose suffix incurs a processing failure. Authorized and Written count
 // permitted and completed route records separately; OutputFailures counts
-// failed approved writes. Internal serialization defects use the terminal
-// error/seal reason, not these counters. A gate reason is not an output
-// failure, policy suppression or a capture-loss count. No whole-session
-// terminal-state claim is made here.
+// failed approved writes. ConnectionsCut counts connections cut because they
+// held as much input as one connection may while waiting to be processed, and
+// InputCut the input entries, one per captured transfer, discarded for them; a
+// cut is neither a processing failure nor a capture loss. Internal
+// serialization defects use the terminal error/seal reason, not these
+// counters. A gate reason is not an output failure, policy suppression or a
+// capture-loss count. No whole-session terminal-state claim is made here.
 type ProcessingAggregate struct {
-	GateReason         string `json:"gate_reason"`
-	ProcessingFailures string `json:"processing_failures" account:"count"`
-	OutputFailures     string `json:"output_failures" account:"count"`
-	Authorized         string `json:"authorized" account:"count"`
-	Written            string `json:"written" account:"count"`
+	Delivery           *SinkDelivery `json:"delivery,omitempty" account:"optional"`
+	GateReason         string        `json:"gate_reason"`
+	ProcessingFailures string        `json:"processing_failures" account:"count"`
+	OutputFailures     string        `json:"output_failures" account:"count"`
+	ConnectionsCut     string        `json:"connections_cut" account:"count"`
+	InputCut           string        `json:"input_cut" account:"count"`
+	Authorized         string        `json:"authorized" account:"count"`
+	Written            string        `json:"written" account:"count"`
 }
 
 // Processed is one pipeline's dispositions.
@@ -651,4 +666,18 @@ type SealedMember struct {
 	Role    string `json:"role"`
 	SHA256  string `json:"sha256"`
 	Records string `json:"records,omitempty" account:"count"`
+}
+
+// SinkDelivery counts attempts and outcomes, not destination contents.
+type SinkDelivery struct {
+	Authorized     string `json:"authorized" account:"count"`
+	Written        string `json:"written" account:"count"`
+	Failed         string `json:"failed" account:"count"`
+	Dropped        string `json:"dropped" account:"count"`
+	Pending        string `json:"pending" account:"count"`
+	Discarded      string `json:"discarded" account:"count"`
+	Bytes          string `json:"bytes" account:"count"`
+	PendingBytes   string `json:"pending_bytes" account:"count"`
+	HighWaterBytes string `json:"high_water_bytes" account:"count"`
+	LimitBytes     string `json:"limit_bytes" account:"count"`
 }

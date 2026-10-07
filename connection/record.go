@@ -6,6 +6,7 @@ import (
 
 	"github.com/evandukss/edge-observer/admission"
 	"github.com/evandukss/edge-observer/fragment"
+	"github.com/evandukss/edge-observer/held"
 )
 
 // Record is one captured connection, held with the fragments and joined
@@ -76,6 +77,11 @@ type Record struct {
 	// but replayable and not forward-secret, so the fact is kept here.
 	Early           []Early `json:"early,omitempty"`
 	EarlyUnmeasured int     `json:"early_unmeasured,omitempty"`
+
+	// Slot is the delivery gate's slot for the ending this record came from,
+	// handed to the store that retains the record; nil where there was none.
+	Slot held.Slot  `json:"-"`
+	Loss *held.Loss `json:"-"`
 }
 
 // Early is a run of bytes that arrived as TLS 1.3 early data.
@@ -106,7 +112,8 @@ const (
 	SocketClosed
 
 	// EndingUnobserved is an end not seen but known to have happened (the
-	// execution exited holding it, or an observation was lost).
+	// execution exited holding it, or the producer began another occupancy of the
+	// handle while its ending was never delivered).
 	EndingUnobserved
 
 	// EndingUnestablished is a connection whose end no placed probe could report:

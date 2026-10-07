@@ -27,17 +27,24 @@ const (
 		"through an approved process afterwards"
 )
 
-// Grants is every admission this session recorded, each with its grant state
-// in the kernel's allowlist now. An unreadable allowlist leaves every grant
+// Grants is every admission this session holds, each with its grant state in
+// the kernel's allowlist now. An unreadable allowlist leaves every grant
 // unknown with the reason, never a shorter list. Each grant found absent has
 // its execution read once (process.Inspect, through inspect), and that
 // reading's interval travels with it as evidence; what is reported is coverage.
-// Cost: one allowlist reading plus one bounded inspection per absent grant (at
-// most 64 operations, usually about seven). Frequent calls over many
-// short-lived descendants could matter; that is not measured.
+// An absent grant whose execution that reading establishes as ended is let go
+// of instead, counted under its target (EndedCounts), so what this holds and
+// reads is bounded by what may still run. Cost: one allowlist reading plus one
+// bounded inspection per absent grant still held (at most 64 operations,
+// usually about seven).
 func (s *Session) Grants() []probe.Grant {
 	held, err := s.holding()
-	return grantsOf(s.Inventory(), held, err, time.Now(), s.inspect)
+	at := time.Now()
+	grants, ended := grantsOf(s.Inventory(), held, err, at, s.inspect)
+	for _, one := range ended {
+		s.forgetEnded(keyOf(one.Selection.Instance), one.Evidence, at)
+	}
+	return grants
 }
 
 // holding is the generation of every grant the allowlist holds now, by key.
@@ -68,10 +75,13 @@ func (s *Session) holding() (map[instanceKey]admission.Generation, error) {
 // reading; the reading and the execution reader are arguments, so no kernel is
 // needed. A grant is held only under its own generation: a successor holding
 // the key has its own, so presence alone would report the predecessor covered.
-// An admission without a generation is unknown wherever its key is held.
+// An admission without a generation is unknown wherever its key is held. An
+// absent grant whose execution is established as ended is returned apart, as
+// ended, rather than as a grant.
 func grantsOf(recorded []admission.Selection, held map[instanceKey]admission.Generation, err error,
-	at time.Time, inspect func(admission.Selection) process.Execution) []probe.Grant {
+	at time.Time, inspect func(admission.Selection) process.Execution) ([]probe.Grant, []Withdrawal) {
 	grants := make([]probe.Grant, 0, len(recorded))
+	var ended []Withdrawal
 	for _, one := range recorded {
 		grant := probe.Grant{Selection: one, Read: at}
 		generation, present := held[keyOf(one.Instance)]
@@ -85,10 +95,15 @@ func grantsOf(recorded []admission.Selection, held map[instanceKey]admission.Gen
 		case present && generation == one.Instance.Generation:
 			grant.State = probe.GrantHeld
 		default:
+			reading := inspect(one)
+			if became := WhatBecameOf(one, reading); became.State == ExecutionEnded {
+				ended = append(ended, became)
+				continue
+			}
 			grant.State = probe.GrantAbsent
-			grant.Evidence = inspect(one).Observed
+			grant.Evidence = reading.Observed
 		}
 		grants = append(grants, grant)
 	}
-	return grants
+	return grants, ended
 }

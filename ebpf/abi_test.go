@@ -45,6 +45,12 @@ func TestTheAllowlistIsTheSameShapeOnBothSidesOfTheProgram(t *testing.T) {
 				// The handle bindings: a disagreement would report a binding under the wrong
 				// process.
 				"handles": {binary.Size(handleKey{}), binary.Size(bindingValue{})},
+				// The handle occupancies: a disagreement would settle a connection against
+				// numbers read from the wrong bytes.
+				"occupancies":   {binary.Size(handleKey{}), binary.Size(sequenceValue{})},
+				"occupancy_ids": {binary.Size(uint32(0)), binary.Size(uint64(0))},
+				"unlocated":     {binary.Size(uint32(0)), binary.Size(uint64(0))},
+				"capture_live":  {binary.Size(uint32(0)), binary.Size(uint8(0))},
 			}
 			for name, want := range sizes {
 				held, found := spec.Maps[name]

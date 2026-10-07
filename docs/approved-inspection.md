@@ -6,15 +6,17 @@ The public entry point is:
 observer inspect <copied-session-directory> --text
 ```
 
-The copied directory contains the sealed `account.json` and `approved.jsonl`
-only. The command reads the sealed account, then visits and renders the approved
-artifacts. It does not require the capturing process, original directory,
-configuration, extensions or raw spool. The default JSON account inspection
-retains its existing account-only meaning; `--text` exposes approved values.
+A copied session directory contains the sealed `account.json`. Pass each
+approved output file explicitly with `--file <path>`; files may hold several
+sessions, and `--session <id>` selects one. Without these options, inspection
+selects the account's session and reads the stable `approved.jsonl` in the
+configured output directory. Copied legacy session-local output remains readable.
+The command reads the sealed account, then visits and renders approved artifacts.
+It needs no capturing process, configuration, extensions or raw spool. Default
+JSON account inspection remains account-only; `--text` exposes approved values.
 
-The reader uses the existing `processing.Artifact` representation without
-changing it. Each rendered record includes the persisted policy revision,
-pipeline, sink and route kind, connection metadata, and any reconstruction.
+The reader uses `processing.Artifact`. Each rendered record includes its session,
+persisted policy revision, pipeline, sink, route, connection and exchange identity.
 Header and trailer values are quoted; body bytes are decoded from base64 and
 quoted. Message directions and offsets identify where retained values came
 from. The persisted actual connection ending, unplaced count state and reason,
@@ -40,7 +42,7 @@ capture-time policy revision unchanged.
 `policy_exclusions` records actual removals by processing policy from retained
 messages, per pipeline. It never carries a removed value.
 
-The worker writes `observer.approved/2`. Each entry names the exchange index,
+The worker writes `observer.approved/3`. Each entry names the exchange index,
 `request` or `response`, the `field` removed and a `disposition`:
 
 | field | disposition | written when |
@@ -73,7 +75,7 @@ body, and a request target whose query was removed from one that had none.
 and a lowercase header `name`, with no `field` or `disposition`, and record
 `remove-headers` removals only.
 
-In both versions the reader distinguishes:
+In every version the reader distinguishes:
 
 - A populated array: the named fields were excluded by policy.
 - An empty array: no fields were excluded in the retained population. A field
@@ -89,30 +91,62 @@ state. The JSON retains every published metadata and reconstruction field,
 including provenance and limits. It escapes header and trailer values; decoded
 bodies use Go string quoting.
 
-## Exchange ids
+## Lines and exchange ids
 
-Every `observer.approved/2` line carries `exchange_ids`, the range of ids the
-session issued to its connection's exchanges, on both routes:
+The canonical envelope is in the [record contract](../contract/record/record.md#approved-line-envelope).
 
-    "exchange_ids": {"first": "17", "last": "19", "count": "3"}
+The writer emits `observer.approved/3`. Each line carries `session`,
+`policy_revision`, `route`, and `connection` metadata. The metadata's ending
+never asserts an observed close without evidence.
 
-Ids are positive decimal strings from one sequence for the session, never
-reused, allocated contiguously to a connection's exchanges in index order when
-its batch is dispatched: the exchange at `index` i has id `first` + i. `count`
-is `last` - `first` + 1. A line whose connection was issued no id - with
-`write_content` false, for a batch refused whole, or a connection with no
-exchange - carries `{"count": "0"}` and no `first` or `last`.
+- `record: "exchange"` is emitted only on the exchanges route and carries `exchange_id` (a positive decimal string),
+  `index` (the zero-based index within the connection), and `reconstruction`
+  containing exactly one complete request/response pair. Its exchange index
+  equals the line's `index`. Only processed, policy-eligible content is present.
+- `record: "connection"` is emitted once at retirement, on the connections route.
+  It has final connection metadata, no exchange id, index or reconstruction.
+  It carries any `reconstruction_truncation` describing the incomplete suffix;
+  exchange lines do not carry that retirement evidence.
+- Every line has present `policy_exclusions`, `extension_outcomes` and
+  `replacement_exclusions` lists. On an exchange they refer only to that
+  exchange's index; on a connection they are empty.
 
-**Every id maps to one connection and one index whether or not that exchange
-was written.** Each line of a connection, on whichever routes write it, carries
-that connection's identical range, so a connection written on both routes has
-two lines with one range. The range covers every exchange the reconstructor
-produced from the batch, including the ones not written: where an id's index is
-an exchange in the exchanges-route line's `reconstruction.exchanges[]` it is
-that exchange; otherwise that line's `reconstruction_truncation` covers it. The
-ranges of different connections are disjoint and together cover `"1"` to the
-account's `processing.exchange_ids`. Extensions cite exchanges by these ids
-([extensions.md](extensions.md)).
+Ids are issued monotonically within the session before delivery, and never
+reused. An id denotes the same connection and index on every route and in every
+extension. No exchange line is released before its connection's retirement. Dropping a
+line cannot renumber any later exchange. With `write_content` false, no exchange
+line is emitted and no exchange id is issued. Version 3 has no `exchange_ids`
+range. Readers retain support for versions 1 and 2 under their historical rules;
+a version 2 line has its connection's contiguous id range.
+
+## Delivery and retained bytes
+
+`approved.jsonl` and `derived-<extension>.jsonl` are stable paths under the
+configured directory, opened in append mode across sessions. The session's own
+directory retains its account and control state. Rotation and retention belong
+to the operator; the account counts attempts and outcomes, never a sink inventory.
+
+Enqueue is the release decision, ordered against invalidation. Only immutable,
+fully processed lines enter the byte-bounded queue. A line enqueued before a
+later invalidation may still be written. Full queues drop immediately. Counts
+separate authorized, written, failed, dropped and pending lines. Failed means a
+failed attempt, possibly after a partial write, never proven absence. It is not
+retried; the next record starts on a new line and damaged records are malformed.
+Unavailable destinations do not prevent monitoring and can recover by reopen.
+Shutdown is bounded and counts remaining pending lines as discarded. An in-flight
+write may still complete later; discard does not prove absence from the file.
+
+The Go `sink.Sink` boundary supplies `Write`, `Reopen` and `Close`.
+`sink.Queue.Enqueue` transfers the line's retained-byte charge before input
+reservations are refunded. `Stats.PendingBytes` counts queued and in-flight
+bytes together; `HighWaterBytes` records their maximum. `processing.OpenWriter`
+accepts a `WriterOptions.OpenSink` factory for deterministic boundary tests.
+
+`ReadArtifactFiles(fs.FS, []string, session, visitor)` reads explicit files and
+filters by session. It claims nothing about missing lines between files.
+Inspection accepts `--session <id>` and `--file <path>` repeated with `--text`;
+without explicit files it reads the stable approved file beside the session
+directory. Malformed records fail inspection without quoting their content.
 
 ## Extension outcomes
 
@@ -123,8 +157,7 @@ extensions ran:
     "extension_outcomes": [
       {"exchange": 0, "extension": "classify", "outcome": "changed",
        "changed": ["response.headers"], "overwritten": []},
-      {"exchange": 0, "extension": "inventory", "outcome": "unchanged"},
-      {"exchange": 1, "extension": "classify", "outcome": "failed", "reason": "timeout"}
+      {"exchange": 0, "extension": "inventory", "outcome": "unchanged"}
     ]
 
 | member | value |
@@ -159,8 +192,8 @@ The list is empty where nothing was removed from a replacement.
 
 ## Reader validation
 
-`ReadArtifacts` visits LF-terminated JSON records in file order and owns only
-`approved.jsonl`. It requires a non-nil filesystem and visitor. A missing file
+`ReadArtifacts` reads `approved.jsonl`; `ReadArtifactFiles` reads each explicitly
+named file in order and selects the requested session. Both visit LF-terminated records. It requires a non-nil filesystem and visitor. A missing file
 preserves `fs.ErrNotExist`; an empty file returns `ErrNoArtifacts`. A visitor
 error is returned unchanged and stops reading. Read failures, a malformed line
 (including a blank line), an unsupported artifact version and an unterminated
@@ -169,7 +202,7 @@ Diagnostics do not quote malformed record content.
 
 Both reading and rendering validate these structural requirements:
 
-- The artifact version is `observer.approved/2` or `observer.approved/1`;
+- The artifact version is `observer.approved/3`, `observer.approved/2` or `observer.approved/1`;
   policy revision, pipeline, sink and route kind are nonempty. Connection
   record kind/version and identity are present.
 - A reconstruction has the published record kind/version, names the same
@@ -179,19 +212,19 @@ Both reading and rendering validate these structural requirements:
   Body encoding is base64 and its retained bytes decode. Message directions are
   sent or received; stream offsets are unsigned decimal integers with end at
   least start.
-- Truncation requires a reconstruction, state `truncated`, suffix
+- Truncation requires a reconstruction or a version 3 retirement line, state `truncated`, suffix
   `indeterminate`, and one or two stops ordered sent then received, without
   repetition. Offsets are unsigned decimal integers; evidence cannot precede
   the exclusion boundary. Reasons are the codes declared in `TruncationStop`.
-  Unplaced must be undetermined bytes, without a numeric value, with reason
+  On historical reconstruction lines, unplaced must be undetermined bytes, without a numeric value, with reason
   `reconstruction_truncated`. That reason also requires truncation evidence.
 - Each exclusion is a unique entry referring to an existing retained exchange
   and to request or response. Metadata-only records carry no populated
-  exclusion or truncation evidence.
+  exclusion evidence. Version 3 retirement lines can carry truncation evidence.
 - In `observer.approved/1`, an entry names headers or trailers and a lowercase
   HTTP field token, and the named field cannot also be present in that message
   section. No structure state is `removed`.
-- In `observer.approved/2`, an entry's field is one of the forms above, with the
+- In `observer.approved/2` and `/3`, an entry's field is one of the forms above, with the
   disposition its row names, and `name` is absent. A header entry names headers
   or trailers and the header cannot also be present there; no other entry has a
   section. `message.target.query`, `message.query.<name>` and
@@ -229,8 +262,4 @@ applies the same checks before printing a record and returns output failures,
 including short writes. The sealed account's text output also propagates write
 failures. Default JSON inspection remains account-only.
 
-The reader's own tests cover readable output, failure paths, and all four wire
-forms at the reader/renderer boundary, including literal null produced by
-re-encoding a legacy artifact through the public type. The independent
-condition-2 engagement covers the broader protected-value/suffix absence and
-exclusion-evidence guarantee; task acceptance waits for that engagement.
+

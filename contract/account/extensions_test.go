@@ -76,8 +76,8 @@ func TestAnExtensionsEntryIsReadAgainstTheProtocolsVocabulary(t *testing.T) {
 		{"start_failed missing", func(e map[string]any) { delete(e["retired_by"].(map[string]any), "start_failed") },
 			at + ".retired_by.start_failed", RequiredMemberAbsent},
 		{"a derived refusal missing", func(e map[string]any) {
-			delete(e["derived_refused_by"].(map[string]any), "budget")
-		}, at + ".derived_refused_by.budget", RequiredMemberAbsent},
+			delete(e["derived_refused_by"].(map[string]any), "queue_full")
+		}, at + ".derived_refused_by.queue_full", RequiredMemberAbsent},
 		{"a count that is not decimal", func(e map[string]any) { e["considered"] = "three" }, at + ".considered",
 			ValueNotInContract},
 		{"a count absent", func(e map[string]any) { delete(e, "pending") }, at + ".pending", RequiredMemberAbsent},

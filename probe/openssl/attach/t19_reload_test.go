@@ -66,7 +66,7 @@ func TestT19AChildFirstReadAfterAReloadThatRenumbersTargetsIsCreditedToItsParent
 	waitWitnessed(t, witness, map[string]int32{"C": child.PID}, map[string]int{"C": 0}, 3)
 	sealed := ended(t, observer, c)
 
-	if by := observedBy(t, observer.directory(c)); by[child.PID] == 0 {
+	if by := observedBy(t, c.directory); by[child.PID] == 0 {
 		t.Fatalf("wiring, not the property: the approved output holds nothing for the child pid %d, so it was "+
 			"not admitted or transferred nothing", child.PID)
 	}

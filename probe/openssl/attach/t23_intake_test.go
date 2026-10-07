@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
@@ -105,36 +104,6 @@ func t23Uploading(t *testing.T, port int) *tls.Conn {
 	return connection
 }
 
-// t23Ended waits for a session to end by itself and returns the gate reason
-// its stopped record gives, reading its log to the end. It is killed after a
-// minute, which the caller reads as not ending by itself.
-func t23Ended(t *testing.T, observer running) (string, bool) {
-	t.Helper()
-	var killed atomic.Bool
-	backstop := time.AfterFunc(time.Minute, func() { killed.Store(true); _ = observer.command.Process.Kill() })
-	defer backstop.Stop()
-	reason, found := "", false
-	for observer.lines.Scan() {
-		var record struct {
-			Record     string `json:"record"`
-			Processing *struct {
-				GateReason string `json:"gate_reason"`
-			} `json:"processing"`
-		}
-		if json.Unmarshal(observer.lines.Bytes(), &record) == nil && record.Record == "stopped" {
-			found = true
-			if record.Processing != nil {
-				reason = record.Processing.GateReason
-			}
-		}
-	}
-	_ = observer.command.Wait()
-	if killed.Load() {
-		t.Fatal("wiring, not the property: the session did not end by itself within a minute")
-	}
-	return reason, found
-}
-
 // The volatile intake fills before the event allowance does. It holds
 // allowance * payload bytes, payload being ebpf.MaxEventPayloadBytes
 // (activation.RecordingIntake), and charges each event its payload plus a fixed
@@ -143,12 +112,10 @@ func t23Ended(t *testing.T, observer running) (string, bool) {
 // event carries a full payload and is charged payload + overhead. The intake
 // therefore refuses a record by event allowance*payload/(payload+overhead) + 1,
 // which must come before the allowance's last event; the test checks that
-// before it runs. The session ends by itself, and the account, its stopped
-// record and inspect all give intake_exhausted as the reason release was
-// refused, with the records the intake refused printed on the seal line. The
-// control, the same session with one exchange, states no reason and prints no
-// loss.
-func TestAFullVolatileIntakeIsStatedAsIntakeExhaustedBesideTheRecordsItRefused(t *testing.T) {
+// before it runs. After the refusal, live inspection must still work and the
+// operator stops the session. Refusals remain visible without a terminal gate
+// reason. The one-exchange control has no refusal.
+func TestAFullVolatileIntakeCountsRefusalsAndKeepsTheSessionRunning(t *testing.T) {
 	binary := built(t)
 	const allowance = 64
 
@@ -178,7 +145,22 @@ func TestAFullVolatileIntakeIsStatedAsIntakeExhaustedBesideTheRecordsItRefused(t
 				break
 			}
 		}
-		reason, stopped := t23Ended(t, observer)
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			raw, err := exec.Command(binary, "inspect", c.path).Output()
+			var live account.Account
+			if err != nil || json.Unmarshal(raw, &live) != nil {
+				t.Fatalf("overloaded session stopped answering live inspection: %v %s", err, raw)
+			}
+			if live.Seen != nil && live.Seen.IntakeRefused > 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("wiring: intake refusal was not reached: %+v", live.Seen)
+			}
+			time.Sleep(time.Millisecond)
+		}
+		stopped := t23Stopped(t, binary, c, observer)
 		// Read and rendered here: inspect --text refuses a session that approved
 		// no record, and this one approves none.
 		raw, err := os.ReadFile(filepath.Join(observer.directory(c), "account.json"))
@@ -206,23 +188,20 @@ func TestAFullVolatileIntakeIsStatedAsIntakeExhaustedBesideTheRecordsItRefused(t
 			t.Fatalf("wiring, not the property: the kernel refused events, so the intake's exhaustion is not the "+
 				"only one reached: %+v", sealed.Loss)
 		}
-		if !stopped {
+		if stopped == "" {
 			t.Fatal("wiring, not the property: the session's log holds no stopped record")
 		}
 
-		if sealed.Processing == nil || sealed.Processing.GateReason != "intake_exhausted" {
-			t.Errorf("the account gives %+v as the reason release was refused, want intake_exhausted", sealed.Processing)
+		if sealed.Processing == nil || sealed.Processing.GateReason != "" {
+			t.Errorf("intake loss set a terminal reason: %+v", sealed.Processing)
 		}
-		if reason != "intake_exhausted" {
-			t.Errorf("the stopped record gives %q as the reason, want intake_exhausted", reason)
-		}
-		if !strings.Contains(text, "release    refused: intake_exhausted") {
-			t.Errorf("the account as text does not state the reason:\n%s", text)
+		if !strings.Contains(text, strconv.FormatInt(sealed.Seen.IntakeRefused, 10)+" fragments refused by volatile intake") {
+			t.Errorf("text omitted the counted intake refusal: %s", text)
 		}
 		seal, _, _ := t23Line(text, "sealed ")
 		if !strings.Contains(seal, "INCOMPLETE") &&
 			!strings.Contains(seal, "LOST "+strconv.FormatInt(sealed.Seen.Rejected, 10)+
-				" records the volatile intake refused") {
+				" input records refused") {
 			t.Errorf("the seal line says the session sealed and does not print the %d records the intake refused: %q",
 				sealed.Seen.Rejected, seal)
 		}
@@ -243,7 +222,7 @@ func TestAFullVolatileIntakeIsStatedAsIntakeExhaustedBesideTheRecordsItRefused(t
 		if err := json.Unmarshal(raw, &sealed); err != nil {
 			t.Fatalf("decode the sealed account: %v", err)
 		}
-		if n := t23Retained(t, directory, server.PID, "t23-intake-control"); n != 1 {
+		if n := t23Retained(t, c.directory, server.PID, "t23-intake-control"); n != 1 {
 			t.Fatalf("wiring, not the property: the control exchange is retained %d times, so the session did not "+
 				"capture and its silence says nothing", n)
 		}

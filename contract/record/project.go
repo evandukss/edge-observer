@@ -162,6 +162,10 @@ var reasons = map[connection.Reason]string{
 	connection.LifetimeEvidenceEnded:      "lifetime_evidence_ended",
 	connection.HandleReleased:             "handle_released",
 	connection.HandleLifetimeUnobservable: "handle_lifetime_unobservable",
+	connection.TerminalUnsettled:          "terminal_unsettled",
+	connection.SequenceUnavailable:        "sequence_unavailable",
+	connection.OperationsOverlapped:       "operations_overlapped",
+	connection.LengthUnmeasured:           "length_unmeasured",
 }
 
 var joins = map[connection.Joinability]string{
@@ -315,8 +319,8 @@ func FromConnection(r connection.Record) (Connection, error) {
 }
 
 // ending keeps the instant an unobserved ending carries out of At, because
-// capture stamps it with the moment the loss was detected (capture.go,
-// interruptLocked) and a reader of At would take it for the end.
+// capture stamps it with the moment the replacing occupancy was seen
+// (capture.go, retireLocked) and a reader of At would take it for the end.
 func ending(how string, r connection.Record) Ending {
 	if r.How != connection.EndingUnobserved {
 		return Ending{How: how, At: wallRead(r.Ended)}

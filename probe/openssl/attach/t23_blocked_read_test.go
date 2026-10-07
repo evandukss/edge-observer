@@ -55,12 +55,12 @@ func TestAThreadInsideSocketIOWhileTheProbesArePlacedIsCountedAsUnderWay(t *test
 		directory := observer.directory(c)
 		sealed, sealedText := t23Sealed(t, binary, directory)
 
-		if n := t23Retained(t, directory, server.PID, "t23-third"); n != 1 {
+		if n := t23Retained(t, c.directory, server.PID, "t23-third"); n != 1 {
 			t.Fatalf("wiring, not the property: the exchange after the lost one is retained %d times, want once, "+
 				"so the connection was not captured at all and nothing below measures a single lost call", n)
 		}
 		t.Logf("the exchange the blocked read carried is retained %d times",
-			t23Retained(t, directory, server.PID, "t23-second"))
+			t23Retained(t, c.directory, server.PID, "t23-second"))
 		t.Logf("stop printed: %s", stopped)
 
 		for _, one := range []struct {
@@ -140,7 +140,7 @@ func TestAThreadInsideSocketIOWhileTheProbesArePlacedIsCountedAsUnderWay(t *test
 		directory := observer.directory(c)
 		sealed, sealedText := t23Sealed(t, binary, directory)
 
-		if n := t23Retained(t, directory, server.PID, "t23-control"); n != 1 {
+		if n := t23Retained(t, c.directory, server.PID, "t23-control"); n != 1 {
 			t.Fatalf("wiring, not the property: the control exchange is retained %d times, want once, so the "+
 				"session did not capture and its zero would say nothing", n)
 		}

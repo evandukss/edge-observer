@@ -63,6 +63,17 @@ type Coverage struct {
 	// asked order. Fork and socket points are not catalogued functions; their
 	// absence shows in the booleans above.
 	Unobserved []string
+
+	// Unprobed names the entry points capture requires - byte-moving or lifecycle
+	// (SSL_new, SSL_free, SSL_clear) - that were present to probe but could not be
+	// (Session.Unprobed). While it is non-empty capture is not live: no occupancy
+	// forms, nothing is sequenced, and the whole attachment certifies no exchange,
+	// though metadata still flows. Empty is capture live; an export absent from the
+	// library is not here, since nothing asked to probe it. Session.Coverage fills
+	// it from the session; CoverageOf, which sees only the kernel's per-point
+	// answers, cannot tell an unplaced probe from an unfired return and leaves it
+	// empty.
+	Unprobed []string
 }
 
 // CoverageOf reduces what the kernel answered to what this session observes.
@@ -70,7 +81,12 @@ func CoverageOf(answered []Placed) Coverage {
 	var coverage Coverage
 	for _, one := range answered {
 		if !one.Confirmed {
-			if catalogued(one.Point) {
+			// A catalogued entry point, or an uncatalogued byte-moving route, that the
+			// kernel did not confirm is reported, so its absence is not silent. When the
+			// unconfirmed point is a byte mover whose entry did not place, capture is left
+			// not live and Session.Coverage names it in Unprobed; the session runs, so
+			// this list is what a reader of coverage sees either way.
+			if catalogued(one.Point) || one.Point.Entry == progSendfile {
 				coverage.Unobserved = append(coverage.Unobserved, one.Point.Symbol)
 			}
 			continue
@@ -80,6 +96,16 @@ func CoverageOf(answered []Placed) Coverage {
 		// held through, not whether a descendant is observed.
 		case one.Point.Entry == progFreeEntry:
 			coverage.Lifecycle = true
+		case one.Point.Entry == progClearEntry:
+			// A recycle ends occupancies as a release does; the release alone decides
+			// whether endings are observed, and a recycle that did not place leaves
+			// capture not live (Session.Unprobed).
+		case one.Point.Return == progNewReturn:
+			// A handle's birth moves no plaintext; it only numbers the handle's
+			// transfers from their first.
+		case one.Point.Entry == progSendfile:
+			// An uncatalogued byte-moving route, observed count-only: it establishes no
+			// plaintext coverage, only that its use shows as a gap.
 		case bindingProgram(one.Point):
 			coverage.Binding = true
 		case socketProgram(one.Point):
@@ -102,17 +128,25 @@ func (c Coverage) Narrow(built probe.Capability) probe.Capability {
 	built.SocketEvidence = built.SocketEvidence && c.SocketEvidence
 	built.IPv6 = built.IPv6 && c.IPv6
 	built.Unobserved = slices.Clone(c.Unobserved)
+	built.Unprobed = slices.Clone(c.Unprobed)
 	built.Withheld = slices.Clone(c.Withheld)
 	return built
 }
 
 // Coverage is what this session observes, read off what the kernel says it
 // holds.
-func (s *Session) Coverage() Coverage {
+// Placed is one point this session asked the kernel for, with the kernel's
+// answer, so a caller holding the raw session can confirm a symbol is probed.
+func (s *Session) Placed() []Placed {
 	answered := make([]Placed, 0, len(s.placed))
 	for _, put := range s.placed {
 		answered = append(answered, Placed{Point: put.point, Confirmed: s.answer(put).Confirmed})
 	}
+	return answered
+}
+
+func (s *Session) Coverage() Coverage {
+	answered := s.Placed()
 	coverage := CoverageOf(answered)
 
 	// The socket evidence was established by placeKernel, and is reported here
@@ -120,6 +154,12 @@ func (s *Session) Coverage() Coverage {
 	coverage.SocketEvidence = s.evidence
 	coverage.IPv6 = s.sixes
 	coverage.Withheld = s.withheld
+
+	// The byte movers that were present to probe and could not be: while any
+	// remains, capture is not live and the session sequences nothing. Read from the
+	// session, not CoverageOf, which cannot tell an unplaced entry from an unfired
+	// return.
+	coverage.Unprobed = slices.Clone(s.unprobed)
 
 	// Descendants are admitted at the kernel's fork event, which every session
 	// has, so the policy decides and is answered here.
@@ -135,7 +175,7 @@ func (s *Session) Coverage() Coverage {
 // catalogued reports whether a point is one of the observed runtime's own entry
 // points, as opposed to the C library points a session places beside them.
 func catalogued(point Point) bool {
-	return !socketProgram(point) &&
+	return !socketProgram(point) && point.Entry != progSendfile &&
 		point.Entry != ForkEntryProgram && point.Return != ForkReturnProgram
 }
 

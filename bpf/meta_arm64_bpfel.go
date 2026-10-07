@@ -80,8 +80,10 @@ type metaCall struct {
 	Early       uint8
 	Deferred    uint8
 	Live        uint8
-	LivePadding [3]uint8
-	_           [4]byte
+	Nested      uint8
+	LivePadding [6]uint8
+	Occupancy   uint64
+	Number      uint64
 }
 
 type metaHandleKey struct {
@@ -91,6 +93,13 @@ type metaHandleKey struct {
 	Pid      uint32
 	Reserved uint32
 	Ssl      uint64
+}
+
+type metaHolding struct {
+	_       structs.HostLayout
+	Entries uint8
+	Events  uint8
+	Padding [6]uint8
 }
 
 type metaInstanceKey struct {
@@ -105,6 +114,23 @@ type metaObsNs struct {
 	_   structs.HostLayout
 	Dev uint64
 	Ino uint64
+}
+
+type metaOccupancy struct {
+	_                  structs.HostLayout
+	Id                 uint64
+	Generation         uint64
+	Unlocated          uint64
+	Sent               uint64
+	Received           uint64
+	DroppedSent        uint64
+	DroppedReceived    uint64
+	BusySent           uint64
+	BusyReceived       uint64
+	OverlappedSent     uint8
+	OverlappedReceived uint8
+	Born               uint8
+	Padding            [5]uint8
 }
 
 type metaOperation struct {
@@ -173,21 +199,27 @@ const (
 	metaMapAllowedProcesses     = "allowed_processes"
 	metaMapAttempts             = "attempts"
 	metaMapBindings             = "bindings"
+	metaMapCaptureLive          = "capture_live"
 	metaMapDiscovered           = "discovered"
 	metaMapDiscoveries          = "discoveries"
 	metaMapEvents               = "events"
 	metaMapForking              = "forking"
 	metaMapGenerations          = "generations"
 	metaMapHandles              = "handles"
+	metaMapHolders              = "holders"
 	metaMapInflight             = "inflight"
 	metaMapNamespaces           = "namespaces"
+	metaMapOccupancies          = "occupancies"
+	metaMapOccupancyIds         = "occupancy_ids"
 	metaMapOperations           = "operations"
 	metaMapSequences            = "sequences"
 	metaMapSockets              = "sockets"
 	metaMapStats                = "stats"
+	metaMapUnlocated            = "unlocated"
 	metaMapUnmatchedAt          = "unmatched_at"
 	metaMapUnmeasurable         = "unmeasurable"
 	metaProgObsAcceptReturn     = "obs_accept_return"
+	metaProgObsClearEntry       = "obs_clear_entry"
 	metaProgObsClose            = "obs_close"
 	metaProgObsConnect          = "obs_connect"
 	metaProgObsDup2             = "obs_dup2"
@@ -200,7 +232,9 @@ const (
 	metaProgObsInet6Recvmsg     = "obs_inet6_recvmsg"
 	metaProgObsInet6Sendmsg     = "obs_inet6_sendmsg"
 	metaProgObsInetRecvmsg      = "obs_inet_recvmsg"
+	metaProgObsInetRelease      = "obs_inet_release"
 	metaProgObsInetSendmsg      = "obs_inet_sendmsg"
+	metaProgObsNewReturn        = "obs_new_return"
 	metaProgObsRead             = "obs_read"
 	metaProgObsReadEarlyEntry   = "obs_read_early_entry"
 	metaProgObsReadEarlyReturn  = "obs_read_early_return"
@@ -212,6 +246,7 @@ const (
 	metaProgObsRecvfrom         = "obs_recvfrom"
 	metaProgObsRecvmsg          = "obs_recvmsg"
 	metaProgObsRwVerifyArea     = "obs_rw_verify_area"
+	metaProgObsSendfile         = "obs_sendfile"
 	metaProgObsSendmsg          = "obs_sendmsg"
 	metaProgObsSendto           = "obs_sendto"
 	metaProgObsSocketReturn     = "obs_socket_return"
@@ -272,6 +307,7 @@ type metaSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type metaProgramSpecs struct {
 	ObsAcceptReturn     *ebpf.ProgramSpec `ebpf:"obs_accept_return"`
+	ObsClearEntry       *ebpf.ProgramSpec `ebpf:"obs_clear_entry"`
 	ObsClose            *ebpf.ProgramSpec `ebpf:"obs_close"`
 	ObsConnect          *ebpf.ProgramSpec `ebpf:"obs_connect"`
 	ObsDup2             *ebpf.ProgramSpec `ebpf:"obs_dup2"`
@@ -284,7 +320,9 @@ type metaProgramSpecs struct {
 	ObsInet6Recvmsg     *ebpf.ProgramSpec `ebpf:"obs_inet6_recvmsg"`
 	ObsInet6Sendmsg     *ebpf.ProgramSpec `ebpf:"obs_inet6_sendmsg"`
 	ObsInetRecvmsg      *ebpf.ProgramSpec `ebpf:"obs_inet_recvmsg"`
+	ObsInetRelease      *ebpf.ProgramSpec `ebpf:"obs_inet_release"`
 	ObsInetSendmsg      *ebpf.ProgramSpec `ebpf:"obs_inet_sendmsg"`
+	ObsNewReturn        *ebpf.ProgramSpec `ebpf:"obs_new_return"`
 	ObsRead             *ebpf.ProgramSpec `ebpf:"obs_read"`
 	ObsReadEarlyEntry   *ebpf.ProgramSpec `ebpf:"obs_read_early_entry"`
 	ObsReadEarlyReturn  *ebpf.ProgramSpec `ebpf:"obs_read_early_return"`
@@ -296,6 +334,7 @@ type metaProgramSpecs struct {
 	ObsRecvfrom         *ebpf.ProgramSpec `ebpf:"obs_recvfrom"`
 	ObsRecvmsg          *ebpf.ProgramSpec `ebpf:"obs_recvmsg"`
 	ObsRwVerifyArea     *ebpf.ProgramSpec `ebpf:"obs_rw_verify_area"`
+	ObsSendfile         *ebpf.ProgramSpec `ebpf:"obs_sendfile"`
 	ObsSendmsg          *ebpf.ProgramSpec `ebpf:"obs_sendmsg"`
 	ObsSendto           *ebpf.ProgramSpec `ebpf:"obs_sendto"`
 	ObsSocketReturn     *ebpf.ProgramSpec `ebpf:"obs_socket_return"`
@@ -320,18 +359,23 @@ type metaMapSpecs struct {
 	AllowedProcesses *ebpf.MapSpec `ebpf:"allowed_processes"`
 	Attempts         *ebpf.MapSpec `ebpf:"attempts"`
 	Bindings         *ebpf.MapSpec `ebpf:"bindings"`
+	CaptureLive      *ebpf.MapSpec `ebpf:"capture_live"`
 	Discovered       *ebpf.MapSpec `ebpf:"discovered"`
 	Discoveries      *ebpf.MapSpec `ebpf:"discoveries"`
 	Events           *ebpf.MapSpec `ebpf:"events"`
 	Forking          *ebpf.MapSpec `ebpf:"forking"`
 	Generations      *ebpf.MapSpec `ebpf:"generations"`
 	Handles          *ebpf.MapSpec `ebpf:"handles"`
+	Holders          *ebpf.MapSpec `ebpf:"holders"`
 	Inflight         *ebpf.MapSpec `ebpf:"inflight"`
 	Namespaces       *ebpf.MapSpec `ebpf:"namespaces"`
+	Occupancies      *ebpf.MapSpec `ebpf:"occupancies"`
+	OccupancyIds     *ebpf.MapSpec `ebpf:"occupancy_ids"`
 	Operations       *ebpf.MapSpec `ebpf:"operations"`
 	Sequences        *ebpf.MapSpec `ebpf:"sequences"`
 	Sockets          *ebpf.MapSpec `ebpf:"sockets"`
 	Stats            *ebpf.MapSpec `ebpf:"stats"`
+	Unlocated        *ebpf.MapSpec `ebpf:"unlocated"`
 	UnmatchedAt      *ebpf.MapSpec `ebpf:"unmatched_at"`
 	Unmeasurable     *ebpf.MapSpec `ebpf:"unmeasurable"`
 }
@@ -365,18 +409,23 @@ type metaMaps struct {
 	AllowedProcesses *ebpf.Map `ebpf:"allowed_processes"`
 	Attempts         *ebpf.Map `ebpf:"attempts"`
 	Bindings         *ebpf.Map `ebpf:"bindings"`
+	CaptureLive      *ebpf.Map `ebpf:"capture_live"`
 	Discovered       *ebpf.Map `ebpf:"discovered"`
 	Discoveries      *ebpf.Map `ebpf:"discoveries"`
 	Events           *ebpf.Map `ebpf:"events"`
 	Forking          *ebpf.Map `ebpf:"forking"`
 	Generations      *ebpf.Map `ebpf:"generations"`
 	Handles          *ebpf.Map `ebpf:"handles"`
+	Holders          *ebpf.Map `ebpf:"holders"`
 	Inflight         *ebpf.Map `ebpf:"inflight"`
 	Namespaces       *ebpf.Map `ebpf:"namespaces"`
+	Occupancies      *ebpf.Map `ebpf:"occupancies"`
+	OccupancyIds     *ebpf.Map `ebpf:"occupancy_ids"`
 	Operations       *ebpf.Map `ebpf:"operations"`
 	Sequences        *ebpf.Map `ebpf:"sequences"`
 	Sockets          *ebpf.Map `ebpf:"sockets"`
 	Stats            *ebpf.Map `ebpf:"stats"`
+	Unlocated        *ebpf.Map `ebpf:"unlocated"`
 	UnmatchedAt      *ebpf.Map `ebpf:"unmatched_at"`
 	Unmeasurable     *ebpf.Map `ebpf:"unmeasurable"`
 }
@@ -386,18 +435,23 @@ func (m *metaMaps) Close() error {
 		m.AllowedProcesses,
 		m.Attempts,
 		m.Bindings,
+		m.CaptureLive,
 		m.Discovered,
 		m.Discoveries,
 		m.Events,
 		m.Forking,
 		m.Generations,
 		m.Handles,
+		m.Holders,
 		m.Inflight,
 		m.Namespaces,
+		m.Occupancies,
+		m.OccupancyIds,
 		m.Operations,
 		m.Sequences,
 		m.Sockets,
 		m.Stats,
+		m.Unlocated,
 		m.UnmatchedAt,
 		m.Unmeasurable,
 	)
@@ -414,6 +468,7 @@ type metaVariables struct {
 // It can be passed to loadMetaObjects or ebpf.CollectionSpec.LoadAndAssign.
 type metaPrograms struct {
 	ObsAcceptReturn     *ebpf.Program `ebpf:"obs_accept_return"`
+	ObsClearEntry       *ebpf.Program `ebpf:"obs_clear_entry"`
 	ObsClose            *ebpf.Program `ebpf:"obs_close"`
 	ObsConnect          *ebpf.Program `ebpf:"obs_connect"`
 	ObsDup2             *ebpf.Program `ebpf:"obs_dup2"`
@@ -426,7 +481,9 @@ type metaPrograms struct {
 	ObsInet6Recvmsg     *ebpf.Program `ebpf:"obs_inet6_recvmsg"`
 	ObsInet6Sendmsg     *ebpf.Program `ebpf:"obs_inet6_sendmsg"`
 	ObsInetRecvmsg      *ebpf.Program `ebpf:"obs_inet_recvmsg"`
+	ObsInetRelease      *ebpf.Program `ebpf:"obs_inet_release"`
 	ObsInetSendmsg      *ebpf.Program `ebpf:"obs_inet_sendmsg"`
+	ObsNewReturn        *ebpf.Program `ebpf:"obs_new_return"`
 	ObsRead             *ebpf.Program `ebpf:"obs_read"`
 	ObsReadEarlyEntry   *ebpf.Program `ebpf:"obs_read_early_entry"`
 	ObsReadEarlyReturn  *ebpf.Program `ebpf:"obs_read_early_return"`
@@ -438,6 +495,7 @@ type metaPrograms struct {
 	ObsRecvfrom         *ebpf.Program `ebpf:"obs_recvfrom"`
 	ObsRecvmsg          *ebpf.Program `ebpf:"obs_recvmsg"`
 	ObsRwVerifyArea     *ebpf.Program `ebpf:"obs_rw_verify_area"`
+	ObsSendfile         *ebpf.Program `ebpf:"obs_sendfile"`
 	ObsSendmsg          *ebpf.Program `ebpf:"obs_sendmsg"`
 	ObsSendto           *ebpf.Program `ebpf:"obs_sendto"`
 	ObsSocketReturn     *ebpf.Program `ebpf:"obs_socket_return"`
@@ -458,6 +516,7 @@ type metaPrograms struct {
 func (p *metaPrograms) Close() error {
 	return _MetaClose(
 		p.ObsAcceptReturn,
+		p.ObsClearEntry,
 		p.ObsClose,
 		p.ObsConnect,
 		p.ObsDup2,
@@ -470,7 +529,9 @@ func (p *metaPrograms) Close() error {
 		p.ObsInet6Recvmsg,
 		p.ObsInet6Sendmsg,
 		p.ObsInetRecvmsg,
+		p.ObsInetRelease,
 		p.ObsInetSendmsg,
+		p.ObsNewReturn,
 		p.ObsRead,
 		p.ObsReadEarlyEntry,
 		p.ObsReadEarlyReturn,
@@ -482,6 +543,7 @@ func (p *metaPrograms) Close() error {
 		p.ObsRecvfrom,
 		p.ObsRecvmsg,
 		p.ObsRwVerifyArea,
+		p.ObsSendfile,
 		p.ObsSendmsg,
 		p.ObsSendto,
 		p.ObsSocketReturn,

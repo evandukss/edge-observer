@@ -35,6 +35,20 @@ const (
 	StatEvidenceUnreadable   uint32 = 24
 	StatSocketUndiscovered   uint32 = 25
 	StatDiscoveryContended   uint32 = 26
+
+	// The occupancy sequence's, counting what happened to the numbering of a
+	// handle's calls.
+	StatOccupancyUnrecorded uint32 = 27
+	StatNestedWrapper       uint32 = 28
+	StatNestedElsewhere     uint32 = 29
+	StatOverlapped          uint32 = 30
+	StatBorn                uint32 = 31
+
+	// Reclamation's, counting what an execution's end could not take away and
+	// what it folded.
+	StatHolderUnrecorded uint32 = 32
+	StatReadsReclaimed   uint32 = 33
+	StatReadRetracted    uint32 = 34
 )
 
 // Stats is every counter this package names, against the define it mirrors.
@@ -67,6 +81,16 @@ var Stats = map[string]uint32{
 	"OBS_STAT_EVIDENCE_UNREADABLE":   StatEvidenceUnreadable,
 	"OBS_STAT_SOCKET_UNDISCOVERED":   StatSocketUndiscovered,
 	"OBS_STAT_DISCOVERY_CONTENDED":   StatDiscoveryContended,
+
+	"OBS_STAT_OCCUPANCY_UNRECORDED": StatOccupancyUnrecorded,
+	"OBS_STAT_NESTED_WRAPPER":       StatNestedWrapper,
+	"OBS_STAT_NESTED_ELSEWHERE":     StatNestedElsewhere,
+	"OBS_STAT_OVERLAPPED":           StatOverlapped,
+	"OBS_STAT_BORN":                 StatBorn,
+
+	"OBS_STAT_HOLDER_UNRECORDED": StatHolderUnrecorded,
+	"OBS_STAT_READS_RECLAIMED":   StatReadsReclaimed,
+	"OBS_STAT_READ_RETRACTED":    StatReadRetracted,
 }
 
 // The function registry, by each code's name in the program (OBS_FUNC_* in

@@ -99,7 +99,7 @@ func TestAReloadAddsAWatchEntryAndRefusesAChangedMask(t *testing.T) {
 		t.Fatalf("the configuration in force was refused: %v", err)
 	}
 	grown, err := loadProcessing(written(t, mask("withheld")+
-		`, "watch": [{"name": "api-server", "exe": "/usr/bin/php", "args": ["/srv/api/main.php"], "children": "all"},
+		`, "watch": [{"name": "api-server", "exe": "/usr/local/bin/api-server", "args": ["--listen", "8443"], "children": "all"},
 		{"name": "worker", "exe": "/usr/bin/worker"}]`))
 	if err != nil {
 		t.Fatalf("the grown configuration was refused: %v", err)

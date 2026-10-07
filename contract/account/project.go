@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/evandukss/edge-observer/sink"
 	"maps"
 	"reflect"
 	"slices"
@@ -218,6 +219,15 @@ func Project(source observed.Account, supply Supply) (Account, error) {
 			a.Seal = sealOf(source)
 		}
 	}
+	if source.LogDelivery != nil {
+		a.LogDelivery = deliveryOf(*source.LogDelivery)
+	}
+	if source.LogDestinations != nil {
+		a.LogDestinations = make(map[string]SinkDelivery, len(source.LogDestinations))
+		for name, stats := range source.LogDestinations {
+			a.LogDestinations[name] = *deliveryOf(stats)
+		}
+	}
 	a.Processing = Processing{Block: Block{State: NotCarried}}
 	if p := source.Processing; p != nil {
 		extensions, err := extensionsOf(source.Extensions, p.Extensions)
@@ -227,8 +237,9 @@ func Project(source observed.Account, supply Supply) (Account, error) {
 		a.Processing = Processing{Block: Block{State: Carried}, Pipelines: []Processed{},
 			Aggregate: &ProcessingAggregate{
 				GateReason: string(p.GateReason), ProcessingFailures: decimalOf(p.ProcessingFailures),
-				OutputFailures: decimalOf(p.OutputFailures), Authorized: decimalOf(p.Authorized),
-				Written: decimalOf(p.Written),
+				OutputFailures: decimalOf(p.OutputFailures), ConnectionsCut: decimalOf(p.ConnectionsCut),
+				InputCut: decimalOf(p.InputCut), Authorized: decimalOf(p.Authorized),
+				Written: decimalOf(p.Written), Delivery: deliveryOf(p.Delivery),
 			},
 			ExchangeIDs: decimalOf(p.ExchangeIDs), Extensions: extensions,
 		}
@@ -254,7 +265,7 @@ func extensionsOf(configured []observed.Extension, counted []observed.ExtensionC
 			FailedBy: decimalsOf(c.FailedBy), RetiredBy: decimalsOf(c.RetiredBy),
 			Restarts: decimalOf(c.Restarts), StateResets: decimalOf(c.StateResets),
 			Late: decimalOf(c.Late), Duplicate: decimalOf(c.Duplicate),
-			DerivedWritten: decimalOf(c.DerivedWritten), DerivedBytes: decimalOf(c.DerivedBytes),
+			Delivery: deliveryOf(c.Delivery), DerivedWritten: decimalOf(c.DerivedWritten), DerivedBytes: decimalOf(c.DerivedBytes),
 			DerivedRefused: decimalOf(c.DerivedRefused), DerivedRefusedBy: decimalsOf(c.DerivedRefusedBy),
 			StderrDropped: decimalOf(c.StderrDropped),
 		}
@@ -296,7 +307,8 @@ func factsOf(c probe.Capability) Facts {
 	facts := Facts{
 		Backend: string(c.Backend), Program: c.Program, MinimumKernel: c.MinimumKernel, Payload: c.Payload,
 		Filtered: c.Filtered, Descendants: c.Descendants, Lifecycle: c.Lifecycle, Binding: c.Binding,
-		SocketEvidence: c.SocketEvidence, IPv6: c.IPv6, Unobserved: nonNil(c.Unobserved), Withheld: []Withheld{},
+		SocketEvidence: c.SocketEvidence, IPv6: c.IPv6, Unobserved: nonNil(c.Unobserved),
+		Unprobed: nonNil(c.Unprobed), Withheld: []Withheld{},
 	}
 	for _, one := range c.Withheld {
 		facts.Withheld = append(facts.Withheld, Withheld{Claim: string(one.Claim), Member: one.Member, Reason: one.Reason})
@@ -466,7 +478,8 @@ func scopeParts(source observed.Account) (Scope, error) {
 		scope.Coverage = Coverage{Block: Block{State: NotReached}}
 		return scope, nil
 	}
-	scope.Placement = Placement{Block: Block{State: Carried}, Processes: []Placed{}}
+	scope.Placement = Placement{Block: Block{State: Carried}, Processes: []Placed{},
+		Ended: decimalOf(uint64(source.ProcessesEnded))}
 	for _, one := range source.Processes {
 		// The operational account holds neither the number inside the pid
 		// namespace nor the executable for a placed process.
@@ -549,9 +562,9 @@ func captureOf(source observed.Account) (Capture, error) {
 			Closed: decimalOf(seen.Closed), Early: decimalOf(seen.Early), Rejected: decimalOf(seen.Rejected),
 			Unattributed: decimalOf(seen.Unattributed), EndingsUnmatched: decimalOf(seen.EndingsUnmatched),
 			ConnectionsUnrecorded: decimalOf(seen.ConnectionsUnrecorded)},
-		Ordering: Ordering{Block: Block{State: Carried}, Disordered: decimalOf(seen.Disordered),
-			Unstamped: decimalOf(seen.Unstamped), Tolerated: decimalOf(seen.Tolerated), Lost: decimalOf(seen.Lost),
-			Retired: decimalOf(seen.Interrupted), Unexplained: decimalOf(seen.Unexplained)},
+		Ordering: Ordering{Block: Block{State: Carried}, Lost: decimalOf(seen.Lost), Cut: decimalOf(seen.Cut),
+			Retired: decimalOf(seen.Retired), Unsequenced: decimalOf(seen.Unsequenced),
+			Unlocated: decimalOf(seen.Unlocated), GateRefused: decimalOf(seen.GateRefused), IntakeRefused: decimalOf(seen.IntakeRefused)},
 	}
 	if loss := source.Loss; loss.Known {
 		capture.Loss = Loss{Block: Block{State: Carried}, Dropped: decimalOf(loss.Dropped),
@@ -760,4 +773,8 @@ func countersOf(counters connection.Counters) map[string]record.Count {
 		out[name] = countOf(count, counterUnits[name])
 	}
 	return maps.Clone(out)
+}
+
+func deliveryOf(s sink.Stats) *SinkDelivery {
+	return &SinkDelivery{Authorized: decimalOf(s.Authorized), Written: decimalOf(s.Written), Failed: decimalOf(s.Failed), Dropped: decimalOf(s.Dropped), Pending: decimalOf(s.Pending), Discarded: decimalOf(s.Discarded), Bytes: strconv.FormatInt(s.Bytes, 10), PendingBytes: strconv.FormatInt(s.PendingBytes, 10), HighWaterBytes: strconv.FormatInt(s.HighWaterBytes, 10), LimitBytes: strconv.FormatInt(s.LimitBytes, 10)}
 }

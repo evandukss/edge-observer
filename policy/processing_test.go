@@ -35,7 +35,7 @@ func TestProcessingActivationConfiguration(t *testing.T) {
 		t.Fatalf("valid processing neighbour refused: %v", err)
 	}
 	if read.Processing == nil || len(exchanges(t, read).Slots) != 1 || len(read.Approval.Rules) != 1 ||
-		read.Approval.Rules[0].Executable != "/usr/bin/php" || read.Settings.ApprovedOutputBoundMiB != 64 {
+		read.Approval.Rules[0].Executable != "/usr/local/bin/api-server" || read.Settings.AdmittedEventLimit != 16384 {
 		t.Fatalf("activation configuration incomplete: %+v", read)
 	}
 	c["remove"] = map[string]any{"headers": []any{"authorization", "bad name"}}

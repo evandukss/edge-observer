@@ -11,9 +11,14 @@ import (
 	"github.com/evandukss/edge-observer/probe"
 )
 
+// deliveryRecords keeps the fragments it is handed, and so their events' slots,
+// as the intake does.
 type deliveryRecords struct{ records []fragment.Record }
 
 func (s *deliveryRecords) Write(record fragment.Record) error {
+	if record.Slot != nil {
+		record.Slot.Keep()
+	}
 	s.records = append(s.records, record)
 	return nil
 }
@@ -74,8 +79,11 @@ func TestDeliveryGateEntryAdmitsTheProducersOrdinaryClose(t *testing.T) {
 	}
 }
 
+// Of the three controls only the payload leaves input that is kept, so it alone
+// holds a slot, and with an allowance of one the tail arrives while the
+// allowance is held.
 func TestDeliveryGateEntryRefusesTailBeforeIdentityAndCapture(t *testing.T) {
-	g := admissionGate(t, 3)
+	g := admissionGate(t, 1)
 	a, captured, records := deliveryFixture(t, g)
 	empty := decodedDelivery(ebpf.Transfer, 1)
 	empty.Measured = true
@@ -89,14 +97,15 @@ func TestDeliveryGateEntryRefusesTailBeforeIdentityAndCapture(t *testing.T) {
 	tail := decodedPayload(4)
 	tail.PID, tail.NamespacePID, tail.SSL = 442, 442, 18
 	a.deliverEvent(tail)
-	if state := g.Snapshot(); state.Charged != 3 || state.Reason != probe.GateInputLimit {
+	if state := g.Snapshot(); state.Charged != 3 || state.Reason != "" || state.InputRefused != 1 {
 		t.Fatalf("N+1 refusal not reached: %+v", state)
 	}
+	before.GateRefused++
 	if len(a.known) != 1 || captured.Stats() != before || len(records.records) != 1 {
 		t.Fatalf("refused tail grew identity/capture state: identities %d, stats %+v, records %d", len(a.known), captured.Stats(), len(records.records))
 	}
-	if got := g.Authorize(probe.ReleaseEvidence{InputsSettled: true, LifecycleSettled: true}); got.Authorized || got.Reason != probe.GateInputLimit {
-		t.Fatalf("pending payload stayed releasable after refused tail: %+v", got)
+	if got := g.Authorize(probe.ReleaseEvidence{InputsSettled: true, LifecycleSettled: true}); !got.Authorized || got.Reason != "" {
+		t.Fatalf("unrelated payload lost eligibility after refused tail: %+v", got)
 	}
 }
 
@@ -130,6 +139,9 @@ func TestDeliveryGateEntryClassifiesUncertaintyBeforeEitherSink(t *testing.T) {
 			if state := g.Snapshot(); state.Charged != 2 || state.Reason != tc.reason {
 				t.Fatalf("fault not reached: %+v", state)
 			}
+			if tc.kind == ebpf.Transfer {
+				before.GateRefused++
+			}
 			if len(b.known) != 0 || captured.Stats() != before {
 				t.Fatalf("fault reached identity or capture: %d, %+v", len(b.known), captured.Stats())
 			}
@@ -137,9 +149,8 @@ func TestDeliveryGateEntryClassifiesUncertaintyBeforeEitherSink(t *testing.T) {
 			if captured.Stats() != before || len(records.records) != 1 {
 				t.Fatal("invalidation did not cover the other placement")
 			}
-			if after := captured.Stats(); after.Lost != 0 || after.Unexplained != 0 {
-				t.Fatalf("the capture located a gap across stamps 1, 2 and 3: lost %d, unexplained %d",
-					after.Lost, after.Unexplained)
+			if after := captured.Stats(); after.Lost != 0 {
+				t.Fatalf("the capture counted %d transfers lost across stamps 1, 2 and 3", after.Lost)
 			}
 			if got := g.Authorize(probe.ReleaseEvidence{InputsSettled: true, LifecycleSettled: true}); got.Authorized || got.Reason != tc.reason {
 				t.Fatalf("another placement's pending payload remained eligible: %+v", got)

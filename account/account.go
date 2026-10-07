@@ -12,6 +12,7 @@ package account
 
 import (
 	"fmt"
+	"github.com/evandukss/edge-observer/sink"
 	"io"
 	"maps"
 	"slices"
@@ -174,8 +175,11 @@ type Admission struct {
 
 // coverageRule states in the account how admissions are placed below.
 const coverageRule = "an admission whose grant the kernel still holds is covered and is counted rather " +
-	"than listed; one whose grant it no longer holds has had its coverage end, and is listed with the " +
-	"latest moment that can have happened; one whose grant could not be read is listed as unknown"
+	"than listed; one whose execution is established as ended is counted under its target as ended and " +
+	"no longer listed, its identity written once to the operational log when that was established; one " +
+	"whose grant the kernel no longer holds while its execution may still run has had its coverage end, " +
+	"and is listed with the latest moment that can have happened; one whose grant could not be read is " +
+	"listed as unknown"
 
 // TargetCoverage is one target's share of the admissions, so one target going
 // dark is told apart from the whole run going dark.
@@ -209,11 +213,13 @@ type Refused struct {
 
 // Account is what the observer says about one session.
 type Account struct {
-	Version int       `json:"version"`
-	Kind    Kind      `json:"kind"`
-	Session string    `json:"session,omitempty"`
-	At      time.Time `json:"at"`
-	Policy  Policy    `json:"policy"`
+	LogDestinations map[string]sink.Stats `json:"log_destinations,omitempty"`
+	LogDelivery     *sink.Stats           `json:"log_delivery,omitempty"`
+	Version         int                   `json:"version"`
+	Kind            Kind                  `json:"kind"`
+	Session         string                `json:"session,omitempty"`
+	At              time.Time             `json:"at"`
+	Policy          Policy                `json:"policy"`
 
 	// Build is what this build can do; Floor the kernel it publishes.
 	Build probe.Capability `json:"build"`
@@ -230,16 +236,21 @@ type Account struct {
 	Extensions []Extension `json:"extensions"`
 
 	// Everything below exists only once something has attached.
-	Processes  []attachment.Observed `json:"processes,omitempty"`
-	Capability *probe.Capability     `json:"capability,omitempty"`
-	Capturing  string                `json:"capturing,omitempty"`
-	Seen       *capture.Stats        `json:"seen,omitempty"`
-	Loss       *Loss                 `json:"loss,omitempty"`
-	Admitted   *Admitted             `json:"admitted,omitempty"`
-	Admissions *Admissions           `json:"admissions,omitempty"`
-	Refused    *Refused              `json:"refused,omitempty"`
-	Spool      *spool.Stats          `json:"spool,omitempty"`
-	Processing *Processing           `json:"processing,omitempty"`
+	//
+	// Processes is every attached process whose execution has not been
+	// established as ended, and ProcessesEnded how many were dropped from it
+	// because it was: each is written once to the operational log when it is.
+	Processes      []attachment.Observed `json:"processes,omitempty"`
+	ProcessesEnded int                   `json:"processes_ended"`
+	Capability     *probe.Capability     `json:"capability,omitempty"`
+	Capturing      string                `json:"capturing,omitempty"`
+	Seen           *capture.Stats        `json:"seen,omitempty"`
+	Loss           *Loss                 `json:"loss,omitempty"`
+	Admitted       *Admitted             `json:"admitted,omitempty"`
+	Admissions     *Admissions           `json:"admissions,omitempty"`
+	Refused        *Refused              `json:"refused,omitempty"`
+	Spool          *spool.Stats          `json:"spool,omitempty"`
+	Processing     *Processing           `json:"processing,omitempty"`
 
 	// Seal is how a sealed session ended; SealError why it could not be finalised.
 	Seal      *connection.Seal `json:"seal,omitempty"`
@@ -256,6 +267,7 @@ type Run struct {
 	RefusalsErr error
 	Grants      []probe.Grant
 	GrantsErr   error
+	Ended       []probe.EndedCount
 	Spool       *spool.Stats
 	Processing  *Processing
 }
@@ -293,7 +305,7 @@ var (
 		"too_large"}
 	ExtensionRetirementCauses = []string{"start_failed", "startup_timeout", "timeout", "crash", "protocol",
 		"oversized_frame", "unknown_id", "flood"}
-	DerivedRefusalReasons = []string{"malformed", "unknown_source", "rate", "queue_full", "budget", "stopped",
+	DerivedRefusalReasons = []string{"malformed", "unknown_source", "rate", "queue_full", "stopped",
 		"write_failed"}
 )
 
@@ -316,6 +328,7 @@ func NoCounts(name string) ExtensionCounts {
 // Unchanged + Failed + Pending; the maps hold every member of the protocol's
 // vocabularies.
 type ExtensionCounts struct {
+	Delivery         sink.Stats        `json:"delivery"`
 	Name             string            `json:"name"`
 	Considered       uint64            `json:"considered"`
 	Changed          uint64            `json:"changed"`
@@ -345,14 +358,22 @@ type ExtensionCounts struct {
 // policy suppression or capture loss.
 // Internal artifact-serialization defects use the terminal error/seal reason,
 // not either counter.
+// ConnectionsCut counts connections cut because they held as much input as one
+// connection may while waiting to be processed, and InputCut the input
+// entries (one per captured transfer) discarded for them, what each held when
+// it was cut and what arrived for it afterwards. A cut is neither a processing
+// failure nor a capture loss.
 // GateReason is the current capture-wide invalidation reason, independently of
 // whether a candidate reached authorization. Counts are the last returned
 // worker outcome; the gate is read later.
 // Its presence identifies a session that does not create a raw spool.
 type Processing struct {
+	Delivery           sink.Stats       `json:"delivery"`
 	GateReason         probe.GateReason `json:"gate_reason"`
 	ProcessingFailures uint64           `json:"processing_failures"`
 	OutputFailures     uint64           `json:"output_failures"`
+	ConnectionsCut     uint64           `json:"connections_cut"`
+	InputCut           uint64           `json:"input_cut"`
 	Authorized         uint64           `json:"authorized"`
 	Written            uint64           `json:"written"`
 	// ExchangeIDs is the number of exchange ids the session issued, and
@@ -436,7 +457,7 @@ func (a *Account) Ran(at time.Time, run Run) {
 		a.Admissions = &Admissions{Rule: coverageRule, ByTarget: []TargetCoverage{}, CoverageEnded: []Admission{},
 			GrantUnknown: []Admission{}, Unavailable: run.GrantsErr.Error()}
 	case run.Grants != nil:
-		a.Admissions = admissionsOf(run.Grants)
+		a.Admissions = admissionsOf(run.Grants, run.Ended)
 	default:
 		a.Admissions = nil
 	}
@@ -519,10 +540,20 @@ func limitsOf(one process.Resolved) []string {
 	return limits
 }
 
-func admissionsOf(grants []probe.Grant) *Admissions {
+func admissionsOf(grants []probe.Grant, ended []probe.EndedCount) *Admissions {
 	admissions := &Admissions{Rule: coverageRule, ByTarget: []TargetCoverage{}, CoverageEnded: []Admission{},
 		GrantUnknown: []Admission{}}
 	at := make(map[string]int)
+	for _, one := range ended {
+		target := targetOf(admission.Provenance{Target: one.Target, Number: one.Number})
+		index, seen := at[target]
+		if !seen {
+			index = len(admissions.ByTarget)
+			at[target] = index
+			admissions.ByTarget = append(admissions.ByTarget, TargetCoverage{Target: target})
+		}
+		admissions.ByTarget[index].Ended += one.Count
+	}
 	for _, grant := range grants {
 		one := Admission{
 			Instance:    instanceOfSelection(grant.Selection),
@@ -576,6 +607,18 @@ func namespaceBy(selection admission.Selection) string {
 		return record.ByAttachRead
 	default:
 		return record.ByResolutionRead
+	}
+}
+
+// EndedAdmission is one admission established as ended, as the operational log
+// records it: the only record of its identity once the account counts it.
+func EndedAdmission(one probe.Ended) Admission {
+	return Admission{
+		Instance:    instanceOfSelection(one.Selection),
+		Target:      targetOf(one.Selection.Provenance),
+		Inherited:   one.Selection.Provenance.Inherited(),
+		NamespaceBy: namespaceBy(one.Selection),
+		Why:         one.Evidence,
 	}
 }
 
@@ -635,6 +678,10 @@ func Describe(capability probe.Capability) string {
 	// kernel acquired, which Binding does not provide.
 	if !capability.SocketEvidence {
 		line += "; which socket a transfer crossed is not established, so every association is unknown"
+	}
+	if len(capability.Unprobed) > 0 {
+		line += "; capture is not live, no probe held for " + strings.Join(capability.Unprobed, ", ") +
+			", so the whole attachment sequences nothing and certifies no exchange"
 	}
 	if len(capability.Unobserved) > 0 {
 		line += "; the kernel holds no probe on " + strings.Join(capability.Unobserved, ", ")
@@ -706,15 +753,15 @@ func Render(to io.Writer, a Account, local bool) {
 	say("placed     %d records over %d connections, %d of them ended", seen.Records, seen.Connections, seen.Closed)
 	say("early      %d transfers arrived before a handshake finished", seen.Early)
 
-	// Ordering is reported apart from loss: a run that cannot order its
-	// observations has not lost them. "retired" differs from the seal's
-	// "interrupted", which counts transfers refused at the read boundary.
-	say("ordering   %d observations behind one already seen, %d with no place in the order, "+
-		"%d gaps tolerated as the producer's race, %d observations the located losses account "+
-		"for, %d streams retired by those losses, %d of those gaps confirmed with nothing able "+
-		"to say",
-		seen.Disordered, seen.Unstamped, seen.Tolerated, seen.Lost, seen.Interrupted,
-		seen.Unexplained)
+	// Ordering is reported apart from loss: what a connection's own sequence
+	// says it lost, and what that cost its positions.
+	say("ordering   %d transfers missing from their connections' sequences, %d directions whose "+
+		"positions stopped being established, %d connections retired with their endings never "+
+		"delivered, %d transfers with no sequence, %d losses the producer could place in no "+
+		"connection",
+		seen.Lost, seen.Cut, seen.Retired, seen.Unsequenced, seen.Unlocated)
+
+	say("overload   %d transfers refused by the admission gate, %d fragments refused by volatile intake", seen.GateRefused, seen.IntakeRefused)
 
 	// Losses only. A dropped event leaves no mark in the stream it would have
 	// joined.
@@ -800,9 +847,13 @@ func Render(to io.Writer, a Account, local bool) {
 		say("joined     %d connection records, %d dropped at the bound, %d refused",
 			a.Spool.Connections, a.Spool.ConnectionsDropped, a.Spool.ConnectionsRefused)
 	}
+	if d := a.LogDelivery; d != nil {
+		say("log        %d authorized, %d written, %d failed, %d dropped, %d pending; %d discarded at shutdown", d.Authorized, d.Written, d.Failed, d.Dropped, d.Pending, d.Discarded)
+	}
 	if p := a.Processing; p != nil {
 		say("processed  %d route processing failures, %d output failures", p.ProcessingFailures, p.OutputFailures)
 		say("approved   %d route records authorized, %d written", p.Authorized, p.Written)
+		say("delivery   %d failed, %d dropped, %d pending; %d discarded at shutdown", p.Delivery.Failed, p.Delivery.Dropped, p.Delivery.Pending, p.Delivery.Discarded)
 		if p.GateReason != "" {
 			say("release    refused: %s", p.GateReason)
 		}
@@ -850,7 +901,7 @@ func underWayWhy(u probe.UnderWay) string {
 // Lost is every loss the account carries that is not nothing - a count above
 // zero or a reading not known - as one clause, or empty where there is none: the
 // kernel's losses, the calls under way when the probes were placed, and the
-// records the volatile intake refused. A seal that completed says its steps
+// input records refused. A seal that completed says its steps
 // succeeded and nothing about what capture lost, so wherever a session is said
 // to have sealed this is printed on the same line (Render, and the stop
 // command). An event the delivery gate refused is not a loss and is not here.
@@ -882,10 +933,10 @@ func (a Account) Lost() string {
 	}
 	if a.Seen != nil {
 		if a.Seen.Rejected != 0 {
-			lost = append(lost, fmt.Sprintf("%d records the volatile intake refused", a.Seen.Rejected))
+			lost = append(lost, fmt.Sprintf("%d input records refused", a.Seen.Rejected))
 		}
 		if a.Seen.ConnectionsUnrecorded != 0 {
-			lost = append(lost, fmt.Sprintf("%d connection records the volatile intake refused",
+			lost = append(lost, fmt.Sprintf("%d connection input records refused",
 				a.Seen.ConnectionsUnrecorded))
 		}
 	}

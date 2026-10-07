@@ -17,6 +17,7 @@ import (
 	"github.com/evandukss/edge-observer/fragment"
 	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/processing"
+	"github.com/evandukss/edge-observer/sink"
 )
 
 // This fixture drives the production controller and finalizer over real
@@ -50,10 +51,19 @@ func (p *processingProducer) Account() (connection.Counters, error) {
 	return connection.Counters{ReservationAttempts: connection.Counted(int64(*p.stamp))}, nil
 }
 
+// fragmentKey is one handle's direction.
+type fragmentKey struct {
+	endpoint  uint64
+	direction fragment.Direction
+}
+
 type processingControllerFixture struct {
-	d         *daemon
-	producer  *processingProducer
-	stamp     uint64
+	d        *daemon
+	producer *processingProducer
+	stamp    uint64
+	// numbers is the last number each handle's occupancy took per direction, as
+	// the kernel producer numbers them; a handle's occupancy is its endpoint.
+	numbers   map[fragmentKey]uint64
 	stop      chan os.Signal
 	done      chan struct{}
 	ended     bool
@@ -74,6 +84,9 @@ func processingController(t *testing.T, beforeAuthorize ...func()) *processingCo
 // leaves the example's), the event allowance, and the processing and gate
 // seams.
 type controllerSetup struct {
+	log             *logger
+	ticks           <-chan time.Time
+	openSink        sink.Factory
 	workers         int
 	events          uint64
 	taken           func(worker int, process fragment.Process, connection fragment.ConnectionID)
@@ -101,7 +114,10 @@ func processingControllerWith(t *testing.T, setup controllerSetup) *processingCo
 	read := loaded(t, string(raw))
 	read.Settings.Directory = t.TempDir()
 	directory := filepath.Join(read.Settings.Directory, sessionsName, "integration")
-	output, err := processing.Open(directory, 1<<20)
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	output, err := processing.OpenWriter(processing.WriterOptions{Directory: directory, QueueBytes: 1 << 20, OpenSink: setup.openSink})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +125,7 @@ func processingControllerWith(t *testing.T, setup controllerSetup) *processingCo
 	if err != nil {
 		t.Fatal(err)
 	}
-	options := probe.DeliveryGateOptions{MaxEvents: setup.events, StorageExhausted: output.Exhausted(), BeforeAuthorize: setup.beforeAuthorize}
+	options := probe.DeliveryGateOptions{MaxEvents: setup.events, IntakeExhausted: store.Exhausted(), BeforeAuthorize: setup.beforeAuthorize}
 	gate, err := probe.NewDeliveryGate(options)
 	if err != nil {
 		t.Fatal(err)
@@ -117,11 +133,11 @@ func processingControllerWith(t *testing.T, setup controllerSetup) *processingCo
 	f := &processingControllerFixture{stop: make(chan os.Signal, 1), done: make(chan struct{})}
 	f.producer = &processingProducer{withdrawn: true, drained: true, stamp: &f.stamp}
 	f.d = &daemon{policy: read, session: "integration", directory: directory, capture: recording,
-		intake: store, gate: gate, output: output, storageExhausted: output.Exhausted(), attached: f.producer, processingTaken: setup.taken,
+		intake: store, gate: gate, output: output, attached: f.producer, processingTaken: setup.taken, log: setup.log,
 		plan: account.Account{Version: account.Version, Session: "integration", Policy: account.Policy{Revision: read.Revision, Generation: 1}},
 	}
 	go func() {
-		f.d.serveUntilStop(f.stop, nil, nil, nil, nil, account.Account{})
+		f.d.serveUntilStop(f.stop, nil, setup.ticks, nil, setup.log, account.Account{})
 		close(f.done)
 	}()
 	t.Cleanup(func() {
@@ -183,9 +199,14 @@ func (f *processingControllerFixture) transfer(t *testing.T, endpoint uint64, di
 		t.Fatalf("fixture transfer refused before capture: %+v", got)
 	}
 	f.stamp++
+	if f.numbers == nil {
+		f.numbers = make(map[fragmentKey]uint64)
+	}
+	f.numbers[fragmentKey{endpoint, direction}]++
 	f.d.capture.Transfer(probe.Transfer{Process: fragment.Process{PID: 42, StartTime: 7},
 		Instance: admission.Instance{Namespace: admission.Namespace{Device: 1, Inode: 2}, PID: 42, Start: admission.Determinate(7), Generation: 1},
-		Endpoint: endpoint, Direction: direction, Measured: true, Length: uint32(len(text)), Payload: []byte(text), Stamp: f.stamp, At: time.Now()})
+		Endpoint: endpoint, Direction: direction, Measured: true, Length: uint32(len(text)), Payload: []byte(text), Stamp: f.stamp,
+		Sequence: probe.Sequence{Occupancy: endpoint, Number: f.numbers[fragmentKey{endpoint, direction}], Born: true}, At: time.Now()})
 }
 
 func (f *processingControllerFixture) closed(t *testing.T, endpoint uint64) {
@@ -196,7 +217,10 @@ func (f *processingControllerFixture) closed(t *testing.T, endpoint uint64) {
 	f.stamp++
 	f.d.capture.Closed(probe.Connection{Process: fragment.Process{PID: 42, StartTime: 7},
 		Instance: admission.Instance{Namespace: admission.Namespace{Device: 1, Inode: 2}, PID: 42, Start: admission.Determinate(7), Generation: 1},
-		Endpoint: endpoint, Stamp: f.stamp, At: time.Now()})
+		Endpoint: endpoint, Stamp: f.stamp, Sequence: probe.Sequence{Occupancy: endpoint, Born: true},
+		Final: probe.Final{Known: true, Sent: probe.Terminal{Last: f.numbers[fragmentKey{endpoint, fragment.Sent}]},
+			Received: probe.Terminal{Last: f.numbers[fragmentKey{endpoint, fragment.Received}]}},
+		At: time.Now()})
 }
 
 func (f *processingControllerFixture) halt(t *testing.T) {
@@ -306,8 +330,23 @@ func TestControllerProcessingUsesFinalizationEvidence(t *testing.T) {
 				if err := json.Unmarshal(lines[1], &artifact); err != nil {
 					t.Fatal(err)
 				}
-				if artifact.ReconstructionTruncation == nil || !bytes.Contains(lines[1], []byte("/final")) {
-					t.Fatal("final useful prefix omitted its indeterminate suffix marker")
+				if artifact.ReconstructionTruncation != nil || !bytes.Contains(lines[1], []byte("/final")) {
+					t.Fatal("final exchange is missing or carries retirement evidence")
+				}
+			}
+			if one.want == 2 {
+				found := false
+				for _, line := range all {
+					var a processing.Artifact
+					if err := json.Unmarshal(line, &a); err != nil {
+						t.Fatal(err)
+					}
+					if a.Record == processing.ArtifactConnection && a.ReconstructionTruncation != nil {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatal("retirement omitted the indeterminate suffix marker")
 				}
 			}
 			processingAccount(t, f, uint64(len(all)), logs.Bytes())

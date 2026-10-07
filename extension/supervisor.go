@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/evandukss/edge-observer/held"
 )
 
 // Config is one extension as a Supervisor runs it.
@@ -33,9 +35,9 @@ type Config struct {
 	// Issued is how many exchange ids the session has issued so far, so a
 	// derived record's source is valid when it is at most this.
 	Issued func() uint64
-	// Derived writes one stamped derived line, line feed included, and
-	// returns "" or the reason it was refused: DerivedBudget, DerivedStopped
-	// or DerivedWriteFailed.
+	// Derived enqueues one stamped line, including LF. It returns an empty
+	// string on acceptance or a refusal reason such as DerivedQueueFull or
+	// DerivedStopped. Acceptance is not evidence of sink completion.
 	Derived func(line []byte) string
 }
 
@@ -79,7 +81,7 @@ type Counts struct {
 // RetirementCauses and DerivedRefusals are the vocabularies Counts is kept by.
 var (
 	RetirementCauses = []string{StartFailed, StartupTimeout, Timeout, Crash, ProtocolError, OversizedFrame, UnknownID, Flood}
-	DerivedRefusals  = []string{DerivedMalformed, DerivedUnknownSource, DerivedRate, DerivedQueueFull, DerivedBudget,
+	DerivedRefusals  = []string{DerivedMalformed, DerivedUnknownSource, DerivedRate, DerivedQueueFull,
 		DerivedStopped, DerivedWriteFailed}
 )
 
@@ -292,6 +294,27 @@ func (s *Supervisor) Close() {
 	s.mutex.Unlock()
 	s.teardowns.Wait()
 	s.finish()
+}
+
+// Retained is what this supervisor holds now, store by store: the calls its
+// current generation has outstanding and the messages queued for it, the
+// spans of ids it has answered, the derived lines waiting to be written, and
+// the callbacks waiting for the mutex to be released.
+func (s *Supervisor) Retained() ([]held.Occupancy, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	outstanding, queued, answered, rebuilds := 0, 0, 0, 0
+	if g := s.current; g != nil {
+		outstanding, queued, answered = len(g.outstanding), len(g.queue), len(g.answered.spans)
+		rebuilds = g.churn.Rebuilds()
+	}
+	return []held.Occupancy{
+		{Store: "extension.outstanding", Held: outstanding, Rebuilds: rebuilds},
+		{Store: "extension.queue", Held: queued},
+		{Store: "extension.answered", Held: answered, Bound: spanBound},
+		{Store: "extension.derived", Held: len(s.derived)},
+		{Store: "extension.after", Held: len(s.after)},
+	}, nil
 }
 
 // Counts is the supervisor's counts now.
@@ -591,7 +614,7 @@ func (s *Supervisor) resultLocked(g *generation, m incoming) {
 		s.retireLocked(g, UnknownID)
 		return
 	}
-	delete(g.outstanding, id)
+	g.outstanding = held.Deleted(g.outstanding, id, &g.churn)
 	g.waiting -= p.call.Bytes
 	g.answered.add(id)
 	result := s.answerOf(g, m)

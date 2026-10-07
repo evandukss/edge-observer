@@ -36,6 +36,7 @@ import (
 	"github.com/evandukss/edge-observer/admission"
 	obpf "github.com/evandukss/edge-observer/bpf"
 	"github.com/evandukss/edge-observer/fragment"
+	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/process"
 )
@@ -53,6 +54,10 @@ const (
 	Transfer Kind = 1
 	// Closed is a connection ending.
 	Closed Kind = 2
+	// Exited is an execution the program delivered events for whose last thread
+	// has exited, after every ending of its connections: what is kept for it can
+	// go.
+	Exited Kind = 3
 )
 
 // Point is one place to attach: a symbol at a file offset in a file on disk,
@@ -71,6 +76,10 @@ type Point struct {
 
 // Options is what a session attaches with.
 type Options struct {
+	// BeforeRecord holds a decoded non-exit event before it can enter the
+	// inventory. It runs without the session lock; production leaves it nil.
+	BeforeRecord func(Event)
+
 	// Program is the embedded program to load: full or metadata-only.
 	Program obpf.Program
 
@@ -93,6 +102,35 @@ type Options struct {
 	// is withheld by name, exactly as one the kernel refuses; no weaker resolution
 	// is selected quietly.
 	Kernel []KernelPoint
+
+	// Resize sets maps' capacities by name before the program loads, and Staging
+	// the depth of the channel decoded events wait in (zero is the default). They
+	// let a case make the ring refuse reservations, or a table refuse an entry,
+	// after a handful of events rather than the traffic that fills the defaults.
+	// Production callers leave both unset.
+	Resize  map[string]uint32
+	Staging int
+
+	// DeferCaptureLive leaves the capture-live flag unset at attach, for a test
+	// that drives the pre-live window and sets it with MarkCaptureLive. Production
+	// callers leave it false, so an occupancy forms as soon as the transfer probes
+	// are confirmed.
+	DeferCaptureLive bool
+
+	// SkipReturn names catalogued functions whose return probe is not placed, for
+	// a test exercising a return that never fires: the function stays unmeasurable,
+	// so its entry takes a number that nothing fills, a gap. Production callers
+	// leave it empty.
+	SkipReturn []string
+
+	// FailEntry names functions whose probe is recorded as refused without being
+	// placed, reproducing a kernel-refused probe, for a test of the partial-
+	// placement refusal. Production callers leave it empty.
+	FailEntry []string
+
+	// Ended, where set, is told once of every recorded admission this session
+	// establishes as ended, as it lets go of it (probe.Request.Ended).
+	Ended func(probe.Ended)
 }
 
 // MinimumKernel is the oldest kernel this package will attach on, published
@@ -127,6 +165,8 @@ const (
 	// StartIndeterminate is an instance whose start identity could not be read, so
 	// nothing separates it from the next holder of its number. Not a start of zero.
 	StartIndeterminate RefusalReason = "its start identity could not be read"
+
+	ArgumentsIndeterminate RefusalReason = "arguments undetermined"
 
 	// IdentityChanged is a number the kernel handed to another process between the
 	// approval's reading and this attachment.
@@ -226,6 +266,13 @@ const (
 	DescriptorSeenInsideACall RefusalReason = "a descriptor was recorded against the call in flight on its thread, which is a binding source doing its work rather than a refusal"
 )
 
+const ReadRetracted RefusalReason = "a user-memory read outlived its granted generation while its count was filed"
+
+// RetractedEvent counts inventory recording refused for an emitted generation
+// whose grant is gone while its process is still running. The event carries
+// its generation and birth from emission; ordinary exit is not a refusal.
+const RetractedEvent RefusalReason = "a decoded event could not record its withdrawn admission generation"
+
 // Declined is one admission the kernel was never given, and why. It is carried
 // back rather than failing the attachment, because the rest of the set is
 // still observed (package attachment).
@@ -253,10 +300,10 @@ type Event struct {
 	Kind Kind
 	SSL  uint64
 
-	// Stamp is this event's place in production order, taken before its
-	// reservation. Stamps are consecutive, so a missing number is an event
-	// produced and lost, which says which streams were live across the loss. Zero
-	// means the program could not reach its allocator.
+	// Stamp is this event's place in the session-wide production order, taken
+	// before its reservation; it counts what was produced. Which connection lost
+	// an event is said by Sequence. Zero means the program could not reach its
+	// allocator.
 	Stamp uint64
 
 	// Descriptor is the socket this call's bytes crossed, Bound what is
@@ -285,9 +332,18 @@ type Event struct {
 	NamespacePID int32
 	Generation   admission.Generation
 
+	// Start is the process birth held by the grant at emission, not a later
+	// lookup of a possibly reused process number.
+	Start admission.Start
+
 	// Origin is that admission as the program held it when the firing was
 	// checked against it.
 	Origin Origin
+
+	// Sequence is the firing's place in its occupancy of the handle, and Final an
+	// ending's last numbers (struct occupancy, bpf/ssl.bpf.h).
+	Sequence probe.Sequence
+	Final    probe.Final
 
 	PID       int32
 	TID       int32
@@ -322,6 +378,9 @@ type Origin struct {
 
 // Session is a loaded program, its links, and the events they report.
 type Session struct {
+	beforeRecord    func(Event)
+	retractedEvents atomic.Int64
+
 	collection *ebpf.Collection
 	links      []link.Link
 	reader     *ringbuf.Reader
@@ -366,29 +425,43 @@ type Session struct {
 	excluded []admission.Denial
 	denied   map[instanceKey]bool
 
+	// skipReturn names functions whose return probe is deliberately not placed, a
+	// test seam for a return that never fires (Options.SkipReturn).
+	skipReturn map[string]bool
+
+	// unprobed is the byte-moving entry points whose entry probe could not be
+	// placed; while it is non-empty capture is not live and nothing is sequenced.
+	unprobed []string
+
+	// failEntry names functions whose probe is recorded as refused without being
+	// placed, a test seam for the partial-placement refusal (Options.FailEntry).
+	failEntry map[string]bool
+
 	// namedBy is every target that named an instance; the allowlist holds one.
 	namedBy map[instanceKey][]admission.Provenance
 
-	// inventory is every instance this session recorded a grant for, in first
-	// recorded order, and index its position. Both the delivery goroutine and the
-	// caller write it, through recorded.
+	// indexChurn and namedByChurn shed what the ends of executions
+	// leave in index and namedBy, whose keys never return. Under held.
+	indexChurn   held.Churn
+	namedByChurn held.Churn
+
+	// inventory is every instance this session recorded a grant for and has not
+	// established as ended, and index its position. Both the delivery goroutine
+	// and the caller write it, through recorded and forgetEnded.
 	inventory []admission.Selection
 	index     map[instanceKey]int
 	held      sync.Mutex
+
+	// endedBy counts the admissions let go of because their execution ended, by
+	// target, and endedTo is told of each (Options.Ended). Under held.
+	endedBy map[endedTarget]int
+	endedTo func(probe.Ended)
 
 	// targets is the target behind each identity the allowlist's target field
 	// carries, and identities the reverse (targetIdentity). Written by the caller
 	// at attach and at a reload, read by the delivery goroutine, under held.
 	targets    map[uint32]admission.Provenance
 	identities map[string]uint32
-
-	// beyond is every descendant of an admitted instance found in an unenumerated
-	// pid namespace, with its start identity, so each is named once.
-	beyond map[instanceKey]admission.Start
-
-	// seen is the start identity first read for each allowlist entry, which later
-	// readings are compared against.
-	seen map[instanceKey]admission.Start
 
 	events chan Event
 	done   chan struct{}
@@ -409,6 +482,12 @@ type Session struct {
 	// undecodable is events shorter than the program's header, counted so a moved
 	// ABI does not look like a quiet host.
 	undecodable atomic.Int64
+
+	// readsReclaimed is the user-memory reads this session folded where an
+	// admission ended while its process ran on, and readsUnreclaimed the read
+	// counters it could not remove (reclaimReads).
+	readsReclaimed   atomic.Uint64
+	readsUnreclaimed atomic.Int64
 
 	// failure is why the ring reader stopped, where it was not the session
 	// closing, so the account can say it could not find out what was lost.
@@ -503,10 +582,13 @@ const MaxEventPayloadBytes = 4096
 // the socket's endpoints appended after them (a flag, a padding byte, the
 // network namespace, two 16-byte addresses, two ports, four padding bytes),
 // then the socket's start (144), then the admission's origin (three eight-byte
-// fields, three four-byte, a kind and three padding bytes): 184. The padding
-// is explicit so no offset depends on the compiler, and package bpf's layout
-// guard pins every offset against the source (bpf/ssl.bpf.h).
-const rawHeader = 184
+// fields, three four-byte, a kind and three padding bytes: 184), then the
+// event's place in its occupancy (five eight-byte fields, three flags and five
+// padding bytes, then the dropped and occupancy begin counts): 248, followed
+// by the emission grant's process birth (eight bytes): 256. The
+// padding is explicit so no offset depends on the compiler, and package bpf's
+// layout guard pins every offset against the source (bpf/ssl.bpf.h).
+const rawHeader = 256
 
 // Attach loads the program, places the points, fills the allowlist and begins
 // reading. Nothing is captured before this and nothing after Close.
@@ -515,7 +597,7 @@ func Attach(options Options) (*Session, error) {
 		return nil, errors.New("no points to attach to")
 	}
 
-	collection, err := load(options.Program)
+	collection, err := load(options.Program, options.Resize)
 	if err != nil {
 		return nil, err
 	}
@@ -523,16 +605,30 @@ func Attach(options Options) (*Session, error) {
 	// The events channel's capacity is staging depth, while MaxEventPayloadBytes
 	// is a per-event payload maximum. Their values are equal by coincidence;
 	// unifying them would make changing either silently change the other.
+	staging := 4096
+	if options.Staging > 0 {
+		staging = options.Staging
+	}
 	session := &Session{
+		beforeRecord:  options.BeforeRecord,
 		monotonicBase: pairClocks(),
 		collection:    collection,
-		events:        make(chan Event, 4096),
+		events:        make(chan Event, staging),
 		done:          make(chan struct{}),
 		idle:          make(chan struct{}, 1),
 		stopped:       make(chan struct{}),
 	}
 
 	session.excluded = options.Deny
+	session.endedTo = options.Ended
+	session.skipReturn = make(map[string]bool, len(options.SkipReturn))
+	for _, symbol := range options.SkipReturn {
+		session.skipReturn[symbol] = true
+	}
+	session.failEntry = make(map[string]bool, len(options.FailEntry))
+	for _, symbol := range options.FailEntry {
+		session.failEntry[symbol] = true
+	}
 
 	if err := session.authorise(options.Admit); err != nil {
 		_ = session.Close()
@@ -567,6 +663,22 @@ func Attach(options Options) (*Session, error) {
 		return nil, err
 	}
 
+	// Capture goes live only when every byte-moving entry point is placed. An entry
+	// probe the attachment could not place leaves its calls invisible: they move
+	// bytes nothing numbers, and a held neighbour in the same direction would then
+	// number from one as if they never happened, so an exchange could be written
+	// across them (C9). While any byte-moving entry is unplaced, capture is left not
+	// live: no occupancy forms, every connection is unsequenced, and nothing is
+	// certified. The session still runs and reports the unplaced points through
+	// coverage; the unplaced ones are named here for the account.
+	session.unprobed = session.unprobedRequired()
+	if !options.DeferCaptureLive && len(session.unprobed) == 0 {
+		if err := session.markCaptureLive(); err != nil {
+			_ = session.Close()
+			return nil, err
+		}
+	}
+
 	// After the probes are placed, so a reading covers the window between filling
 	// the allowlist and placing the fork probe (adopt).
 	if err := session.adopt(); err != nil {
@@ -598,7 +710,7 @@ func Attach(options Options) (*Session, error) {
 // nothing. It is Attach's own first step, so a kernel it clears is one Attach
 // clears, and a refusal carries Attach's reason.
 func Loads(program obpf.Program) error {
-	collection, err := load(program)
+	collection, err := load(program, nil)
 	if err != nil {
 		return err
 	}
@@ -606,8 +718,9 @@ func Loads(program obpf.Program) error {
 	return nil
 }
 
-// load is the program as this kernel took it, before any probe is placed.
-func load(program obpf.Program) (*ebpf.Collection, error) {
+// load is the program as this kernel took it, before any probe is placed, with
+// the capacities resize names.
+func load(program obpf.Program, resize map[string]uint32) (*ebpf.Collection, error) {
 	// Userspace reads a grant's birth from /proc and the program from the kernel;
 	// they agree only while this reader's time namespace shifts nothing
 	// (process.StartTimesAreOffset). Otherwise every grant would name a number the
@@ -626,6 +739,13 @@ func load(program obpf.Program) (*ebpf.Collection, error) {
 	spec, err := ebpf.LoadCollectionSpecFromReader(newReader(program.Object))
 	if err != nil {
 		return nil, fmt.Errorf("%w: read the program: %v", ErrUnavailable, err)
+	}
+	for name, size := range resize {
+		held, found := spec.Maps[name]
+		if !found {
+			return nil, fmt.Errorf("%w: the program has no %s map to resize", ErrUnavailable, name)
+		}
+		held.MaxEntries = size
 	}
 
 	collection, err := ebpf.NewCollection(spec)
@@ -831,7 +951,7 @@ func (s *Session) threadsOf(pid int32) int32 {
 
 // liveThreads is the count the program counts down from. No reading counts as
 // one: the grant then ends at the leader's exit, observing less rather than
-// more. Too high leaves an entry Reconcile withdraws.
+// more. Too high can leave an entry until its execution ends.
 func liveThreads(threads int32) uint32 {
 	if threads < 1 {
 		return 1
@@ -960,19 +1080,6 @@ func (s *Session) targetIdentity(one admission.Provenance) uint32 {
 	return identity
 }
 
-// provenanceOf is the target a grant's target field names, read back through
-// the identities this session gave (targetIdentity). One it never gave keeps
-// only its number.
-func (s *Session) provenanceOf(identity, rule uint32) admission.Provenance {
-	s.held.Lock()
-	target, known := s.targets[identity]
-	s.held.Unlock()
-	if !known {
-		return admission.Provenance{Number: int(identity), Rule: int(rule)}
-	}
-	return admission.Provenance{Target: target.Target, Number: target.Number, Rule: int(rule)}
-}
-
 // enumerate passes the pid namespaces of everything being admitted to the
 // program, which can resolve a pid only in those. A namespace beyond the
 // array's size is left out and every instance in it is declined by name.
@@ -1034,6 +1141,33 @@ func (s *Session) seed() error {
 	return nil
 }
 
+// markCaptureLive sets the kernel flag that lets occupancies form, called once
+// every transfer probe is confirmed so a birth is never trusted before data
+// capture is live (bpf/ssl.bpf.h, capture_live).
+func (s *Session) markCaptureLive() error {
+	flag := s.collection.Maps["capture_live"]
+	if flag == nil {
+		return fmt.Errorf("%w: the program has no capture-live flag, so it cannot number a handle "+
+			"from a true origin", ErrUnavailable)
+	}
+	if err := flag.Update(uint32(0), uint8(1), ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("%w: set the capture-live flag: %v", ErrUnavailable, err)
+	}
+	return nil
+}
+
+// MarkCaptureLive sets the capture-live flag after a deferred attach, for a test
+// that first drives the window in which no occupancy may form.
+func (s *Session) MarkCaptureLive() error { return s.markCaptureLive() }
+
+// Unprobed is the entry points capture requires - byte-moving or lifecycle -
+// that were present and could not be placed. While it is non-empty the session is
+// not capture-live: nothing is sequenced and no exchange is certified, so no
+// exchange is written across bytes an unplaced byte mover moves, and no reused
+// handle joins two connections an unplaced lifecycle probe would have kept apart.
+// Empty on a full placement.
+func (s *Session) Unprobed() []string { return s.unprobed }
+
 // Declined is what this session would not authorise, and why.
 func (s *Session) Declined() []Declined { return s.declined }
 
@@ -1041,6 +1175,7 @@ func (s *Session) Declined() []Declined { return s.declined }
 // constant: a moved index still reads a valid number, filed under the wrong
 // reason.
 var refusalCounters = map[RefusalReason]uint32{
+	ReadRetracted:           obpf.StatReadRetracted,
 	TransferRefusedAtReturn: obpf.StatRefused,
 	CallNotRecorded:         obpf.StatCallUnrecorded,
 	ReadNotFiled:            obpf.StatReadUnrecorded,
@@ -1071,6 +1206,7 @@ func (s *Session) Refusals() (Refusals, error) {
 		}
 		counted[reason] = value
 	}
+	counted[RetractedEvent] = s.retractedEvents.Load()
 	return Refusals{Named: s.declined, Counted: counted}, nil
 }
 
@@ -1130,6 +1266,15 @@ func (s *Session) adopt() error {
 				continue
 			}
 			if named[keyOf(child)] || s.denied[keyOf(child)] {
+				continue
+			}
+			if below.ArgumentEvidence != process.ArgumentsKnown {
+				s.refuse(admission.Selection{
+					Instance: child, Kind: admission.ByDescent,
+					Provenance: admission.Provenance{Target: one.Provenance.Target, Number: one.Provenance.Number, Parent: one.Instance.Key()},
+					Mode:       one.Mode, ObserverPID: below.PID,
+				}, ArgumentsIndeterminate, process.ArgumentsRefusal{PID: below.PID, Executable: below.Executable,
+					Detail: "the descendant's command line could not be established"})
 				continue
 			}
 			if !child.Start.Determined {
@@ -1357,7 +1502,12 @@ func (s *Session) place(points []Point) error {
 
 	for _, point := range points {
 		put := placed{point: point}
-		if err := s.put(&put); err != nil {
+		if s.failEntry[point.Symbol] {
+			// A test seam: record the probe as refused without placing it, exactly as a
+			// kernel refusal leaves it (no entry link, a refusal reason).
+			put.refusal = "forced refusal (test seam)"
+			refused = append(refused, point.Symbol+": "+put.refusal)
+		} else if err := s.put(&put); err != nil {
 			put.refusal = err.Error()
 			refused = append(refused, point.Symbol+": "+err.Error())
 		}
@@ -1395,7 +1545,9 @@ func (s *Session) measurable() error {
 	}
 	for _, put := range s.placed {
 		code, known := obpf.EntryPrograms[put.point.Entry]
-		if !known || !s.answer(put).Confirmed {
+		if !known || s.skipReturn[put.point.Symbol] || !s.answer(put).Confirmed {
+			// A function whose return probe was deliberately not placed (a test seam)
+			// stays unmeasurable, so its entry numbers it and the missing return is a gap.
 			continue
 		}
 		if err := unmeasurable.Update(code, uint8(0), ebpf.UpdateAny); err != nil {
@@ -1408,6 +1560,42 @@ func (s *Session) measurable() error {
 // ErrRefused is what attaching fails with when the kernel refused every probe:
 // a host that can attach, and would not place these (unlike ErrUnavailable).
 var ErrRefused = errors.New("the kernel placed none of the probes it was asked for")
+
+// unprobedRequired is the entry points that were present to place and could not
+// be, without which capture cannot sequence safely, so it is not made live. Two
+// kinds: a byte-moving entry (the catalogued transfer functions and the
+// uncatalogued SSL_sendfile route), whose absence lets bytes move invisibly; and
+// a lifecycle probe (SSL_free's release, SSL_clear's recycle, SSL_new's birth),
+// whose absence lets a reused or recycled handle join two connections into one
+// stream. It keys on the needed probe being absent, not on confirmation: a
+// byte-moving function whose entry is placed but whose return is not is
+// measurable-only (its calls are gaps, which is sound). A symbol absent from the library is not placed and so is not
+// here (decision 477): only a present route whose probe failed leaves capture not
+// live.
+func (s *Session) unprobedRequired() []string {
+	var unprobed []string
+	for _, put := range s.placed {
+		switch {
+		case byteMovingEntry(put.point.Entry) && put.entry == nil:
+		case put.point.Entry == progFreeEntry && put.entry == nil:
+		case put.point.Entry == progClearEntry && put.entry == nil:
+		case put.point.Return == progNewReturn && put.back == nil:
+		default:
+			continue
+		}
+		unprobed = append(unprobed, put.point.Symbol)
+	}
+	return unprobed
+}
+
+// byteMovingEntry reports whether an entry program moves plaintext: a
+// catalogued transfer entry, or an uncatalogued route (obs_sendfile).
+func byteMovingEntry(entry string) bool {
+	if _, ok := obpf.EntryPrograms[entry]; ok {
+		return true
+	}
+	return entry == progSendfile
+}
 
 // ErrNotAuthorised is what attaching fails with when a process to authorise is
 // not the approved process. It says nothing about the host, and a caller must
@@ -1441,7 +1629,10 @@ func (s *Session) put(target *placed) error {
 		target.entry = front
 	}
 
-	if point.Return == "" {
+	if point.Return == "" || s.skipReturn[point.Symbol] {
+		// A test seam: the return probe is left unplaced, so this function's return
+		// never fires and its entry number stays a gap. The function is marked
+		// unmeasurable because measurable() only clears a confirmed return.
 		return nil
 	}
 	back := s.collection.Programs[point.Return]
@@ -1518,77 +1709,6 @@ func ask(placed link.Link, point Point) (string, error) {
 // Events is what the probes reported. It is closed when the session is.
 func (s *Session) Events() <-chan Event { return s.events }
 
-// Admissions is what the kernel holds, read back from the allowlist: it
-// includes fork-hook descendants never offered here and omits instances the
-// exit hook removed. Start identity and executable come from /proc where the
-// instance is reachable, and are indeterminate (not zero) where it is gone.
-func (s *Session) Admissions() ([]admission.Selection, error) {
-	allowed := s.collection.Maps["allowed_processes"]
-	if allowed == nil {
-		return nil, fmt.Errorf("%w: the program has no allowlist map", ErrUnavailable)
-	}
-	// Withdraw what has ceased first, so an entry for a gone process is not
-	// reported as coverage (Reconcile).
-	if _, err := s.Reconcile(); err != nil {
-		return nil, err
-	}
-
-	// One reading of the table, so an instance in a namespace this observer does
-	// not share is found by the numbering on its status line.
-	located := make(map[instanceKey]process.Process)
-	if table, err := process.Read(defaultProcFS); err == nil {
-		for _, p := range table.All() {
-			located[keyOf(p.Instance())] = p
-		}
-	}
-
-	var (
-		key       instanceKey
-		value     admissionValue
-		selection []admission.Selection
-	)
-	entries := allowed.Iterate()
-	for entries.Next(&key, &value) {
-		if value.Kind == denied {
-			continue
-		}
-		provenance := s.provenanceOf(value.Target, value.Rule)
-		provenance.Parent = admission.Key{
-			Namespace:  admission.Namespace{Device: value.ParentNSDevice, Inode: value.ParentNSInode},
-			PID:        int32(value.ParentPID),
-			Generation: admission.Generation(value.ParentGeneration),
-		}
-		one := admission.Selection{
-			Instance: admission.Instance{
-				Namespace:  admission.Namespace{Device: key.NamespaceDevice, Inode: key.NamespaceInode},
-				PID:        int32(key.PID),
-				Generation: admission.Generation(value.Generation),
-			},
-			Kind:        decodeKind(value.Kind),
-			Provenance:  provenance,
-			Mode:        decodeMode(value.Mode),
-			Propagation: decodePropagation(value.Propagate),
-		}
-		if p, found := located[key]; found {
-			one.Instance.Start = p.Start()
-			one.Instance.Executable = p.Executable
-			one.ObserverPID = p.PID
-		}
-		// The allowlist holds one grant, so one target, per instance; every other
-		// target that named it is kept here, so both reasons are reported.
-		if also := s.namedBy[key]; len(also) > 1 {
-			one.Provenance = also[0]
-			one.AlsoNamedBy = also[1:]
-		}
-		s.recorded(one)
-		selection = append(selection, one)
-	}
-	if err := entries.Err(); err != nil {
-		return nil, fmt.Errorf("%w: read the allowlist back: %v", ErrUnavailable, err)
-	}
-	return selection, nil
-}
-
 // Entry is one row of the kernel's allowlist, decoded. Instance.Start is the
 // birth the grant carries (clock ticks since boot), against which the program
 // authenticates the number's occupant. It is indeterminate on a denial, which
@@ -1613,9 +1733,7 @@ type Entry struct {
 
 // Held is the allowlist exactly as the kernel holds it, grants and denials
 // alike, with no reconciliation, no /proc reading and nothing withdrawn.
-// Admissions reconciles first, so asking it whether an entry was left behind
-// asks the cleanup whether the cleanup ran; a check that no entry survives
-// asserts on this.
+// A check that no entry survives asserts on this inventory without cleanup.
 func (s *Session) Held() ([]Entry, error) {
 	allowed := s.collection.Maps["allowed_processes"]
 	if allowed == nil {
@@ -1726,6 +1844,34 @@ func (s *Session) Denials() ([]admission.Denial, error) {
 func (s *Session) recorded(one admission.Selection) {
 	s.held.Lock()
 	defer s.held.Unlock()
+	s.recordedLocked(one)
+}
+
+// recordedLocked is recorded with s.held already held.
+func (s *Session) recordedLocked(one admission.Selection) {
+	if s.collection != nil {
+		var grant admissionValue
+		allowed := s.collection.Maps["allowed_processes"]
+		if allowed == nil {
+			return
+		}
+		err := allowed.Lookup(keyOf(one.Instance), &grant)
+		if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return
+		}
+		if err != nil ||
+			grant.Generation != uint64(one.Instance.Generation) || grant.Kind == denied {
+			// A grant can disappear before its queued events are read simply because
+			// the process exited. The generation and birth travelled with the event;
+			// inspect that identity, never infer withdrawal from an empty map slot.
+			// An indeterminate reading establishes no live withdrawal either. In all
+			// three cases the event is delivered, and no absent inventory is recreated.
+			if s.inspect(one).Liveness == process.LivenessRunning {
+				s.retractedEvents.Add(1)
+			}
+			return
+		}
+	}
 	if s.index == nil {
 		s.index = make(map[instanceKey]int)
 	}
@@ -1825,41 +1971,15 @@ func (s *Session) inspect(one admission.Selection) process.Execution {
 
 // expected is the identity recorded for one instance, compared against /proc.
 // The birth comes from the admission record first (never deleted) and from
-// Reconcile's baseline second (deleted with its entry); a fork-hook descendant
+// a fork-hook descendant
 // has no birth in its record. With neither, the identity is unestablished.
 func (s *Session) expected(one admission.Selection) process.Group {
 	start := one.Instance.Start
-	if !start.Determined {
-		start = s.seenOf(keyOf(one.Instance))
-	}
 	return process.Group{
 		Namespace:    one.Instance.Namespace,
 		NamespacePID: one.Instance.PID,
 		Start:        start,
 	}
-}
-
-// seenOf, see and forget are the only way into s.seen, and each holds s.held:
-// Reconcile writes the map and expected, reachable through Grants, reads it.
-func (s *Session) seenOf(key instanceKey) admission.Start {
-	s.held.Lock()
-	defer s.held.Unlock()
-	return s.seen[key]
-}
-
-func (s *Session) see(key instanceKey, start admission.Start) {
-	s.held.Lock()
-	defer s.held.Unlock()
-	if s.seen == nil {
-		s.seen = make(map[instanceKey]admission.Start)
-	}
-	s.seen[key] = start
-}
-
-func (s *Session) forget(key instanceKey) {
-	s.held.Lock()
-	defer s.held.Unlock()
-	delete(s.seen, key)
 }
 
 // WhatBecameOf decides which of the three states one recorded instance is in,
@@ -1889,157 +2009,6 @@ func WhatBecameOf(one admission.Selection, reading process.Execution) Withdrawal
 	}
 }
 
-// Reconcile withdraws every allowlist entry that no longer names the instance
-// it was written for, and says what it withdrew. An entry can outlive its
-// process: a descendant found in the process table can exit before its entry
-// is written, and exits this session did not see leave entries too. Such an
-// entry confers no authority (the program authenticates every read against its
-// birth, obs_grant), so this is cleanup and accounting.
-//
-// The first reading records the start identity at each key; later readings
-// compare against it. An entry with no live process, a different start
-// identity, or an unreadable one is withdrawn. Entries for dead processes stand
-// until the next run of this.
-//
-// Two kinds of refusal come back, told apart by Reason: withdrawn entries, and
-// descendants of surviving entries in pid namespaces this session did not
-// enumerate (beyondEnumeration).
-//
-// Admissions calls it, and only this package's tests call Admissions; the
-// observer command reaches neither. Withdrawing deletes the entry's baseline in
-// s.seen, so a fork-hook descendant (whose record has no birth) reads as
-// established before and indeterminate after.
-func (s *Session) Reconcile() ([]Declined, error) {
-	allowed := s.collection.Maps["allowed_processes"]
-	if allowed == nil {
-		return nil, fmt.Errorf("%w: the program has no allowlist map", ErrUnavailable)
-	}
-	table, err := process.Read(defaultProcFS)
-	if err != nil {
-		return nil, fmt.Errorf("%w: read the process table: %v", ErrUnavailable, err)
-	}
-	living := make(map[instanceKey]process.Process, len(table.All()))
-	for _, p := range table.All() {
-		living[keyOf(p.Instance())] = p
-	}
-	var (
-		key       instanceKey
-		value     admissionValue
-		withdrawn []Declined
-		inForce   []admission.Selection
-	)
-	entries := allowed.Iterate()
-	for entries.Next(&key, &value) {
-		// A denial's field holds its exclusion's number, not a target identity.
-		provenance := admission.Provenance{Number: int(value.Target), Rule: int(value.Rule)}
-		if value.Kind != denied {
-			provenance = s.provenanceOf(value.Target, value.Rule)
-		}
-		one := admission.Selection{
-			Instance: admission.Instance{
-				Namespace:  admission.Namespace{Device: key.NamespaceDevice, Inode: key.NamespaceInode},
-				PID:        int32(key.PID),
-				Generation: admission.Generation(value.Generation),
-			},
-			Kind:       decodeKind(value.Kind),
-			Provenance: provenance,
-			Mode:       decodeMode(value.Mode),
-		}
-
-		live, alive := living[key]
-		baseline := s.seenOf(key)
-		switch {
-		case !alive:
-			withdrawn = append(withdrawn, Declined{Selection: one, Reason: InstanceGone, Err: fmt.Errorf(
-				"%w: pid %d in %s is in the allowlist and no process holds that number",
-				ErrNotAuthorised, one.Instance.PID, one.Instance.Namespace)})
-		case !live.Start().Determined:
-			withdrawn = append(withdrawn, Declined{Selection: one, Reason: StartIndeterminate, Err: fmt.Errorf(
-				"%w: pid %d in %s is in the allowlist and its start identity could not be read",
-				ErrNotAuthorised, one.Instance.PID, one.Instance.Namespace)})
-		case baseline.Determined && baseline != live.Start():
-			withdrawn = append(withdrawn, Declined{Selection: one, Reason: IdentityChanged, Err: fmt.Errorf(
-				"%w: pid %d in %s was admitted when it %s and now %s",
-				ErrNotAuthorised, one.Instance.PID, one.Instance.Namespace, baseline, live.Start())})
-		default:
-			s.see(key, live.Start())
-			if value.Kind != denied {
-				one.ObserverPID = live.PID
-				inForce = append(inForce, one)
-			}
-			continue
-		}
-	}
-	if err := entries.Err(); err != nil {
-		return nil, fmt.Errorf("%w: read the allowlist back: %v", ErrUnavailable, err)
-	}
-
-	for _, one := range withdrawn {
-		gone := keyOf(one.Selection.Instance)
-		if err := allowed.Delete(gone); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return nil, fmt.Errorf("%w: withdraw pid %d: %v",
-				ErrUnavailable, one.Selection.Instance.PID, err)
-		}
-		s.forget(gone)
-	}
-	beyond := s.beyondEnumeration(table, inForce)
-	s.declined = append(s.declined, withdrawn...)
-	s.declined = append(s.declined, beyond...)
-	return append(withdrawn, beyond...), nil
-}
-
-// beyondEnumeration names the descendants of still-admitted instances that the
-// program could not have admitted, because their pid namespace was not passed
-// to it. No kernel counter can do this: every unapproved process on the host
-// resolves in no enumerated namespace, so it would count the host's traffic.
-// The set is a floor: exited children cannot be named, and one whose namespace
-// cannot be read is left out. Only modes covering descendants created after
-// resolution are walked; under the others the policy already accounts for the
-// absence.
-func (s *Session) beyondEnumeration(table process.Table, inForce []admission.Selection) []Declined {
-	if s.beyond == nil {
-		s.beyond = make(map[instanceKey]admission.Start)
-	}
-
-	var named []Declined
-	for _, one := range inForce {
-		if !one.Mode.Answers().Future || one.ObserverPID == 0 {
-			continue
-		}
-		for _, below := range table.Descendants(one.ObserverPID) {
-			child := below.Instance()
-			if !child.Namespace.Known() || s.resolvable(child.Namespace) {
-				continue
-			}
-			// Named once per instance, not per reconciliation; a number reused by another
-			// process in that namespace is a different instance and is named again.
-			key := keyOf(child)
-			if start, already := s.beyond[key]; already && start == below.Start() {
-				continue
-			}
-			s.beyond[key] = below.Start()
-			named = append(named, Declined{
-				Selection: admission.Selection{
-					Instance: child,
-					Kind:     admission.ByDescent,
-					Provenance: admission.Provenance{
-						Target: one.Provenance.Target,
-						Number: one.Provenance.Number,
-						Rule:   one.Provenance.Rule,
-						Parent: one.Instance.Key(),
-					},
-					Mode:        one.Mode,
-					ObserverPID: below.PID,
-				},
-				Reason: NamespaceUnenumerated,
-				Err: fmt.Errorf("%w: pid %d below pid %d is in %s, which this session did not enumerate",
-					ErrNotAuthorised, below.PID, one.ObserverPID, child.Namespace),
-			})
-		}
-	}
-	return named
-}
-
 // ErrNoPayloadReads is what Reads answers for a program that reads no user
 // memory, rather than a zero indistinguishable from the full program taking
 // none.
@@ -2052,11 +2021,16 @@ var ErrReadsIncomplete = errors.New("a user-memory read could not be filed again
 	"so a generation missing from this map is not evidence that no read was taken under it")
 
 // Reads is how many user-memory reads the program took, by admission
-// generation. It is counted at the read, so a read whose output is discarded
-// still counts. A generation with no entry took no read, while the error is
-// nil. The map holds 65536 generations with no eviction, since the evidence
-// must outlive its admission; once full, new first reads are counted as
-// unfiled and this refuses to answer.
+// generation, for every admission that has not ended. It is counted at the
+// read, so a read whose output is discarded still counts. A generation's entry
+// goes when its admission ends - its execution exits or execs (the program
+// folds it into OBS_STAT_READS_RECLAIMED), or this session takes the grant back
+// while the process runs on (reclaimReads) - and its count moves to
+// ReadsReclaimed. A grant withdrawn as the session stops producing keeps its
+// entry, as the evidence that nothing was read after it. A live generation
+// with no entry took no read, while the error is nil. The map holds 65536
+// generations; once full, new first reads are counted as unfiled and this
+// refuses to answer.
 func (s *Session) Reads() (map[admission.Generation]uint64, error) {
 	counters := s.collection.Maps["reads"]
 	if counters == nil {
@@ -2084,6 +2058,49 @@ func (s *Session) Reads() (map[admission.Generation]uint64, error) {
 		return found, fmt.Errorf("%w: %d of them", ErrReadsIncomplete, unfiled)
 	}
 	return found, nil
+}
+
+// ReadsReclaimed is how many user-memory reads were taken under admissions
+// that have ended and whose entries went from Reads: folded by the program at
+// an execution's exit or exec, and by this session where it took a grant back
+// while the process ran on. It refuses to answer while any of this session's
+// removals failed, since those reads are then in neither place.
+func (s *Session) ReadsReclaimed() (uint64, error) {
+	kernel, err := s.stat(obpf.StatReadsReclaimed)
+	if err != nil {
+		return 0, err
+	}
+	total := uint64(kernel) + s.readsReclaimed.Load()
+	if failed := s.readsUnreclaimed.Load(); failed > 0 {
+		return total, fmt.Errorf("%w: %d read counters of ended admissions could not be removed", ErrUnavailable, failed)
+	}
+	return total, nil
+}
+
+// reclaimReads folds the read counters of admissions that ended while their
+// processes run on, and removes them, as the program does at an execution's
+// exit (obs_reclaim): the exit finds the generation through the allowlist
+// entry, which is gone by then, so nothing else would ever remove them. Each
+// lookup and delete is one operation, so no read filed before it is lost. A
+// generation never returns, so nothing more is filed under it, except by a
+// return already past its grant check when the grant went: that read recreates
+// the entry, and it stays.
+func (s *Session) reclaimReads(generations []uint64) {
+	counters := s.collection.Maps["reads"]
+	if counters == nil {
+		return
+	}
+	for _, generation := range generations {
+		var taken uint64
+		switch err := counters.LookupAndDelete(&generation, &taken); {
+		case err == nil:
+			s.readsReclaimed.Add(taken)
+		case errors.Is(err, ebpf.ErrKeyNotExist):
+			// The admission took no read.
+		default:
+			s.readsUnreclaimed.Add(1)
+		}
+	}
 }
 
 // Dropped is how many ring-buffer reservations the kernel refused because the
@@ -2129,23 +2146,6 @@ func (s *Session) Unrecorded() (int64, error) { return s.stat(obpf.StatCallUnrec
 // stream.
 func (s *Session) Refused() (int64, error) { return s.stat(obpf.StatRefused) }
 
-// Consumed is the places this program took out of the production order and
-// delivered nothing for. Only two counters do that: a refused reservation (the
-// stamp precedes it) and the two refusal sites at the read boundary. Every
-// other counted refusal returns before stamping and takes no place, so a
-// consumer may not sum the counters it sees (obs_emit, bpf/ssl.bpf.h).
-func (s *Session) Consumed() (probe.Consumed, error) {
-	failed, err := s.stat(obpf.StatReserveFailed)
-	if err != nil {
-		return probe.Consumed{}, err
-	}
-	refused, err := s.stat(obpf.StatRefused)
-	if err != nil {
-		return probe.Consumed{}, err
-	}
-	return probe.Consumed{ReserveFailed: failed, Refused: refused}, nil
-}
-
 // callValue is the in-flight table's value as the program declares it (struct
 // call, bpf/ssl.bpf.h), with explicit padding: reading a wrong byte here would
 // report operations in flight that are not.
@@ -2187,8 +2187,10 @@ type callValue struct {
 	// would read Deferred at the same total size.
 	Deferred    uint8
 	Live        uint8
-	Reserved    [4]uint8
-	LivePadding [3]uint8
+	Nested      uint8
+	LivePadding [6]uint8
+	Occupancy   uint64
+	Number      uint64
 }
 
 // Executing is how many calls are still inside the observed library: live
@@ -2354,8 +2356,16 @@ func (s *Session) read() {
 			continue
 		}
 		// An instance admitted by the fork hook is recorded here only (Inventory):
-		// nothing in userspace wrote its grant.
-		s.recorded(s.selectionOf(event))
+		// nothing in userspace wrote its grant. An execution's end lets go of what
+		// was recorded for it.
+		if event.Kind == Exited {
+			s.endedAt(event)
+		} else {
+			if s.beforeRecord != nil {
+				s.beforeRecord(event)
+			}
+			s.recorded(s.selectionOf(event))
+		}
 		select {
 		case s.events <- event:
 			s.delivered.Add(1)
@@ -2379,6 +2389,7 @@ func (s *Session) selectionOf(event Event) admission.Selection {
 			Namespace:  event.Namespace,
 			PID:        event.NamespacePID,
 			Generation: event.Generation,
+			Start:      event.Start,
 		},
 		Kind:        event.Origin.Kind,
 		ObserverPID: event.PID,
@@ -2448,6 +2459,42 @@ func originOf(sample []byte) Origin {
 	}
 }
 
+// sequenceOf reads an event's place in its occupancy, appended after the origin.
+func sequenceOf(sample []byte) probe.Sequence {
+	order := binary.LittleEndian
+	return probe.Sequence{
+		Occupancy:      order.Uint64(sample[184:192]),
+		Number:         order.Uint64(sample[192:200]),
+		Unlocated:      order.Uint64(sample[200:208]),
+		Born:           sample[224] != 0,
+		Overlapped:     sample[225] != 0,
+		Dropped:        order.Uint64(sample[232:240]),
+		BeginUnlocated: order.Uint64(sample[240:248]),
+	}
+}
+
+// finalOf reads an ending's last numbers. An ending the program held no
+// occupancy for carries none, which is not a final of zero.
+func finalOf(sample []byte) probe.Final {
+	order := binary.LittleEndian
+	if order.Uint64(sample[184:192]) == 0 {
+		return probe.Final{}
+	}
+	return probe.Final{
+		Known:    true,
+		Sent:     probe.Terminal{Last: order.Uint64(sample[208:216]), InFlight: sample[226]&inFlightSent != 0},
+		Received: probe.Terminal{Last: order.Uint64(sample[216:224]), InFlight: sample[226]&inFlightReceived != 0},
+		Exited:   sample[227] != 0,
+	}
+}
+
+// The bits of an ending's in_flight, the program's direction codes (OBS_SENT,
+// OBS_RECEIVED).
+const (
+	inFlightSent     = 1
+	inFlightReceived = 2
+)
+
 // pairClocks reads the program's clock and the wall clock once and returns the
 // wall instant of the first's zero, bounded by the gap between the readings;
 // taken at Attach so that gap is paid once.
@@ -2481,6 +2528,7 @@ func (s *Session) decode(sample []byte) (Event, bool) {
 			Inode:  order.Uint64(sample[40:48]),
 		},
 		Generation:   admission.Generation(order.Uint64(sample[24:32])),
+		Start:        birth(order.Uint64(sample[248:256])),
 		PID:          int32(order.Uint32(sample[56:60])),
 		TID:          int32(order.Uint32(sample[60:64])),
 		NamespacePID: int32(order.Uint32(sample[64:68])),
@@ -2494,7 +2542,11 @@ func (s *Session) decode(sample []byte) (Event, bool) {
 		Measured:     sample[82] != 0,
 		Endpoints:    s.endpointsOf(sample),
 		Origin:       originOf(sample),
+		Sequence:     sequenceOf(sample),
 		At:           time.Now(),
+	}
+	if event.Kind == Closed {
+		event.Final = finalOf(sample)
 	}
 	switch sample[80] {
 	case 1:

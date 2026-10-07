@@ -86,6 +86,46 @@ func independentWithdrawal(t *testing.T, session *ebpf.Session, instance admissi
 	}
 }
 
+// independentLetGo is the session once an admitted execution has ended: it no
+// longer holds or reports the admission, and counts it as ended under its
+// target. The end reaches the session through the ring, so the ring is drained
+// until it has.
+func independentLetGo(t *testing.T, session *ebpf.Session, instance admission.Instance) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		_ = drain(session, 50*time.Millisecond)
+		known := 0
+		for _, one := range session.Inventory() {
+			if one.Instance.Same(instance) {
+				known++
+			}
+		}
+		if known == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the ended admission is still held %d times in the inventory", known)
+		}
+	}
+	ended := 0
+	for _, one := range session.EndedCounts() {
+		ended += one.Count
+	}
+	if ended != 1 {
+		t.Errorf("%d admissions are counted as ended, want the one whose execution ended", ended)
+	}
+	gone, err := session.Withdrawn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, one := range gone {
+		if one.Selection.Instance.Same(instance) {
+			t.Errorf("an admission let go of is still reported as withdrawn: %+v", one)
+		}
+	}
+}
+
 func TestAnExecingChildKeepsRunningWhileItsWithdrawalIsReported(t *testing.T) {
 	// This child belongs to the test supervisor. Its successful exec returns
 	// to the command loop, so no parent reaps it before the withdrawal reading.
@@ -149,5 +189,5 @@ func TestAnExecingChildKeepsRunningWhileItsWithdrawalIsReported(t *testing.T) {
 	if err := child.command.Wait(); err != nil {
 		t.Fatalf("whole-process exit control: %v", err)
 	}
-	independentWithdrawal(t, session, admitted, ebpf.ExecutionEnded)
+	independentLetGo(t, session, admitted)
 }

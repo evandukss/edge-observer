@@ -119,7 +119,7 @@ func TestConnectionOwnsNestedRecordsAndChargesLengths(t *testing.T) {
 	}
 }
 
-func TestSharedBoundRefusesWholeRecordAndStaysExhausted(t *testing.T) {
+func TestSharedBoundRefusesWholeRecordAndRecoversAfterRelease(t *testing.T) {
 	for _, kind := range []string{"fragment", "connection"} {
 		t.Run(kind, func(t *testing.T) {
 			cost := fragmentBytes("abc")
@@ -157,11 +157,16 @@ func TestSharedBoundRefusesWholeRecordAndStaysExhausted(t *testing.T) {
 				t.Fatal("accepted control disappeared")
 			}
 			e.Release()
-			if err := s.Write(fragment.Record{}); !errors.Is(err, intake.ErrLimit) {
-				t.Fatalf("exhaustion recovered after release: %v", err)
+			if err := s.Write(fragment.Record{}); err != nil {
+				t.Fatalf("released capacity stayed unavailable: %v", err)
 			}
-			if s.Stats().Bytes != 0 || s.Take() != nil {
-				t.Fatal("refusal retained data")
+			if next := s.Take(); next == nil {
+				t.Fatal("fresh record was not retained")
+			} else {
+				next.Release()
+			}
+			if s.Stats().Bytes != 0 {
+				t.Fatal("record release leaked bytes")
 			}
 		})
 	}

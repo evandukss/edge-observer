@@ -130,13 +130,12 @@ func TestP3T9ChannelToRingSaturationAfterCapture(t *testing.T) {
 }
 
 type p3t9HeldCallbacks struct {
-	retirement bool
-	armed      atomic.Bool
-	entered    chan connection.Ending
-	release    chan struct{}
-	witness    chan struct{}
-	once       sync.Once
-	marker     sync.Once
+	armed   atomic.Bool
+	entered chan connection.Ending
+	release chan struct{}
+	witness chan struct{}
+	once    sync.Once
+	marker  sync.Once
 }
 
 func (s *p3t9HeldCallbacks) unblock() { s.once.Do(func() { close(s.release) }) }
@@ -144,39 +143,15 @@ func (s *p3t9HeldCallbacks) Write(r fragment.Record) error {
 	if strings.Contains(string(r.Payload), "peer-confirmed:/before-0:end") {
 		s.marker.Do(func() { close(s.witness) })
 	}
-	if !s.retirement && s.armed.CompareAndSwap(true, false) {
+	if s.armed.CompareAndSwap(true, false) {
 		s.entered <- connection.EndingUnset
 		<-s.release
 	}
 	return nil
 }
-func (s *p3t9HeldCallbacks) Connection(r connection.Record) error {
-	if s.retirement && s.armed.CompareAndSwap(true, false) {
-		s.entered <- r.How
-		<-s.release
-	}
-	return nil
-}
+func (s *p3t9HeldCallbacks) Connection(connection.Record) error { return nil }
 
-// Inject exactly one missing production stamp AFTER a real captured control.
-// The remaining delivery is the production adapter -> capture -> callback.
-// The injected gap is not described as measured kernel loss.
-type p3t9GapSink struct {
-	capture *capture.Session
-	gap     atomic.Bool
-	offset  uint64 // delivery goroutine alone owns this field
-}
-
-func (s *p3t9GapSink) Transfer(v probe.Transfer) {
-	if s.gap.CompareAndSwap(true, false) {
-		s.offset++
-	}
-	v.Stamp += s.offset
-	s.capture.Transfer(v)
-}
-func (s *p3t9GapSink) Closed(v probe.Connection) { v.Stamp += s.offset; s.capture.Closed(v) }
-
-func p3t9SinkWithdrawal(t *testing.T, retirement bool) {
+func p3t9SinkWithdrawal(t *testing.T) {
 	t.Helper()
 	for _, hold := range []bool{false, true} {
 		name := "free_callback_control"
@@ -196,14 +171,13 @@ func p3t9SinkWithdrawal(t *testing.T, retirement bool) {
 			}
 			actor := independentActor(t, independentLossSource(1), port)
 			p := loaded(t, int32(actor.command.Process.Pid))
-			callbacks := &p3t9HeldCallbacks{retirement: retirement, entered: make(chan connection.Ending, 1), release: make(chan struct{}), witness: make(chan struct{})}
+			callbacks := &p3t9HeldCallbacks{entered: make(chan connection.Ending, 1), release: make(chan struct{}), witness: make(chan struct{})}
 			c := capture.Recording(callbacks, callbacks)
-			sink := &p3t9GapSink{capture: c}
 			g, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 1000})
 			if err != nil {
 				t.Fatal(err)
 			}
-			live, err := attach.NeweBPF(process.Approval{}).Attach(probe.Request{Processes: []process.Process{p}, Admit: authorise(p), DeliveryGate: g}, sink)
+			live, err := attach.NeweBPF(process.Approval{}).Attach(probe.Request{Processes: []process.Process{p}, Admit: authorise(p), DeliveryGate: g}, c)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -229,15 +203,9 @@ func p3t9SinkWithdrawal(t *testing.T, retirement bool) {
 			if !hold {
 				callbacks.unblock()
 			}
-			if retirement {
-				sink.gap.Store(true)
-			}
 			command('H')
 			select {
-			case ending := <-callbacks.entered:
-				if retirement && ending != connection.EndingUnobserved {
-					t.Fatalf("held ordinary close instead of interruption retirement: %v", ending)
-				}
+			case <-callbacks.entered:
 			case <-time.After(3 * time.Second):
 				t.Fatal("named callback was not reached")
 			}
@@ -270,16 +238,12 @@ func p3t9SinkWithdrawal(t *testing.T, retirement bool) {
 			if c.Stats().Records < 2 {
 				t.Fatal("free/released callback never completed useful capture")
 			}
-			if retirement && (c.Stats().Interrupted != 1 || c.Stats().Lost != 1) {
-				t.Fatalf("injected retirement was not exactly one missing stamp: %+v", c.Stats())
-			}
 			if state := g.Snapshot(); state.Reason != "" {
 				t.Fatalf("different fault decided run: %+v", state)
 			}
-			t.Logf("retirement=%v held=%v peer_exchanges=%d captured_records=%d", retirement, hold, calls.Load(), c.Stats().Records)
+			t.Logf("held=%v peer_exchanges=%d captured_records=%d", hold, calls.Load(), c.Stats().Records)
 		})
 	}
 }
 
-func TestP3T9FragmentSinkAndKernelWithdrawal(t *testing.T)     { p3t9SinkWithdrawal(t, false) }
-func TestP3T9InterruptionSinkAndKernelWithdrawal(t *testing.T) { p3t9SinkWithdrawal(t, true) }
+func TestP3T9FragmentSinkAndKernelWithdrawal(t *testing.T) { p3t9SinkWithdrawal(t) }

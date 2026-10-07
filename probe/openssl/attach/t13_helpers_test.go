@@ -81,7 +81,7 @@ type t13Message struct {
 func t13Messages(t *testing.T, directory string) []t13Message {
 	t.Helper()
 	var messages []t13Message
-	err := processing.ReadArtifacts(os.DirFS(directory), func(artifact processing.Artifact) error {
+	err := processing.ReadArtifactFiles(os.DirFS(filepath.Dir(filepath.Dir(directory))), []string{processing.ArtifactName}, filepath.Base(directory), func(artifact processing.Artifact) error {
 		// Said per record, so a caller finding nothing can see what the output did hold.
 		if truncated := artifact.ReconstructionTruncation; truncated != nil {
 			t.Logf("approved %s record of pid %d connection %s is truncated: %+v", artifact.Route.Kind,

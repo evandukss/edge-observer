@@ -16,7 +16,8 @@ import (
 // where the account carries it ([] for array positions, * for map keys): a
 // contract path or the reason it is not carried.
 var represented = map[string]string{
-	".version": "account", ".kind": "moment", ".session": "session", ".at": "at.value",
+	".log_destinations.*": "log_destinations.*",
+	".version":            "account", ".kind": "moment", ".session": "session", ".at": "at.value",
 	".policy.revision":   "provenance.configuration.references[].revision",
 	".policy.generation": "provenance.configuration.references[].generation",
 
@@ -41,6 +42,7 @@ var represented = map[string]string{
 	".exclusions[].number":            "scope.exclusions[].number",
 	".limits[]":                       "scope.limits[]",
 
+	".processes_ended":                    "scope.placement.ended",
 	".processes[].PID":                    "scope.placement.processes[].pid",
 	".processes[].StartTime":              "scope.placement.processes[].birth.value",
 	".processes[].Runtime":                "scope.placement.processes[].runtime",
@@ -69,9 +71,11 @@ var represented = map[string]string{
 	".seen.early": "capture.seen.early", ".seen.rejected": "capture.seen.rejected",
 	".seen.unattributed": "capture.seen.unattributed", ".seen.endings_unmatched": "capture.seen.endings_unmatched",
 	".seen.connections_unrecorded": "capture.seen.connections_unrecorded",
-	".seen.disordered":             "capture.ordering.disordered", ".seen.unstamped": "capture.ordering.unstamped",
-	".seen.tolerated": "capture.ordering.tolerated", ".seen.lost": "capture.ordering.lost",
-	".seen.interrupted": "capture.ordering.retired", ".seen.unexplained": "capture.ordering.unexplained",
+	".seen.lost":                   "capture.ordering.lost", ".seen.cut": "capture.ordering.cut",
+	".seen.retired": "capture.ordering.retired", ".seen.unsequenced": "capture.ordering.unsequenced",
+	".seen.unlocated":      "capture.ordering.unlocated",
+	".seen.gate_refused":   "capture.ordering.gate_refused",
+	".seen.intake_refused": "capture.ordering.intake_refused",
 
 	".loss.known": "capture.loss.state", ".loss.why": "capture.loss.why",
 	".loss.dropped": "capture.loss.dropped", ".loss.unmatched": "capture.loss.unmatched",
@@ -109,6 +113,8 @@ var represented = map[string]string{
 	".processing.gate_reason":         "processing.aggregate.gate_reason",
 	".processing.processing_failures": "processing.aggregate.processing_failures",
 	".processing.output_failures":     "processing.aggregate.output_failures",
+	".processing.connections_cut":     "processing.aggregate.connections_cut",
+	".processing.input_cut":           "processing.aggregate.input_cut",
 	".processing.authorized":          "processing.aggregate.authorized",
 	".processing.written":             "processing.aggregate.written",
 	".processing.exchange_ids":        "processing.exchange_ids",
@@ -157,6 +163,12 @@ var represented = map[string]string{
 // Facts that recur at several places in the operational account, written once:
 // every instance, and every capability.
 func init() {
+	for _, pair := range [][2]string{{".log_destinations.*", "log_destinations.*"}, {".log_delivery", "log_delivery"}, {".processing.delivery", "processing.aggregate.delivery"}, {".processing.extensions[].delivery", "processing.extensions.*.delivery"}} {
+		for _, field := range []string{"authorized", "written", "failed", "dropped", "pending", "discarded", "bytes", "pending_bytes", "high_water_bytes", "limit_bytes"} {
+			represented[pair[0]+"."+field] = pair[1] + "." + field
+		}
+	}
+
 	instances := map[string]string{
 		".targets[].roots[]":                    "scope.targets[].roots[]",
 		".targets[].descendants[]":              "scope.targets[].existing_descendants[]",
@@ -195,6 +207,7 @@ func init() {
 			represented[from+"."+name] = into + "." + name
 		}
 		represented[from+".unobserved[]"] = into + ".unobserved[]"
+		represented[from+".unprobed[]"] = into + ".unprobed[]"
 		represented[from+".withheld[].claim"] = into + ".withheld[].claim"
 		represented[from+".withheld[].member"] = into + ".withheld[].member"
 		represented[from+".withheld[].reason"] = into + ".withheld[].reason"
@@ -330,7 +343,7 @@ func TestEveryFactTheOperationalAccountHoldsIsCarried(t *testing.T) {
 	carried := map[string]bool{}
 	for _, truth := range []bool{true, false} {
 		account := filled(t, truth)
-		for leaf := range leaves(t, account, ".refused.reasons", ".seal.counters", ".processing.extensions[].failed_by",
+		for leaf := range leaves(t, account, ".log_destinations", ".refused.reasons", ".seal.counters", ".processing.extensions[].failed_by",
 			".processing.extensions[].retired_by", ".processing.extensions[].derived_refused_by") {
 			source[leaf] = true
 		}
@@ -338,7 +351,7 @@ func TestEveryFactTheOperationalAccountHoldsIsCarried(t *testing.T) {
 		if err != nil {
 			t.Fatalf("projecting the filled account (truth %v): %v", truth, err)
 		}
-		for leaf := range leaves(t, projected, ".capture.refused.reasons", ".seal.counters", ".processing.extensions",
+		for leaf := range leaves(t, projected, ".log_destinations", ".capture.refused.reasons", ".seal.counters", ".processing.extensions",
 			".processing.extensions.*.failed_by", ".processing.extensions.*.retired_by",
 			".processing.extensions.*.derived_refused_by") {
 			carried[strings.TrimPrefix(leaf, ".")] = true

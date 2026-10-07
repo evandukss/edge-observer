@@ -22,6 +22,9 @@ const modulePath = "github.com/evandukss/edge-observer"
 var reachable = []string{
 	"admission",
 	"fragment",
+	// Names only: the delivery gate's slot and the readings of what is held, which
+	// package probe's records carry.
+	"held",
 	"preflight",
 	"probe",
 	"probe/openssl",

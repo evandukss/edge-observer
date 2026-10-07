@@ -21,6 +21,20 @@ func settledRelease() probe.ReleaseEvidence {
 	return probe.ReleaseEvidence{InputsSettled: true, LifecycleSettled: true}
 }
 
+func assertWithdrawal(t *testing.T, g *probe.DeliveryGate, want bool) {
+	t.Helper()
+	select {
+	case <-g.Withdrawal():
+		if !want {
+			t.Error("eligible control requested withdrawal")
+		}
+	default:
+		if want {
+			t.Error("invalidated gate did not request withdrawal")
+		}
+	}
+}
+
 func TestDeliveryGateValidatesItsOnlyOption(t *testing.T) {
 	if _, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{}); err == nil {
 		t.Fatal("zero event allowance accepted")
@@ -61,7 +75,6 @@ func TestDeliveryGateFaultsRevokePendingButKeepPriorAuthorization(t *testing.T) 
 	}{
 		{"unknown length", probe.DeliveryTransfer, false, 10, 2, true, probe.GateUnknownLength},
 		{"unknown kind", 255, true, 10, 2, true, probe.GateUnknownKind},
-		{"refused tail", probe.DeliveryClose, false, 1, 1, false, probe.GateInputLimit},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := deliveryGate(t, tc.limit, nil)

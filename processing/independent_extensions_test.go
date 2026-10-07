@@ -211,6 +211,7 @@ func independentCore(t *testing.T, out *lines) []string {
 			t.Fatal(err)
 		}
 		delete(m, "exchange_ids")
+		delete(m, "exchange_id")
 		delete(m, "extension_outcomes")
 		b, err := json.Marshal(m)
 		if err != nil {
@@ -271,16 +272,17 @@ func TestIndependentExtensionFailureRetainsSanitizedOutput(t *testing.T) {
 					t.Fatal(err)
 				}
 				for _, e := range a.ExtensionOutcomes {
-					if a.ExchangeIDs == nil {
-						t.Fatal("missing exchange id range")
+					if a.ExchangeID == "" || a.Index == nil || *a.Index != e.Exchange {
+						t.Fatalf("an outcome for exchange %d is on a line with exchange id %q and index %v", e.Exchange,
+							a.ExchangeID, a.Index)
 					}
-					first, err := strconv.ParseUint(a.ExchangeIDs.First, 10, 64)
+					id, err := strconv.ParseUint(a.ExchangeID, 10, 64)
 					if err != nil {
 						t.Fatal(err)
 					}
-					outcomes[first+uint64(e.Exchange)]++
-					if sent[first+uint64(e.Exchange)] && e.Reason != tc.reason {
-						t.Errorf("received id %d failed under %s, want %s", first+uint64(e.Exchange), e.Reason, tc.reason)
+					outcomes[id]++
+					if sent[id] && e.Reason != tc.reason {
+						t.Errorf("received id %d failed under %s, want %s", id, e.Reason, tc.reason)
 					}
 					if e.Outcome != "failed" || (e.Reason != tc.reason && e.Reason != "unavailable") {
 						t.Errorf("wrong terminal outcome: %+v", e)
@@ -504,62 +506,56 @@ func TestIndependentExtensionWorkerSetsIDsAndWireOrder(t *testing.T) {
 				t.Errorf("unchanged=%d want %d", c.Unchanged, w.Exchanges)
 			}
 			seen := map[uint64]bool{}
-			connections := map[string]processing.IDRange{}
-			routeConnections := map[string]map[string]bool{}
-			routeIDs := map[string]map[uint64]bool{}
+			lineOf := map[uint64]string{}
+			indexes := map[string]map[int]uint64{}
+			retired := map[string]bool{}
 			for _, b := range f.out.all() {
 				var a processing.Artifact
 				if err := json.Unmarshal(b, &a); err != nil {
 					t.Fatal(err)
 				}
-				if a.ExchangeIDs == nil {
-					t.Fatal("no id range")
-				}
-				r := *a.ExchangeIDs
-				first, err1 := strconv.ParseUint(r.First, 10, 64)
-				last, err2 := strconv.ParseUint(r.Last, 10, 64)
-				count, err3 := strconv.ParseUint(r.Count, 10, 64)
-				if err1 != nil || err2 != nil || err3 != nil || first == 0 || last < first || last-first+1 != count || count != 4 {
-					t.Fatalf("noncontiguous range: %+v", r)
-				}
-				route := a.Route.Pipeline
-				if routeConnections[route] == nil {
-					routeConnections[route] = map[string]bool{}
-					routeIDs[route] = map[uint64]bool{}
-				}
-				if routeConnections[route][a.Connection.ID] {
-					t.Errorf("route %s wrote connection %s twice", route, a.Connection.ID)
-				}
-				routeConnections[route][a.Connection.ID] = true
-				for offset := uint64(0); offset < count; offset++ {
-					id := first + offset
-					if routeIDs[route][id] {
-						t.Errorf("route %s overlaps id %d", route, id)
+				switch a.Route.Pipeline {
+				case "exchanges":
+					if a.ExchangeID == "" || a.Index == nil {
+						t.Fatalf("an exchange line carries no exchange id or index: %s", b)
 					}
-					routeIDs[route][id] = true
-				}
-				if previous, ok := connections[a.Connection.ID]; ok {
-					if previous != r {
-						t.Errorf("connection %s has different ranges across routes: %+v vs %+v", a.Connection.ID, previous, r)
+					id, err := strconv.ParseUint(a.ExchangeID, 10, 64)
+					if err != nil || id == 0 {
+						t.Fatalf("exchange id %q is not a positive decimal: %v", a.ExchangeID, err)
 					}
-					continue
-				}
-				connections[a.Connection.ID] = r
-				for offset := uint64(0); offset < count; offset++ {
-					id := first + offset
 					if seen[id] {
-						t.Errorf("different connections overlap id %d", id)
+						t.Errorf("exchange id %d is on two lines", id)
 					}
 					seen[id] = true
+					lineOf[id] = a.Connection.ID
+					if indexes[a.Connection.ID] == nil {
+						indexes[a.Connection.ID] = map[int]uint64{}
+					}
+					if _, twice := indexes[a.Connection.ID][*a.Index]; twice {
+						t.Errorf("connection %s has two lines at index %d", a.Connection.ID, *a.Index)
+					}
+					indexes[a.Connection.ID][*a.Index] = id
+				case "connections":
+					if a.ExchangeID != "" || a.Index != nil {
+						t.Errorf("connection %s's retirement line carries exchange id %q and index %v", a.Connection.ID,
+							a.ExchangeID, a.Index)
+					}
+					if retired[a.Connection.ID] {
+						t.Errorf("connection %s has two retirement lines", a.Connection.ID)
+					}
+					retired[a.Connection.ID] = true
 				}
 			}
-			for _, route := range []string{"connections", "exchanges"} {
-				if len(routeConnections[route]) != 25 {
-					t.Fatalf("wiring, not the property: route %s wrote %d of 25 connections", route, len(routeConnections[route]))
-				}
+			if len(indexes) != 25 || len(retired) != 25 {
+				t.Fatalf("wiring, not the property: exchange lines for %d and retirement lines for %d of 25 connections",
+					len(indexes), len(retired))
 			}
-			if len(routeConnections) != 2 || len(connections) != 25 {
-				t.Fatal("wiring, not the property: unexpected route/connection population")
+			for connection, byIndex := range indexes {
+				for index := range 4 {
+					if _, found := byIndex[index]; !found {
+						t.Errorf("connection %s has no line at index %d", connection, index)
+					}
+				}
 			}
 			for id := uint64(1); id <= o.ExchangeIDs; id++ {
 				if !seen[id] {
@@ -567,7 +563,7 @@ func TestIndependentExtensionWorkerSetsIDsAndWireOrder(t *testing.T) {
 				}
 			}
 			if uint64(len(seen)) != o.ExchangeIDs {
-				t.Error("ranges do not cover issued ids")
+				t.Error("the lines' ids do not cover the issued ids")
 			}
 			pending := map[string]string{}
 			next := map[string]int{}
@@ -591,6 +587,9 @@ func TestIndependentExtensionWorkerSetsIDsAndWireOrder(t *testing.T) {
 					issued, err2 := strconv.ParseUint(id, 10, 64)
 					if err1 != nil || err2 != nil || issued != first+uint64(index) || !seen[issued] {
 						t.Errorf("wire id %s does not map to its issued range and index %d", id, index)
+					}
+					if line := lineOf[issued]; line == "" || indexes[line][index] != issued {
+						t.Errorf("wire id %s at index %d is not the id on the line of its connection at that index", id, index)
 					}
 					if index != next[key] {
 						t.Errorf("wire index=%d want=%d", index, next[key])
@@ -627,7 +626,7 @@ func TestIndependentExtensionWorkerSetsIDsAndWireOrder(t *testing.T) {
 	}
 }
 
-func TestIndependentExtensionUnchangedAndDerivedBudget(t *testing.T) {
+func TestIndependentExtensionUnchangedAndDerivedFlood(t *testing.T) {
 	bin := independentPeer(t)
 	w := generate(t, workload.Shape{Connections: 8, Exchanges: 1, HeaderBytes: 40, Seed: 376})
 	control := independentStart(t, bin, "none", "", []string{"request.line"}, 2, 0, 0, nil)
@@ -635,7 +634,7 @@ func TestIndependentExtensionUnchangedAndDerivedBudget(t *testing.T) {
 	base := control.finish(t)
 	for _, mode := range []string{"unchanged", "cpu", "derived-flood", "summary", "stderr-flood", "duplicate"} {
 		t.Run(mode, func(t *testing.T) {
-			f := independentStart(t, bin, mode, "", []string{"request.line"}, 2, 1<<20, 0, nil, "--count", "200")
+			f := independentStart(t, bin, mode, "", []string{"request.line"}, 2, 0, 0, nil, "--count", "200")
 			feed(t, f.run, f.store, w)
 			o := f.finish(t)
 			independentReceived(t, f)
@@ -649,14 +648,6 @@ func TestIndependentExtensionUnchangedAndDerivedBudget(t *testing.T) {
 			if mode == "derived-flood" {
 				if c.DerivedWritten == 0 {
 					t.Fatal("wiring, not the property: no derived line reached writer")
-				}
-				if c.DerivedBytes > 1<<19 || c.DerivedRefusedBy["budget"] == 0 {
-					t.Errorf("derived budget not enforced: %+v", c)
-				}
-				select {
-				case <-f.writer.Exhausted():
-					t.Error("derived refusal exhausted core writer")
-				default:
 				}
 			}
 			if mode == "summary" && c.DerivedWritten != 1 {

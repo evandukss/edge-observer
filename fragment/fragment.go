@@ -20,6 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/evandukss/edge-observer/held"
 )
 
 // Direction is which way a fragment's bytes crossed the TLS boundary, seen from
@@ -86,10 +88,28 @@ type Record struct {
 	// the length the caller asked for.
 	Length uint32
 
+	// Produced is this fragment's number among its connection's transfers in its
+	// direction, as the producer numbered them (probe.Sequence.Number), from one.
+	// Consecutive fragments of a direction carry consecutive numbers apart from
+	// the Empties between them; any other number skipped between two is a
+	// transfer produced and never delivered, and the stream must not be read
+	// across it. Zero where the producer numbered nothing.
+	Produced uint64
+
+	// Empties is how many transfers of this direction the producer numbered
+	// after the previous fragment and before this one that moved no bytes, such
+	// as a read that would block: each took a number and has no fragment.
+	Empties uint64
+
 	// Payload is what capture kept: Length bytes or a leading part of them.
 	Payload []byte
 
 	At time.Time
+
+	// Slot is the delivery gate's slot for the event this record came from,
+	// handed to the store that retains the record; nil where there was none.
+	Slot held.Slot
+	Loss *held.Loss `json:"-"`
 }
 
 // Stream is the stream this record belongs to.

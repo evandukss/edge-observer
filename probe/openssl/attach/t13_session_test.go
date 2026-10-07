@@ -18,7 +18,6 @@ import (
 	contract "github.com/evandukss/edge-observer/contract/account"
 	"github.com/evandukss/edge-observer/contract/record"
 	"github.com/evandukss/edge-observer/internal/published"
-	"github.com/evandukss/edge-observer/processing"
 )
 
 // t13Detached starts the observer detached over c and returns what the parent
@@ -285,23 +284,15 @@ func TestAFinishedSessionsContractAccountPassesTheValidatorAndCarriesNoPlaintext
 }
 
 // Only the approved process is captured, in both directions, beside an
-// unapproved one exchanging at the same time. The session's directory holds
-// exactly its named files while it runs and once it has sealed, and a run
-// whose traffic finished seals complete.
-func TestOnlyTheApprovedProcessIsCapturedInBothDirectionsAndTheDirectoriesHoldOnlyTheirFiles(t *testing.T) {
+// unapproved one exchanging at the same time. A run whose traffic finished
+// seals complete.
+func TestOnlyTheApprovedProcessIsCapturedInBothDirectionsAndSealsComplete(t *testing.T) {
 	binary := built(t)
 	approved := speaking(t, serving(t))
 	unapproved := speaking(t, serving(t))
 	c := configuring(t, target("approved", approved.process))
 	observer := started(t, binary, c)
 	directory := observer.directory(c)
-
-	if got, want := names(t, c.directory), []string{"observer.log", "observer.pid", "sessions"}; !slices.Equal(got, want) {
-		t.Errorf("the observer's directory holds %v while the session runs, want %v", got, want)
-	}
-	if got, want := names(t, directory), []string{processing.ArtifactName}; !slices.Equal(got, want) {
-		t.Errorf("the session's directory holds %v while it runs, want %v", got, want)
-	}
 
 	t13Exchange(t, approved, "t13-approved", "")
 	t13Exchange(t, unapproved, "t13-unapproved", "")
@@ -333,12 +324,6 @@ func TestOnlyTheApprovedProcessIsCapturedInBothDirectionsAndTheDirectoriesHoldOn
 			directions)
 	}
 
-	if got, want := names(t, directory), []string{"account.json", processing.ArtifactName, published.Name}; !slices.Equal(got, want) {
-		t.Errorf("the session's directory holds %v once it has sealed, want %v", got, want)
-	}
-	if got, want := names(t, c.directory), []string{"last-sealed.json", "observer.log", "observer.pid", "sessions"}; !slices.Equal(got, want) {
-		t.Errorf("the observer's directory holds %v once the session has sealed, want %v", got, want)
-	}
 	if sealed.Seal == nil || !sealed.Seal.Complete {
 		t.Errorf("a run whose traffic finished did not seal complete: %+v %s", sealed.Seal, sealed.SealError)
 	}

@@ -32,7 +32,8 @@ type Process struct {
 
 	// Arguments is the process's argv, argv[0] first, as the kernel holds it now,
 	// including a rewrite and its trailing padding; matching strips the padding.
-	Arguments []string
+	Arguments        []string
+	ArgumentEvidence ArgumentEvidence `json:",omitempty"`
 
 	// Cgroup is the process's path on the unified (v2) hierarchy from
 	// /proc/<pid>/cgroup, empty where none. A process cannot rewrite it, and it is
@@ -208,9 +209,16 @@ func readProcess(root string, pid int32) (Process, error) {
 		return Process{}, unreadableLink{err}
 	}
 
-	cmdline, err := os.ReadFile(filepath.Join(directory, "cmdline"))
-	if err != nil {
-		return Process{}, err
+	cmdline, cmdlineErr := os.ReadFile(filepath.Join(directory, "cmdline"))
+	evidence := argumentEvidence(cmdline, cmdlineErr)
+	// Bind argv to the same birth and executable on both sides of the read.
+	// An inconsistent read remains a process, but cannot decide argument rules.
+	after, statErr := os.ReadFile(filepath.Join(directory, "stat"))
+	_, afterStart, _, parseErr := parseStat(after)
+	afterExe, exeErr := os.Readlink(filepath.Join(directory, "exe"))
+	if statErr != nil || parseErr != nil || exeErr != nil ||
+		afterStart != startTime || afterExe != executable {
+		evidence = ArgumentsUndetermined
 	}
 
 	// The cgroup is read last and may be absent: without a unified hierarchy a
@@ -229,16 +237,17 @@ func readProcess(root string, pid int32) (Process, error) {
 	numbering, namespacePID := parseNumbering(status)
 
 	return Process{
-		Threads:      parseThreads(status),
-		PID:          pid,
-		PPID:         ppid,
-		StartTime:    startTime,
-		Executable:   executable,
-		Arguments:    parseCmdline(cmdline),
-		Cgroup:       parseCgroup(cgroup),
-		Numbering:    numbering,
-		Namespace:    namespaceOf(directory),
-		NamespacePID: namespacePID,
+		Threads:          parseThreads(status),
+		PID:              pid,
+		PPID:             ppid,
+		StartTime:        startTime,
+		Executable:       executable,
+		Arguments:        parseCmdline(cmdline),
+		ArgumentEvidence: evidence,
+		Cgroup:           parseCgroup(cgroup),
+		Numbering:        numbering,
+		Namespace:        namespaceOf(directory),
+		NamespacePID:     namespacePID,
 	}, nil
 }
 
@@ -316,12 +325,20 @@ func parseCgroup(content []byte) string {
 // the process name.
 const statFieldsBeforeState = 2
 
-// statState, statPPID and statStartTime are proc(5)'s one-based field numbers.
+// statState, statPPID, statFlags and statStartTime are proc(5)'s one-based
+// field numbers.
 const (
 	statState     = 3
 	statPPID      = 4
+	statFlags     = 9
 	statStartTime = 22
 )
+
+// taskExiting is PF_EXITING, the bit of the stat flags word for which proc(5)
+// defers to include/linux/sched.h. The kernel sets it in do_exit, which does
+// not return, and never clears it, so a task carrying it never runs its own
+// code again.
+const taskExiting = 0x00000004
 
 // parseStat reads the parent pid, start time and state character from
 // /proc/<pid>/stat, returning the state uninterpreted (TaskState classifies
@@ -353,6 +370,26 @@ func parseStat(stat []byte) (ppid int32, startTime uint64, state byte, err error
 		return 0, 0, state, fmt.Errorf("start time: %w", err)
 	}
 	return int32(ppid64), startTime, state, nil
+}
+
+// parseExiting reads whether a task has begun exiting from the flags word of
+// /proc/<pid>/stat. It is kept apart from parseStat so that a flags word it
+// cannot read fails only the liveness reading, the one reader that needs it.
+func parseExiting(stat []byte) (bool, error) {
+	end := bytes.LastIndexByte(stat, ')')
+	if end < 0 {
+		return false, errors.New("no process name")
+	}
+	fields := strings.Fields(string(stat[end+1:]))
+	at := statFlags - statFieldsBeforeState - 1
+	if len(fields) <= at {
+		return false, fmt.Errorf("%d fields after the process name, want at least %d", len(fields), at+1)
+	}
+	flags, err := strconv.ParseUint(fields[at], 10, 64)
+	if err != nil {
+		return false, fmt.Errorf("flags: %w", err)
+	}
+	return flags&taskExiting != 0, nil
 }
 
 // parseCmdline splits /proc/<pid>/cmdline: argv with a NUL after every entry.
@@ -435,32 +472,39 @@ type Rule struct {
 }
 
 // Matches reports whether p meets every condition this rule names.
-func (r Rule) Matches(p Process) bool {
+func (r Rule) Matches(p Process) bool { return r.Decide(p) == MatchFound }
+
+// Decide checks known conditions before consulting argv, so an unrelated
+// executable with unreadable arguments does not make this rule indeterminate.
+func (r Rule) Decide(p Process) Decision {
 	if !r.conditions() {
-		return false
+		return NoMatch
 	}
 	if r.PID != nil && (p.PID != r.PID.PID || p.StartTime != r.PID.Start) {
-		return false
+		return NoMatch
 	}
 	if r.Executable != "" && r.Executable != p.Executable {
-		return false
+		return NoMatch
+	}
+	if r.Cgroup != "" && !under(r.Cgroup, p.Cgroup) {
+		return NoMatch
+	}
+	if r.Port != 0 && !r.listens(p) {
+		return NoMatch
 	}
 	if r.argumentsNamed() {
+		if p.ArgumentEvidence != ArgumentsKnown {
+			return Indeterminate
+		}
 		arguments := p.Arguments
 		if len(arguments) > 0 {
 			arguments = arguments[1:]
 		}
 		if !slices.Equal(unpadded(r.Arguments), unpadded(arguments)) {
-			return false
+			return NoMatch
 		}
 	}
-	if r.Cgroup != "" && !under(r.Cgroup, p.Cgroup) {
-		return false
-	}
-	if r.Port != 0 && !r.listens(p) {
-		return false
-	}
-	return true
+	return MatchFound
 }
 
 // conditions reports whether this rule names any condition at all.
@@ -679,7 +723,7 @@ func (a Approval) ApproveLibrary(buildID string, offsets map[string]uint64) erro
 // Observes reports whether p is approved in its own right; Select handles
 // ancestry.
 func (a Approval) Observes(p Process) bool {
-	return slices.ContainsFunc(a.Rules, func(rule Rule) bool { return rule.Matches(p) })
+	return a.Decide(p) == MatchFound
 }
 
 // Match is one rule and the processes it named in the table. Descendants
@@ -689,7 +733,8 @@ type Match struct {
 	Rule   Rule
 	Number int
 
-	Matched []Process
+	Matched      []Process
+	Undetermined []Process
 }
 
 // Matches is what each rule named in this table, in order, including rules
@@ -700,8 +745,11 @@ func (a Approval) Matches(t Table) []Match {
 	for i, rule := range a.Rules {
 		matches[i] = Match{Rule: rule, Number: i + 1}
 		for _, p := range t.processes {
-			if rule.Matches(p) {
+			switch rule.Decide(p) {
+			case MatchFound:
 				matches[i].Matched = append(matches[i].Matched, p)
+			case Indeterminate:
+				matches[i].Undetermined = append(matches[i].Undetermined, p)
 			}
 		}
 	}
@@ -712,6 +760,9 @@ func (a Approval) Matches(t Table) []Match {
 // descendants (a per-connection forking server transfers in its children). A
 // descendant of an unnamed process is not included.
 func (a Approval) Select(t Table) []Process {
+	if a.CheckArguments(t) != nil {
+		return nil
+	}
 	if len(a.Rules) == 0 {
 		return nil
 	}
@@ -725,9 +776,13 @@ func (a Approval) Select(t Table) []Process {
 
 	// Each process is walked up to a named one or the top, bounded by the table
 	// size since a racing read can hand back a dangling parent link.
+	forbidden := make(map[int32]bool)
+	for _, denial := range a.Denials(t) {
+		forbidden[denial.ObserverPID] = true
+	}
 	var selected []Process
 	for _, p := range t.processes {
-		if _, found := a.root(t, observed, p); found {
+		if _, found := a.root(t, observed, p); found && !forbidden[p.PID] {
 			selected = append(selected, p)
 		}
 	}

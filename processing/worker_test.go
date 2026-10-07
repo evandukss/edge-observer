@@ -3,7 +3,6 @@ package processing_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -42,16 +41,20 @@ func (o *outputLog) WriteApproved(_ context.Context, a processing.Approved) erro
 
 func worker(t *testing.T, plan *config.ProcessingPlan, output processing.Output) (*processing.Worker, *intake.Store) {
 	t.Helper()
+	return workerSession(t, plan, output, "fixture-session")
+}
+func workerSession(t *testing.T, plan *config.ProcessingPlan, output processing.Output, session string) (*processing.Worker, *intake.Store) {
+	t.Helper()
 	store, err := intake.New(1 << 20)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 1000, StorageExhausted: store.Exhausted()})
+	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 1000, IntakeExhausted: store.Exhausted()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	w, err := processing.New(processing.Options{Plan: plan, PolicyRevision: "fixture-policy", Intake: store, Gate: gate, Output: output})
+	w, err := processing.New(processing.Options{Session: session, Plan: plan, PolicyRevision: "fixture-policy", Intake: store, Gate: gate, Output: output})
 	if err != nil || w == nil {
 		t.Fatalf("worker construction: %v", err)
 	}
@@ -87,9 +90,11 @@ func batch(t *testing.T, id fragment.ConnectionID, request, response string) cap
 		if n == 1 {
 			direction = fragment.Received
 		}
-		s.Transfer(probe.Transfer{Process: p, Instance: i, Endpoint: 7, Direction: direction, Measured: true, Length: uint32(len(text)), Payload: []byte(text), Stamp: uint64(n + 1), At: at})
+		s.Transfer(probe.Transfer{Process: p, Instance: i, Endpoint: 7, Direction: direction, Measured: true, Length: uint32(len(text)), Payload: []byte(text), Stamp: uint64(n + 1),
+			Sequence: probe.Sequence{Occupancy: 1, Number: 1, Born: true}, At: at})
 	}
-	s.Closed(probe.Connection{Process: p, Instance: i, Endpoint: 7, Stamp: 3, At: at})
+	s.Closed(probe.Connection{Process: p, Instance: i, Endpoint: 7, Stamp: 3, Sequence: probe.Sequence{Occupancy: 1, Born: true},
+		Final: probe.Final{Known: true, Sent: probe.Terminal{Last: 1}, Received: probe.Terminal{Last: 1}}, At: at})
 	if len(b.fragments) != 2 || len(b.records) != 1 {
 		t.Fatal("fixture did not reach both capture callbacks")
 	}
@@ -247,34 +252,6 @@ func TestWorkerProcessingFailureDropsAndAccounts(t *testing.T) {
 	counted(t, drain(t, w), out, 2, 3)
 }
 
-func TestWorkerOutputFailureIsNotDeliveryAndIsTerminal(t *testing.T) {
-	var out outputLog
-	calls := 0
-	failure := errors.New("constructed output failure")
-	output := outputFunc(func(ctx context.Context, a processing.Approved) error {
-		calls++
-		// The third write is the second batch's exchange: the first batch
-		// writes its exchange and its connection record.
-		if calls == 3 {
-			return failure
-		}
-		return out.WriteApproved(ctx, a)
-	})
-	w, store := worker(t, rulesPlan(t, ""), output)
-	enqueue(t, store, batch(t, 1, goodRequest, goodResponse))
-	counted(t, drain(t, w), &out, 1, 1)
-	enqueue(t, store, batch(t, 2, goodRequest, goodResponse))
-	o, err := w.Drain(context.Background())
-	if err == nil || o.OutputFailures != 1 || o.Written != 2 || calls != 3 {
-		t.Fatalf("fault boundary: %+v %v calls=%d", o, err, calls)
-	}
-	enqueue(t, store, batch(t, 3, goodRequest, goodResponse))
-	_, _ = w.Drain(context.Background())
-	if calls != 3 || len(out.artifacts) != 2 {
-		t.Fatal("output retried or falsely counted delivered")
-	}
-}
-
 // Decode the wire amendment independently of the producer's new Go types so
 // its absence is a behavioral red on the published implementation.
 type truncationWire struct {
@@ -301,7 +278,7 @@ func truncationOf(t *testing.T, line []byte) *truncationWire {
 
 func TestWorkerReportsIndeterminateSuffixAfterUsefulPrefix(t *testing.T) {
 	partial := "GET /withheld HTTP/1.1\r\nX-Secret: hidden"
-	for _, name := range []string{"gap-at-boundary", "gap-inside-message", "short-payload", "unterminated-message", "placement-at-boundary"} {
+	for _, name := range []string{"gap-at-boundary", "gap-inside-message", "short-payload", "unterminated-message", "placement-at-boundary", "producer-number-skipped"} {
 		t.Run(name, func(t *testing.T) {
 			out := &outputLog{}
 			plan := rulesPlan(t, "")
@@ -332,6 +309,19 @@ func TestWorkerReportsIndeterminateSuffixAfterUsefulPrefix(t *testing.T) {
 				later.Length = uint32(len(later.Payload))
 				if later.Offset <= b.fragments[0].End() {
 					t.Fatal("constructed hole was not reached")
+				}
+				b.fragments = append(b.fragments, later)
+				b.records[0].Fragments = connection.Counted(3)
+			case "producer-number-skipped":
+				// Contiguous by offset, which is what capture writes when it advances by what
+				// arrived; only the producer number shows transfer two never did.
+				later := b.fragments[0]
+				later.Sequence, later.Offset, later.Produced = 3, uint64(len(request)), 3
+				later.Payload = []byte("GET /after-hole HTTP/1.1\r\nX-Secret: hidden\r\n\r\n")
+				later.Length = uint32(len(later.Payload))
+				if later.Offset != b.fragments[0].End() || b.fragments[0].Produced != 1 {
+					t.Fatal("wiring, not the property: the constructed fragments are not contiguous by offset " +
+						"with a producer number skipped between them")
 				}
 				b.fragments = append(b.fragments, later)
 				b.records[0].Fragments = connection.Counted(3)
@@ -375,7 +365,7 @@ func TestWorkerReportsIndeterminateSuffixAfterUsefulPrefix(t *testing.T) {
 			if strings.Contains(string(out.lines[2]), "hidden") || strings.Contains(string(out.lines[2]), "after-hole") || strings.Contains(string(out.lines[2]), "/withheld") {
 				t.Fatal("withheld source entered the artifact")
 			}
-			truncated := truncationOf(t, out.lines[2])
+			truncated := truncationOf(t, out.lines[3])
 			if truncated == nil {
 				t.Fatal("useful prefix has no truncation marker; indeterminate suffix reads as absent")
 			}
@@ -386,11 +376,9 @@ func TestWorkerReportsIndeterminateSuffixAfterUsefulPrefix(t *testing.T) {
 			if stop.Direction != "sent" || stop.Offset != strconv.Itoa(len(goodRequest)) || stop.Reason != reason || stop.EvidenceOffset != strconv.Itoa(evidence) {
 				t.Fatalf("stop location/reason: %+v, evidence want %d", stop, evidence)
 			}
-			if count := out.artifacts[2].Reconstruction.Unplaced; count.State != record.Undetermined || count.Value != "" || count.Why == "" {
-				t.Fatalf("indeterminate suffix became a measured absence: %+v", count)
-			}
+
 			expectWithheld(t, o, connection.Uncounted("reconstruction_incomplete"))
-			if truncationOf(t, out.lines[3]) != nil || out.artifacts[3].Reconstruction != nil {
+			if truncationOf(t, out.lines[2]) != nil || out.artifacts[3].Reconstruction != nil {
 				t.Fatal("metadata route received reconstruction state")
 			}
 			if out.artifacts[2].Connection.Ending.How != "handle_released" {

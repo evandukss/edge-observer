@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/evandukss/edge-observer/capture"
 	"github.com/evandukss/edge-observer/connection"
 	"github.com/evandukss/edge-observer/fragment"
 	"github.com/evandukss/edge-observer/probe"
@@ -24,8 +23,9 @@ func TestSocketOutcomesReachAssociationReasons(t *testing.T) {
 		{probe.FrameBroken, connection.OperationFrameBroken},
 		{probe.EvidenceUnreadable, connection.EvidenceUnreadable},
 	} {
-		s := capture.Recording(&collected{}, nil)
+		s := recording(&collected{})
 		one := transfer(worker, 0x126, fragment.Sent, 1)
+		one.Sequence = probe.Sequence{Occupancy: 1, Number: 1, Born: true}
 		one.Bound = probe.NotBound
 		one.Outcome = tc.outcome
 		s.Transfer(one)

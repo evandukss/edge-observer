@@ -88,6 +88,39 @@ func TestTheSetNamesEveryEntryPointAnyMemberDoesNotObserve(t *testing.T) {
 	}
 }
 
+// The not-live state survives combining in either order, and combining alters no
+// member: a full member folding first must not drop a partial member's unprobed
+// entry points (the full-then-partial fault), and the first member's slice must be
+// cloned, not kept.
+func TestTheSetNamesEveryUnprobedEntryPointInEitherOrder(t *testing.T) {
+	partial := func() probe.Capability { c := full(); c.Unprobed = []string{"SSL_write"}; return c }
+	for name, members := range map[string][]probe.Capability{
+		"partial first":         {partial(), full()},
+		"full first":            {full(), partial()},
+		"partial in the middle": {full(), partial(), full()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			before := make([][]string, len(members))
+			for i, m := range members {
+				before[i] = slices.Clone(m.Unprobed)
+			}
+			folded := probe.Weakest(members...)
+			if !slices.Contains(folded.Unprobed, "SSL_write") {
+				t.Errorf("a member left SSL_write unprobed and the combined set names %v", folded.Unprobed)
+			}
+			if len(folded.Unprobed) != 1 {
+				t.Errorf("one symbol is unprobed and the set names it %d times: %v",
+					len(folded.Unprobed), folded.Unprobed)
+			}
+			for i, m := range members {
+				if !slices.Equal(m.Unprobed, before[i]) {
+					t.Errorf("combining changed member %d's own Unprobed: %v, was %v", i, m.Unprobed, before[i])
+				}
+			}
+		})
+	}
+}
+
 // A set with no members can do nothing, and says so.
 func TestASetWithNoMembersCanDoNothing(t *testing.T) {
 	folded := probe.Weakest()

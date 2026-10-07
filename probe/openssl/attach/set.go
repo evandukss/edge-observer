@@ -10,6 +10,7 @@ import (
 
 	"github.com/evandukss/edge-observer/admission"
 	"github.com/evandukss/edge-observer/connection"
+	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/probe/openssl"
 )
@@ -69,6 +70,39 @@ func (s *set) placeOn(file fileID, live probe.Attachment, covers ...int32) {
 	s.members = append(s.members, member{covers: covers, live: live, file: file})
 }
 
+// ending wraps told: the set first lets go of what it keeps for a process whose
+// execution ended - which placement covers it, why one was refused, where a
+// reload routed it, and the namespace each placement read for it. The
+// placements are replaced rather than edited, since a reader may still hold the
+// list it copied.
+func (s *set) ending(told func(probe.Ended)) func(probe.Ended) {
+	return func(one probe.Ended) {
+		pid := one.Selection.ObserverPID
+		s.mutex.Lock()
+		members := slices.Clone(s.members)
+		for i := range members {
+			if slices.Contains(members[i].covers, pid) {
+				members[i].covers = slices.DeleteFunc(slices.Clone(members[i].covers),
+					func(covered int32) bool { return covered == pid })
+			}
+		}
+		s.members = members
+		delete(s.refusals, pid)
+		delete(s.routed, pid)
+		s.mutex.Unlock()
+		for _, member := range members {
+			if live, placed := member.live.(*ebpfAttachment); placed {
+				live.mutex.Lock()
+				live.networks = held.Deleted(live.networks, pid, &live.networksChurn)
+				live.mutex.Unlock()
+			}
+		}
+		if told != nil {
+			told(one)
+		}
+	}
+}
+
 // refuse records that nothing was placed for a process, and why.
 func (s *set) refuse(pid int32, err error) {
 	s.mutex.Lock()
@@ -82,6 +116,51 @@ func (s *set) placed() int {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	return len(s.members)
+}
+
+// Retained is what this set holds now, and what each of its placements holds,
+// store by store, summed over the placements. One placement unable to read its
+// stores fails the reading.
+func (s *set) Retained() ([]held.Occupancy, error) {
+	s.mutex.Lock()
+	members := s.members
+	covered := 0
+	for _, at := range members {
+		covered += len(at.covers)
+	}
+	out := []held.Occupancy{
+		{Store: "attach.members", Held: len(members)},
+		{Store: "attach.covers", Held: covered},
+		{Store: "attach.refusals", Held: len(s.refusals)},
+		{Store: "attach.routed", Held: len(s.routed)},
+	}
+	s.mutex.Unlock()
+
+	at := make(map[string]int, len(out))
+	for i, one := range out {
+		at[one.Store] = i
+	}
+	for _, member := range members {
+		reader, can := member.live.(held.Reader)
+		if !can {
+			continue
+		}
+		stores, err := reader.Retained()
+		if err != nil {
+			return nil, err
+		}
+		for _, one := range stores {
+			i, seen := at[one.Store]
+			if !seen {
+				at[one.Store] = len(out)
+				out = append(out, one)
+				continue
+			}
+			out[i].Held += one.Held
+			out[i].Bound += one.Bound
+		}
+	}
+	return out, nil
 }
 
 // Capability is what the whole set can report: probe.Weakest over its members.
@@ -158,6 +237,43 @@ func (s *set) Placements(pid int32) ([]probe.Placement, error) {
 		return nil, err
 	}
 	return nil, fmt.Errorf("pid %d is not in this attachment and no reason was recorded for it", pid)
+}
+
+// EndedCounts is how many admissions the set's placements have let go of
+// because their execution ended, by target, summed over the placements. One
+// placement unable to answer makes the set unable to answer.
+func (s *set) EndedCounts() ([]probe.EndedCount, error) {
+	s.mutex.Lock()
+	members := s.members
+	s.mutex.Unlock()
+
+	type target struct {
+		name   string
+		number int
+	}
+	at := make(map[target]int)
+	var out []probe.EndedCount
+	for _, member := range members {
+		ending, can := member.live.(probe.Ending)
+		if !can {
+			continue
+		}
+		counts, err := ending.EndedCounts()
+		if err != nil {
+			return nil, err
+		}
+		for _, one := range counts {
+			key := target{name: one.Target, number: one.Number}
+			i, seen := at[key]
+			if !seen {
+				at[key] = len(out)
+				out = append(out, one)
+				continue
+			}
+			out[i].Count += one.Count
+		}
+	}
+	return out, nil
 }
 
 // Withdrawals is every recorded process across the set whose grant is gone.

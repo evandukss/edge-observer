@@ -54,7 +54,7 @@ func TestEndpointInventoryEntryAndSourceProvenance(t *testing.T) {
 			}
 			document := map[string]any{
 				"version": "observer.config/1", "output": output, "log": filepath.Join(output, "observer.log"),
-				"limits":    map[string]any{"output_mib": 4, "state_every_seconds": 1},
+				"limits":    map[string]any{"state_every_seconds": 1},
 				"watch":     []any{map[string]any{"name": "client", "exe": c.process.Executable, "args": args, "children": "all"}},
 				"libraries": []any{},
 			}
@@ -86,7 +86,7 @@ func TestEndpointInventoryEntryAndSourceProvenance(t *testing.T) {
 				waitForLine(t, received, `"type":"connection_done"`)
 			}
 			sealed := s.ended(t)
-			approved, err := os.ReadFile(filepath.Join(s.directory, "approved.jsonl"))
+			approved, err := os.ReadFile(filepath.Join(s.output, "approved.jsonl"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -94,29 +94,30 @@ func TestEndpointInventoryEntryAndSourceProvenance(t *testing.T) {
 			var written int
 			for _, raw := range strings.Split(strings.TrimSpace(string(approved)), "\n") {
 				var line struct {
-					IDs            struct{ First, Last, Count string } `json:"exchange_ids"`
+					ID             string `json:"exchange_id"`
+					Session        string `json:"session"`
 					Reconstruction struct{ Exchanges []json.RawMessage }
 				}
 				if err := json.Unmarshal([]byte(raw), &line); err != nil {
 					t.Fatal(err)
 				}
 				written += len(line.Reconstruction.Exchanges)
-				if line.IDs.Count == "0" {
+				if line.Session != s.id {
+					t.Fatalf("foreign session %q", line.Session)
+				}
+				if len(line.Reconstruction.Exchanges) == 0 {
 					continue
 				}
-				first, e1 := strconv.ParseUint(line.IDs.First, 10, 64)
-				last, e2 := strconv.ParseUint(line.IDs.Last, 10, 64)
-				if e1 != nil || e2 != nil || first == 0 || last < first || last-first > 100 {
-					t.Fatalf("invalid exchange range: %+v", line.IDs)
+				id, err := strconv.ParseUint(line.ID, 10, 64)
+				if err != nil || id == 0 || ids[line.ID] {
+					t.Fatalf("invalid or duplicate exchange id %q", line.ID)
 				}
-				for id := first; id <= last; id++ {
-					ids[strconv.FormatUint(id, 10)] = true
-				}
+				ids[line.ID] = true
 			}
 			if written != 3 {
 				t.Fatalf("wiring, not the property: wrote %d exchanges, want the three requests", written)
 			}
-			derivedPath := filepath.Join(s.directory, "derived-inventory.jsonl")
+			derivedPath := filepath.Join(s.output, "derived-inventory.jsonl")
 			if !enabled {
 				if _, err := os.Stat(derivedPath); !os.IsNotExist(err) {
 					t.Fatalf("inventory output without an entry: %v", err)

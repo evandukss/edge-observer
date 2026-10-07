@@ -44,12 +44,12 @@ func processed(t *testing.T, w *workload.Workload) (*output, processing.Outcome)
 	if err != nil {
 		t.Fatal(err)
 	}
-	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 1 << 20, StorageExhausted: store.Exhausted()})
+	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 1 << 20, IntakeExhausted: store.Exhausted()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	out := &output{}
-	worker, err := processing.New(processing.Options{Plan: compiled.Plan, PolicyRevision: "workload", Intake: store, Gate: gate, Output: out})
+	worker, err := processing.New(processing.Options{Session: "workload", Plan: compiled.Plan, PolicyRevision: "workload", Intake: store, Gate: gate, Output: out})
 	if err != nil {
 		t.Fatal(err)
 	}

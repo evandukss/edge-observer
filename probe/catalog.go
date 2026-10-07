@@ -36,6 +36,18 @@ type Function struct {
 	// Early marks the functions carrying TLS 1.3 early data: ordinary stream
 	// bytes, but replayable and not forward-secret, so worth recording.
 	Early bool `json:"early,omitempty"`
+
+	// Begins marks a lifecycle function returning a new handle: its birth, from
+	// which every transfer of the handle is numbered.
+	Begins bool `json:"begins,omitempty"`
+
+	// Recycles marks a lifecycle function that readies a handle for a new
+	// connection in place: it ends the handle's occupancy as a release does.
+	Recycles bool `json:"recycles,omitempty"`
+
+	// Route marks an uncatalogued byte-moving entry point, observed count-only so
+	// its use shows as a gap rather than as bytes nothing numbered.
+	Route bool `json:"route,omitempty"`
 }
 
 // Count is where a function reports its byte count, which decides whether a
@@ -65,9 +77,17 @@ type Runtime struct {
 
 	Functions []Function
 
-	// Lifecycle is what the runtime calls when a connection ends. Without it a
-	// reused endpoint continues the previous connection's stream, invisibly.
+	// Lifecycle is what the runtime calls when a connection begins and ends.
+	// Without the ending a reused endpoint continues the previous connection's
+	// stream, invisibly; without the beginning a connection's first transfer is
+	// the first one observed, not the first one made.
 	Lifecycle []Function
+
+	// Uncatalogued is the byte-moving entry points this build does not capture,
+	// observed count-only so their use shows as a gap in the affected direction
+	// rather than as bytes nothing numbered. SSL_sendfile (kTLS, no user buffer)
+	// is the only one libssl exports.
+	Uncatalogued []Function
 }
 
 // OpenSSL is the plaintext-moving family of OpenSSL's libssl, read off real
@@ -99,6 +119,17 @@ var OpenSSL = Runtime{
 	Lifecycle: []Function{
 		// The SSL object identifies a connection, and its address is reused.
 		{Symbol: "SSL_free", Since: "0.9.8", Probed: true},
+		// Its birth: a handle's transfers are numbered from here, so the first one
+		// lost is a number missing rather than a later one taken for the first.
+		{Symbol: "SSL_new", Since: "0.9.8", Probed: true, Begins: true},
+		// A handle recycled in place for the next connection, with no SSL_free and no
+		// SSL_new: without it two connections join into one stream.
+		{Symbol: "SSL_clear", Since: "0.9.8", Probed: true, Recycles: true},
+	},
+	Uncatalogued: []Function{
+		// Sends a file through kTLS, no user buffer: its bytes cannot be read, so its
+		// use is numbered in the sent direction and shows as a gap.
+		{Symbol: "SSL_sendfile", Since: "3.0.0", Direction: fragment.Sent, Probed: true, Count: CountNone, Route: true},
 	},
 }
 
@@ -127,7 +158,8 @@ func (r Runtime) Symbols() []string {
 // the lifecycle: both are attached, and dropping lifecycle probes would let
 // reused addresses continue old streams.
 func (r Runtime) Lookup(symbol string) (Function, bool) {
-	for _, function := range append(r.Functions, r.Lifecycle...) {
+	all := append(append(append([]Function{}, r.Functions...), r.Lifecycle...), r.Uncatalogued...)
+	for _, function := range all {
 		if function.Symbol == symbol {
 			return function, true
 		}

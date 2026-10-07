@@ -9,6 +9,7 @@ import (
 	"github.com/evandukss/edge-observer/account"
 	"github.com/evandukss/edge-observer/connection"
 	"github.com/evandukss/edge-observer/contract/config"
+	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/intake"
 )
 
@@ -34,6 +35,12 @@ type Run struct {
 	err      error
 	ended    bool
 	closed   bool
+	// retained is each worker's stores as it last left them, and unrouted the
+	// router's spans and routing the capacity of the per-worker routing slices
+	// as Route last left them (Retained).
+	retained [][]held.Occupancy
+	unrouted int
+	routing  int
 }
 
 type running struct {
@@ -115,11 +122,74 @@ func (r *Run) Route() {
 		}
 	}
 	for i, items := range r.pending {
-		if len(items) != 0 {
-			r.workers[i].queue.push(items)
-			r.pending[i] = items[:0]
+		// Wake even without payload: a cut can arrive through shared control state
+		// while intake is full, and must release what the worker already holds.
+		r.workers[i].queue.push(items)
+		r.pending[i] = items[:0]
+	}
+	capacity := 0
+	for _, items := range r.pending {
+		capacity += cap(items)
+	}
+	r.mutex.Lock()
+	r.unrouted = len(r.router.gaps)
+	r.routing = capacity
+	r.mutex.Unlock()
+}
+
+// Retained is what this run holds now, store by store, summed over its
+// workers: what each held when it last finished a drain, the entries queued
+// for each and the capacity those queues keep, the spans of connection ids not
+// yet routed and the capacity the routing slices keep as Route last left them,
+// and what each extension's supervisor holds. A capacity is entries a slice's
+// backing array can hold, not entries in it.
+func (r *Run) Retained() ([]held.Occupancy, error) {
+	if r == nil {
+		return nil, nil
+	}
+	r.mutex.Lock()
+	var out []held.Occupancy
+	at := map[string]int{}
+	add := func(one held.Occupancy) {
+		i, seen := at[one.Store]
+		if !seen {
+			at[one.Store] = len(out)
+			out = append(out, one)
+			return
+		}
+		out[i].Held += one.Held
+		out[i].Bound += one.Bound
+		out[i].Rebuilds += one.Rebuilds
+	}
+	for _, stores := range r.retained {
+		for _, one := range stores {
+			add(one)
 		}
 	}
+	add(held.Occupancy{Store: "processing.router", Held: r.unrouted, Bound: unroutedBound})
+	add(held.Occupancy{Store: "processing.pending_capacity", Held: r.routing})
+	r.mutex.Unlock()
+	queued, capacity := 0, 0
+	for _, one := range r.workers {
+		one.queue.mutex.Lock()
+		queued += len(one.queue.items) + len(one.queue.done)
+		capacity += cap(one.queue.items) + cap(one.queue.done)
+		one.queue.mutex.Unlock()
+	}
+	add(held.Occupancy{Store: "processing.queue", Held: queued})
+	add(held.Occupancy{Store: "processing.queue_capacity", Held: capacity})
+	if r.extensions != nil {
+		for _, supervisor := range r.extensions.supervisors {
+			stores, err := supervisor.Retained()
+			if err != nil {
+				return nil, err
+			}
+			for _, one := range stores {
+				add(one)
+			}
+		}
+	}
+	return out, nil
 }
 
 // Snapshot is the workers' last returned outcomes, summed, with the gate's
@@ -132,6 +202,7 @@ func (r *Run) Snapshot() Outcome {
 		o.GateReason = reason
 	}
 	o.Extensions = r.extensions.counts()
+	o = deliveryOutcome(o, r.options.Output)
 	return o
 }
 
@@ -165,6 +236,7 @@ func (r *Run) Finish(ctx context.Context, final Finalization) (Outcome, error) {
 	o, err := r.sumLocked(), r.err
 	r.mutex.Unlock()
 	o.Extensions = r.extensions.counts()
+	o = deliveryOutcome(o, r.options.Output)
 	return o, err
 }
 
@@ -221,9 +293,14 @@ func (r *Run) serve(i int) {
 }
 
 func (r *Run) record(i int, o Outcome, err error) {
+	stores, _ := r.workers[i].worker.Retained()
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	r.outcomes[i] = o
+	if r.retained == nil {
+		r.retained = make([][]held.Occupancy, len(r.workers))
+	}
+	r.retained[i] = stores
 	if err != nil && r.err == nil {
 		r.err = err
 		close(r.failed)

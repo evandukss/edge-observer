@@ -18,7 +18,7 @@ order, and the extensions after them in the order listed.
       "output": "/var/lib/observer",
       "log": "stdout",
       "watch": [
-        {"name": "api", "exe": "/usr/bin/php", "args": ["/srv/api/main.php"], "children": "all"}
+        {"name": "api", "exe": "/usr/local/bin/api-server", "args": ["--listen", "8443"], "children": "all"}
       ],
       "ignore": [{"exe": "/usr/bin/curl"}],
       "libraries": [],
@@ -38,7 +38,7 @@ order, and the extensions after them in the order listed.
         {"name": "inventory", "command": ["/usr/local/lib/observer/inventory", "--batch", "100"],
          "fields": ["request.line", "response.line"], "timeout_ms": 250}
       ],
-      "limits": {"output_mib": 64, "events": 16384, "state_every_seconds": 30, "workers": 1}
+      "limits": {"events": 16384, "state_every_seconds": 30, "workers": 1}
     }
 
 **Required:** `version`, `output` and `watch`. Every other key is optional; absent means the value shown
@@ -53,7 +53,7 @@ document at another version is refused as `unknown_version`, naming the version 
 
 | key | value |
 |---|---|
-| `output` | an absolute path: where each session's directory is written |
+| `output` | an absolute path: stable approved and derived files, plus each session's account directory |
 | `log` | `stdout`, or an absolute path |
 | `watch` | at least one entry, each a `name` and at least one of `exe`, `args`, `cgroup`, `pid` (`{pid, start, boot}`), `port`, `interface`, with `children` |
 | `ignore` | matches never watched, in the conditions `watch` uses, without `name` or `children`. The account numbers them in their order: `ignore N` |
@@ -61,13 +61,20 @@ document at another version is refused as `unknown_version`, naming the version 
 | `write_content` | `true` writes exchanges and connection records. `false` writes connection records only; **plaintext is still read into memory and processed, and never written** |
 | `remove`, `mask`, `truncate` | the rules, below |
 | `extensions` | the extensions to run, in order, each a `name`, a `command`, the `fields` it receives and `timeout_ms` (below) |
-| `limits` | `output_mib`, the approved output's allowance; `events`, the events admitted to processing; `state_every_seconds`, how often the log restates the session's state; `workers`, the fixed number of processing workers, each holding a share of the connections (default 1; measurements are in the observer user guide's Processing capacity section) |
+| `limits` | `events`, the most captured events held at once while they wait to be processed (one connection may hold at most half of them and is cut past that; `docs/extensions.md` says what that costs); `state_every_seconds`, how often the log restates the session's state; `workers`, the fixed number of processing workers, each holding a share of the connections (default 1; measurements are in the Processing capacity section of `docs/extensions.md`) |
 
 **A watch entry's conditions are matched as the observer's admission reads them.** `exe` is an absolute
 path. `args` are the arguments after `argv[0]`; an empty list means a process run with none, and absent
-means any. `cgroup` is an absolute cgroup path. `pid` names one process instance by its pid, start time
-and boot, never a pid number alone. `port` is a listening port, optionally with an `interface`. Every
+means no arguments when `exe` is named. `cgroup` is an absolute cgroup path. `pid` names one process
+instance by its pid, start time and boot, never a pid number alone. `port` is a listening port, optionally with an `interface`. Every
 condition an entry names must hold.
+
+An unreadable or zero-byte command line is **arguments undetermined**, including for an executable-only
+entry. Start, preflight and reload reread affected candidates for up to 50 ms across the whole candidate
+set, at 1 ms intervals, plus an in-flight procfs read. The birth and executable must remain consistent.
+If arguments stay undetermined, the command refuses and names the process; an undecidable `ignore`
+entry also refuses. A known `argv[0]` with no following arguments is a known empty argument list.
+There is no automatic rediscovery after exec; an explicit start or reload resolves again.
 
 **`children` says which descendants of a watched process are watched too:**
 
@@ -275,7 +282,7 @@ removes that field on the exchanges route. A plan that does not is refused as `i
 observer's defect, and it fails closed. A mask or a truncation satisfies no removal. Connection records
 carry metadata only and cannot contain these fields.
 
-**Every removal is recorded in the approved output**, `observer.approved/2`, as an entry naming the
+**Every removal is recorded in the approved output**, `observer.approved/3`, as an entry naming the
 exchange, the message, the field and a disposition - `removed`, `values_removed`, or
 `removed_undecidable` for a whole body or query a field rule could not decide - and only where the
 component was present, which is what separates excluded from never present. A mask and a truncation add
@@ -294,7 +301,7 @@ entry past the limit (`limit_exceeded`):
 | entries in `extensions` | `MaxExtensions` (8) |
 | an extension's `timeout_ms` | `MaxExtensionTimeoutMS` (60000), and at least 1 |
 | the configuration, in bytes | `MaxProcessingBytes` |
-| `limits.output_mib`, `limits.events`, `limits.state_every_seconds`, `limits.workers` | `MaxOutputMiB`, `MaxEvents`, `MaxStateEverySeconds`, `MaxWorkers` (256), and at least 1 |
+| `limits.events`, `limits.state_every_seconds`, `limits.workers` | `MaxEvents`, `MaxStateEverySeconds`, `MaxWorkers` (256), and at least 1 |
 
 The internal bounds are sized from what the reader can emit, so a configuration the reader accepts
 compiles within them. `MaxJSONFieldDepth` and `MaxJSONFieldNodes` bound what a JSON rule reads at run
@@ -383,3 +390,18 @@ These cannot be written in `observer.config/1`:
   Every failure now drops what it concerns and is counted;
 - exchanges written without connection records. `write_content: true` writes both;
 - `mask` and `truncate` on one header, which are two different values for one field and refused.
+
+## Output delivery and rotation
+
+Output is best effort, appended to stable `approved.jsonl` and
+`derived-<extension>.jsonl` paths under `output` across sessions. Every line
+carries its session. `limits.output_mib` is not a configuration key and is
+refused as unknown. Byte bounds apply to queued and in-flight lines, not total
+output. The session directory retains account and control state.
+
+`observer reopen <configuration>` acknowledges reopening approved, derived and
+configured operational-log files. A blocked old write prevents acknowledgement;
+a failed or timed-out reopen is reported. Rotation belongs to the operator;
+use rename-and-create with mode 0600 followed by reopen. `copytruncate` can lose
+records copied or truncated during a write. The [approved-line contract](../record/record.md#approved-line-envelope)
+defines delivery outcomes and reader selection.

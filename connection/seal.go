@@ -205,8 +205,9 @@ func (s *Sealer) Stop() (Seal, error) {
 	// The drain knows what it left outstanding; the kernel's counters do not.
 	counters.Outstanding = drained.Outstanding
 	seal.Counters = counters
-	// Not capture's Stats().Interrupted, which counts streams a located loss
-	// retired (reported as "retired"); this is the one the report prints.
+	// Calls refused at the read boundary, not capture's Stats().Retired, which
+	// counts connections whose endings were never delivered; this is the one the
+	// report prints.
 	seal.Interrupted = counters.RefusedInFlight
 
 	// 5. Seal.

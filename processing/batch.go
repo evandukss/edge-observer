@@ -4,6 +4,7 @@ import (
 	"github.com/evandukss/edge-observer/connection"
 	"github.com/evandukss/edge-observer/contract/record"
 	"github.com/evandukss/edge-observer/fragment"
+	"github.com/evandukss/edge-observer/held"
 	"github.com/evandukss/edge-observer/intake"
 )
 
@@ -18,6 +19,19 @@ type batch struct {
 	fragments  map[uint64]fragment.Record
 	retirement *connection.Record
 	invalid    bool
+	loss       *held.Loss
+
+	// cut is set once the connection held as many fragments as one connection
+	// may (Options.ConnectionInput). What it held was discarded then, and every
+	// later fragment of it is discarded on arrival. arrived counts its fragments
+	// before and after, so the batch is complete when its retirement's count has
+	// arrived, and reached is how far each direction's discarded input ran.
+	cut bool
+	// lost discards payload after capture loss, but keeps the batch until its
+	// retirement can describe that loss. It is not a connection-input cut.
+	lost    bool
+	arrived uint64
+	reached [3]uint64
 }
 
 // keyOf is the batch an entry belongs to.
@@ -46,6 +60,23 @@ func (w *Worker) accept(in routed) {
 		w.batches[key] = b
 		w.order = append(w.order, key)
 	}
+	if f := e.Fragment; f != nil && (b.cut || b.lost) {
+		b.arrived++
+		b.reach(f)
+		path := held.Discarded
+		if b.cut {
+			w.outcome.InputCut++
+			path = held.Cut
+		}
+		e.ReleaseAs(path)
+		return
+	}
+	if e.Fragment != nil && e.Fragment.Loss != nil {
+		b.loss = e.Fragment.Loss
+	}
+	if e.Connection != nil && e.Connection.Loss != nil {
+		b.loss = e.Connection.Loss
+	}
 	b.entries = append(b.entries, e)
 	if process != b.process || id == 0 {
 		b.invalid = true
@@ -58,6 +89,10 @@ func (w *Worker) accept(in routed) {
 			b.invalid = true
 		}
 		b.fragments[f.Sequence] = *f
+		b.arrived++
+		if len(b.fragments) >= w.bound {
+			w.cut(b)
+		}
 		return
 	}
 	r := e.Connection
@@ -78,6 +113,16 @@ func (b *batch) ready(final bool) bool {
 		return false
 	}
 	r := b.retirement
+	if (b.cut || b.lost) && !b.invalid {
+		if r.Fragments.Value < 0 || b.arrived > uint64(r.Fragments.Value) {
+			b.invalid = true
+			return true
+		}
+		if b.arrived != uint64(r.Fragments.Value) && b.loss.Reason() == "" {
+			return final
+		}
+		return final || r.How == connection.HandleReleasedEnding || r.How == connection.SocketClosed
+	}
 	for seq := range b.fragments {
 		if r.Fragments.Value < 0 || seq > uint64(r.Fragments.Value) {
 			b.invalid = true
@@ -92,14 +137,76 @@ func (b *batch) ready(final bool) bool {
 	return final || r.How == connection.HandleReleasedEnding || r.How == connection.SocketClosed
 }
 
-func (b *batch) release() {
+// cut discards everything a batch holds but its retirement, returning its
+// fragments' slots as cut: the connection reached the bound on what one
+// connection may hold while it waits to be processed. Its later fragments are
+// discarded on arrival (accept), and what it produces is its connection line,
+// truncated from its first byte (processCut).
+func (w *Worker) cut(b *batch) {
+	if b.cut {
+		return
+	}
+	b.cut = true
+	w.outcome.ConnectionsCut++
+	w.outcome.InputCut += b.discardInput(held.Cut)
+}
+
+// lose releases payload without charging a bound cut. The bounded batch keeps
+// only its identity, control token and direction reaches until retirement.
+func (b *batch) lose() {
+	if b.cut || b.lost {
+		return
+	}
+	b.lost = true
+	b.discardInput(held.Discarded)
+}
+
+func (b *batch) discardInput(path held.Path) uint64 {
+	var discarded uint64
+	kept := b.entries[:0]
+	for _, e := range b.entries {
+		if f := e.Fragment; f != nil {
+			b.reach(f)
+			discarded++
+			e.ReleaseAs(path)
+			continue
+		}
+		kept = append(kept, e)
+	}
+	clear(b.entries[len(kept):])
+	b.entries = kept
+	b.fragments = nil
+	return discarded
+}
+
+// reach records how far a discarded fragment's direction ran.
+func (b *batch) reach(f *fragment.Record) {
+	if f.Direction != fragment.Sent && f.Direction != fragment.Received {
+		return
+	}
+	if end := f.End(); end > b.reached[f.Direction] {
+		b.reached[f.Direction] = end
+	}
+}
+
+// release returns the batch's entries, and their events' slots along path.
+func (b *batch) release(path held.Path) {
 	// Drop all aliases before returning the volatile charge.
 	b.fragments = nil
 	b.retirement = nil
 	for _, e := range b.entries {
-		e.Release()
+		e.ReleaseAs(path)
 	}
 	b.entries = nil
+}
+
+// processedUnless is the path a processed batch's input is returned along:
+// Processed, or Discarded where processing stopped on err before it finished.
+func processedUnless(err error) held.Path {
+	if err != nil {
+		return held.Discarded
+	}
+	return held.Processed
 }
 
 type prefixCut struct {
@@ -129,9 +236,16 @@ func (p batchPrefix) truncated() bool {
 // and the location and reason of any cutoff. It never resumes after a hole or
 // an unplaced span, even if later bytes resemble a start line. Overlapping
 // offsets are conflicting evidence, not a choice between callback orderings.
+//
+// A producer number skipped between two fragments of a direction, other than
+// the empty transfers the later one counts, is a transfer produced and never
+// delivered, whatever the offsets say: capture advances offsets by what
+// arrived, so contiguous offsets alone cannot show the hole. The direction
+// stops where the missing transfer would have begun.
 func (b *batch) placed() ([]fragment.Record, batchPrefix, bool) {
 	var out []fragment.Record
 	var end [3]uint64
+	var produced [3]uint64
 	var prefix batchPrefix
 	// A placement cutoff remains evidence of an indeterminate suffix even
 	// when no later fragment was observed. Absence of later input is not zero.
@@ -151,6 +265,12 @@ func (b *batch) placed() ([]fragment.Record, batchPrefix, bool) {
 		}
 		if f.Offset > end[f.Direction] {
 			prefix.stop(f.Direction, end[f.Direction], "capture_hole")
+		}
+		if f.Produced != 0 {
+			if f.Produced != produced[f.Direction]+1+f.Empties {
+				prefix.stop(f.Direction, end[f.Direction], "capture_hole")
+			}
+			produced[f.Direction] = f.Produced
 		}
 		end[f.Direction] = f.End()
 		if f.Truncated() {

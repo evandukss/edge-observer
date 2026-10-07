@@ -162,6 +162,12 @@ func p3t9ActivationCompiled(t *testing.T, peer process.Process) policy.Policy {
 type p3t9ActivationWitness struct {
 	recording *capture.Session
 	marker    atomic.Uint64
+	settling  bool
+}
+
+func (w *p3t9ActivationWitness) Settling(s probe.Settler) {
+	w.settling = true
+	w.recording.Settling(s)
 }
 
 func (w *p3t9ActivationWitness) Transfer(x probe.Transfer) {
@@ -229,8 +235,8 @@ func p3t9ActivationChild(t *testing.T) {
 	default:
 		t.Fatalf("unrecognized harness mode %q", mode)
 	}
-	// Prepare fixes the approved writer's storage signal before admission. The
-	// fixture, like begin, opens this empty artifact before checking activation.
+	// The fixture, like begin, opens the approved writer before checking
+	// activation.
 	writer, err := processing.Open(os.Getenv("P3T9_ACTIVATION_OUTPUT"), 1<<20)
 	if err != nil {
 		t.Fatal(err)
@@ -260,7 +266,7 @@ func p3t9ActivationChild(t *testing.T) {
 		// On posture faults the assembling entry point must refuse too, returning
 		// no capture. Gate faults are passed to Verify, not invented in Prepare.
 		if want != activation.DeliveryGate {
-			c, err := activation.Prepare(p3t9ActivationCompiled(t, peer), []process.Process{peer}, 128, writer.Exhausted())
+			c, err := activation.Prepare(p3t9ActivationCompiled(t, peer), []process.Process{peer}, 128)
 			if c != nil {
 				t.Fatal("refused Prepare exposed a capture")
 			}
@@ -277,7 +283,7 @@ func p3t9ActivationChild(t *testing.T) {
 		t.Fatalf("Verify did not report the actual holder and exact participant readings: %+v", p)
 	}
 	compiled := p3t9ActivationCompiled(t, peer)
-	c, err := activation.Prepare(compiled, []process.Process{peer}, 128, writer.Exhausted())
+	c, err := activation.Prepare(compiled, []process.Process{peer}, 128)
 	if err != nil || c == nil {
 		t.Fatalf("compliant Prepare refused; attach/admission/output NOT reached: %v", err)
 	}
@@ -298,7 +304,7 @@ func p3t9ActivationChild(t *testing.T) {
 		t.Fatalf("prepared gate failed initial verification: %v", err)
 	}
 	handed := &t20iHandedByRoute{next: writer}
-	worker, err := processing.New(processing.Options{Plan: compiled.Processing, PolicyRevision: compiled.Revision, Intake: c.Intake, Gate: c.Gate, Output: handed})
+	worker, err := processing.New(processing.Options{Plan: compiled.Processing, PolicyRevision: compiled.Revision, Session: "p3t9-activation", Intake: c.Intake, Gate: c.Gate, Output: handed})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,6 +323,9 @@ func p3t9ActivationChild(t *testing.T) {
 	}()
 	if !live.Capability().Payload {
 		t.Fatal("attachment cannot copy payload")
+	}
+	if !witness.settling {
+		t.Fatal("wiring, not the property: attachment has no per-occupancy settlement evidence")
 	}
 	fmt.Println("P3T9_READY")
 	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
@@ -344,7 +353,7 @@ func p3t9ActivationChild(t *testing.T) {
 	if err != nil || !drained.Complete {
 		t.Fatalf("real drain incomplete: %+v %v", drained, err)
 	}
-	counters, err := producer.Account()
+	_, err = producer.Account()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,11 +381,16 @@ func p3t9ActivationChild(t *testing.T) {
 	if c.Gate.Snapshot() != before {
 		t.Fatal("initial re-verification changed the active gate")
 	}
-	c.Recording.Finish(time.Now(), counters.Ordered)
+	c.Recording.Finish(time.Now())
 	out, err := worker.Finish(context.Background(), processing.Finalization{Withdrawn: withdrawn.Complete, Drained: drained.Complete})
 	if err != nil || handed.written(config.ExchangesPipeline) != 1 || handed.handed(config.ExchangesPipeline) != 1 || out.GateReason != "" {
 		t.Fatalf("real approved-result control failed: exchanges records written %d, authorized %d, %+v %v",
 			handed.written(config.ExchangesPipeline), handed.handed(config.ExchangesPipeline), out, err)
+	}
+	delivering, delivered := context.WithTimeout(context.Background(), 5*time.Second)
+	defer delivered()
+	if err := writer.Drain(delivering); err != nil {
+		t.Fatalf("the approved writer did not finish the lines handed to it: %v", err)
 	}
 	persisted := t20iPersistedByRoute(t, os.Getenv("P3T9_ACTIVATION_OUTPUT"))
 	if persisted[config.ExchangesPipeline] != 1 {
@@ -595,15 +609,18 @@ func p3t9ActivationRun(t *testing.T, mode string) {
 		if last.Stage != "refused_before_attach" || last.Check == "" || last.Gate.Charged != 0 || last.Written != 0 {
 			t.Fatalf("refusal did not precede admission/output: %+v", last)
 		}
-		// The real writer had to exist before Prepare. Refusal must leave that
-		// exact empty baseline, rather than create output or write payload.
+		// The real writer existed before Prepare. Refusal must leave the output
+		// directory holding nothing but, at most, the empty approved file the
+		// writer may open at its stable path: no other output and no payload.
 		entries, err := os.ReadDir(output)
-		if err != nil || len(entries) != 1 || entries[0].Name() != processing.ArtifactName {
+		if err != nil || len(entries) > 1 || (len(entries) == 1 && entries[0].Name() != processing.ArtifactName) {
 			t.Fatalf("refused activation changed the pre-opened output population: entries=%v error=%v", entries, err)
 		}
-		info, err := entries[0].Info()
-		if err != nil || !info.Mode().IsRegular() || info.Size() != 0 {
-			t.Fatalf("refused activation did not preserve the empty approved artifact: info=%v error=%v", info, err)
+		if len(entries) == 1 {
+			info, err := entries[0].Info()
+			if err != nil || !info.Mode().IsRegular() || info.Size() != 0 {
+				t.Fatalf("refused activation wrote to the approved file: info=%v error=%v", info, err)
+			}
 		}
 	}
 	t.Logf("actual_holder_result: mode=%s evidence=%s", mode, transcript.String())

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/evandukss/edge-observer/held"
 )
 
 // state is where a generation is in its life.
@@ -55,8 +57,10 @@ type generation struct {
 	readyAt      time.Time
 
 	outstanding map[uint64]*pending
-	waiting     int64
-	answered    idSet
+	// churn sheds what answers leave in outstanding, whose ids never return.
+	churn    held.Churn
+	waiting  int64
+	answered idSet
 
 	derivedRate bucket
 	floodSecond int64

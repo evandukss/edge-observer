@@ -190,6 +190,10 @@ func Take(host Host, approval process.Approval, catalog probe.Catalog) (Report, 
 	if err != nil {
 		return Report{}, err
 	}
+	table, err = approval.SettleArguments(host.ProcFS, table)
+	if err != nil {
+		return Report{}, err
+	}
 
 	report := Report{
 		TakenAt: time.Now().UTC(),

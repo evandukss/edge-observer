@@ -13,8 +13,9 @@ import (
 //
 // Established: the whole direction is placeable. UnknownFrom: positions before
 // an offset are established and the rest are not - a claim about where the
-// loss was, made only with ordering evidence. UnknownThroughout: a loss nobody
-// could locate; no prefix is asserted without evidence.
+// evidence stopped, made only where the direction's own sequence says it.
+// UnknownThroughout: no offset is established; no prefix is asserted without
+// evidence.
 type Placement struct {
 	Connection fragment.ConnectionID `json:"connection"`
 	Direction  fragment.Direction    `json:"direction"`
@@ -41,12 +42,11 @@ const (
 	PositionsUnset Positions = iota
 	// PositionsEstablished is a direction whose observations all arrived.
 	PositionsEstablished
-	// PositionsUnknownFrom is a direction with a gap located in the session's
-	// production order (not in this stream) after the offset From: placeable
-	// before From and not at or after it.
+	// PositionsUnknownFrom is a direction whose evidence stops at the offset From:
+	// placeable before From and not at or after it.
 	PositionsUnknownFrom
-	// PositionsUnknownThroughout is a direction that lost an observation nothing
-	// could locate: no offset is established.
+	// PositionsUnknownThroughout is a direction with no established offset: its
+	// first transfer was lost, or nothing could check any of its places.
 	PositionsUnknownThroughout
 )
 
@@ -95,7 +95,7 @@ func (p Placement) Validate() error {
 		return fmt.Errorf("%w: connection %d %s is not fully placeable and says nothing about why",
 			ErrInvalid, p.Connection, p.Direction)
 	case p.Positions != PositionsUnknownFrom && p.From != 0:
-		// From belongs only to a located gap.
+		// From belongs only to a direction whose evidence stops at an offset.
 		return fmt.Errorf("%w: connection %d %s is %s and names offset %d as the start of a gap",
 			ErrInvalid, p.Connection, p.Direction, p.Positions, p.From)
 	}

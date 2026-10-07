@@ -189,10 +189,7 @@ func TestOverlappingTargetsKeepProvenanceAcrossSeparateRestarts(t *testing.T) {
 			if count != 1 {
 				t.Fatalf("%d remaining targets emitted one peer-confirmed transfer %d times", len(rules), count)
 			}
-			held, err := session.Admissions()
-			if err != nil {
-				t.Fatal(err)
-			}
+			held := session.Inventory()
 			provenance := map[int]bool{}
 			for _, one := range held {
 				if one.Instance.Namespace == parent.Namespace && one.Instance.PID == parent.NamespacePID {

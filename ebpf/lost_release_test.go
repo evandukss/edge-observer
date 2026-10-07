@@ -94,6 +94,9 @@ func TestALostReleaseCannotSpliceTheNextOccupantOfTheSameHandle(t *testing.T) {
 	if after.Endpoint != original || after.Stamp != ending.Stamp+1 || !after.Instance.Same(control.Instance) {
 		t.Fatalf("successor did not bracket exactly the omitted release at the same handle: %+v", after)
 	}
+	if control.Sequence.Occupancy == 0 || after.Sequence.Occupancy == 0 || after.Sequence.Occupancy == control.Sequence.Occupancy || !after.Sequence.Born {
+		t.Fatalf("wiring, not the property: producer did not establish two occupancies around the omitted release: before=%+v after=%+v", control.Sequence, after.Sequence)
+	}
 	command("F")
 	actorLine(t, actor, "freed\n")
 	waitIndependentLifecycleConnections(t, disk, 2)
@@ -102,10 +105,7 @@ func TestALostReleaseCannotSpliceTheNextOccupantOfTheSameHandle(t *testing.T) {
 		t.Fatalf("missing release spliced two occupancies of one address: %+v", records)
 	}
 	association, ok := records[1].Association(fragment.Received)
-	if !ok || association.State != connection.Unknown || association.Reason != connection.ObservationLost || association.Joinable() {
+	if !ok || association.State != connection.Unknown || association.Joinable() {
 		t.Errorf("successor claimed a binding across the missing lifetime evidence: %+v", association)
-	}
-	if stats := base.recording.Stats(); stats.Lost != 1 || stats.Interrupted != 1 {
-		t.Errorf("the actual omitted ending disappeared from the capture account: %+v", stats)
 	}
 }

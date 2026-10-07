@@ -62,10 +62,10 @@ receives connection records when each connection ends.
   before the next extension sees it, so an extension cannot put back what `remove` took out. The approved
   output records each extension's outcome for each written exchange.
 - **Its own records.** What an extension writes about exchanges goes to `derived-<name>.jsonl` in the
-  session's directory, never into `approved.jsonl` or the account. Each line names the exchanges it is
-  about by id - every line of `approved.jsonl` carries the ids of its connection's exchanges - and says
-  whether it was observed or inferred. **Derived output uses at most half of `limits.output_mib`**, and
-  running out of it never stops the observer's own output.
+  configured directory, never into `approved.jsonl` or the account. Each line names the exchanges it is
+  about by session and id; each approved exchange line carries that id and its connection index.
+  It says whether the result was observed or inferred. Delivery is best effort: a bounded byte queue
+  drops when full, and write failures cost counted attempts without stopping monitoring.
 - **The account** counts, per extension, every exchange it was given and what became of it: changed,
   unchanged, failed by reason, or still pending; its restarts; and its derived lines written and refused.
   Every count is the observer's own; an extension cannot write into the account.
@@ -109,6 +109,18 @@ closes. Each exchange waits at most `timeout_ms` at one extension, including the
 it, and at most the sum of the `timeout_ms` of all your extensions in total. Earlier exchanges of its
 connection, processing and output can add to that. While one connection waits on an extension, other
 connections are processed and written; **the application you watch never waits on an extension.**
+
+**A connection that holds too much before it ends is cut.** Until it ends, a connection's captured
+transfers wait to be processed, and one connection may hold at most half of `limits.events` of them (8192
+at the default 16384). **A long keep-alive connection reaches that in ordinary operation**: each request
+and response pair takes at least one transfer each way, so it is reached within 4096 pairs, and sooner
+where a message is written or read in several pieces. It is cut there:
+everything it held is discarded, and so is everything that arrives for it afterwards. Its connection line
+is still written, with a truncation stop at its first byte in each direction, reason `connection_cut`, and
+no exchange of it reaches the output or an extension. The account's `processing.aggregate` counts the
+connections cut in `connections_cut` and the transfers discarded for them in `input_cut`. The session goes
+on, other connections are untouched, and the next connection on the same TLS handle is processed as
+usual.
 
 **Order is guaranteed within a connection only.** An extension receives one connection's exchanges in
 order, one at a time. Exchanges of different connections are interleaved, and the order they arrive in

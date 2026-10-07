@@ -18,7 +18,7 @@ import (
 )
 
 // The expected population is declared here before Withdrawn runs. Neither
-// Inventory, Admissions nor the focused reader supplies the test denominator.
+// Inventory nor the focused reader supplies the test denominator.
 func executionPopulationActor(t *testing.T, generation admission.Generation) (*exec.Cmd, admission.Selection) {
 	t.Helper()
 	cmd := exec.Command("sleep", "30")
@@ -98,7 +98,7 @@ func executionPopulationSession(t *testing.T, recorded, granted []admission.Sele
 	if !reflect.DeepEqual(actual, want) {
 		t.Fatalf("fixture: kernel grant set differs from declaration: %v != %v", actual, want)
 	}
-	s := &Session{collection: &cilium.Collection{Maps: map[string]*cilium.Map{"allowed_processes": m}}, inventory: append([]admission.Selection(nil), recorded...), seen: make(map[instanceKey]admission.Start)}
+	s := &Session{collection: &cilium.Collection{Maps: map[string]*cilium.Map{"allowed_processes": m}}, inventory: append([]admission.Selection(nil), recorded...)}
 	return s, m
 }
 
@@ -151,22 +151,14 @@ func TestExecutionWithdrawalPopulationIsTheDeclaredSet(t *testing.T) {
 	}
 }
 
-func TestExecutionUnknownBirthAndBaselineIsIndeterminate(t *testing.T) {
-	for _, which := range []string{"neither-known", "baseline-known", "recorded-known", "recorded-over-baseline"} {
+func TestExecutionUnknownBirthIsIndeterminate(t *testing.T) {
+	for _, which := range []string{"unknown", "recorded-known"} {
 		t.Run(which, func(t *testing.T) {
 			_, one := executionPopulationActor(t, 711)
-			original := one.Instance.Start
-			if which == "neither-known" || which == "baseline-known" {
+			if which == "unknown" {
 				one.Instance.Start = admission.Start{}
 			}
 			s, _ := executionPopulationSession(t, []admission.Selection{one}, nil)
-			key := instanceKey{NamespaceDevice: one.Instance.Namespace.Device, NamespaceInode: one.Instance.Namespace.Inode, PID: uint32(one.Instance.PID)}
-			if which == "baseline-known" {
-				s.seen[key] = original
-			}
-			if which == "recorded-over-baseline" {
-				s.seen[key] = admission.Determinate(original.Ticks + 100)
-			}
 			got, err := s.Withdrawn()
 			if err != nil {
 				t.Fatal(err)
@@ -175,14 +167,14 @@ func TestExecutionUnknownBirthAndBaselineIsIndeterminate(t *testing.T) {
 				t.Fatalf("unknown-birth retained admission has %d results, want one", len(got))
 			}
 			want := GrantEndedWhileRunning
-			if which == "neither-known" {
+			if which == "unknown" {
 				want = ExecutionIndeterminate
 			}
 			if got[0].State != want {
-				t.Errorf("original birth/baseline: got %q want %q", got[0].State, want)
+				t.Errorf("recorded birth: got %q want %q", got[0].State, want)
 			}
 			if !reflect.DeepEqual(got[0].Selection, one) {
-				t.Errorf("baseline overwrote the recorded admission: %+v", got[0].Selection)
+				t.Errorf("reader overwrote the recorded admission: %+v", got[0].Selection)
 			}
 		})
 	}

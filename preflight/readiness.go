@@ -402,7 +402,9 @@ func programLoad(host Host, capabilities Requirement) Requirement {
 	return r
 }
 
-const declaredTLS = "OpenSSL 3.x, linked dynamically"
+const declaredTLS = "OpenSSL 3.x, linked dynamically, with every present entry point capture requires " +
+	"probable; if a byte-moving or lifecycle one cannot be probed, capture is not live and the " +
+	"attachment sequences no exchange"
 
 func tlsLibrary(host Host, p process.Process, catalog probe.Catalog) Requirement {
 	r := Requirement{Name: TLSLibrary, Declared: declaredTLS, PID: p.PID}

@@ -70,8 +70,13 @@ if ! docker build --target "$target" --tag "$image" "$root/.github/gate" >"$out/
 	exit 1
 fi
 
+# The descriptor limit is set rather than left to the Docker host, whose default
+# differs between hosts and is 65536 on the GitHub runners. The forced exec
+# window in process/independent_arguments_test.go holds 200000 descriptors open
+# and refuses to run with fewer than 202000 available.
 run_in() {
-	docker run --rm --memory="$memory" --memory-swap="$memory" ${privileged[@]+"${privileged[@]}"} \
+	docker run --rm --memory="$memory" --memory-swap="$memory" --ulimit nofile=262144:262144 \
+		${privileged[@]+"${privileged[@]}"} \
 		--volume "$root:/src:ro" --volume "$out:/out" \
 		"$image" /src/.github/gate/in-container.sh "$@"
 }
@@ -172,6 +177,15 @@ bpf)
 	;;
 
 esac
+
+# The containers run as root, so on a Linux host what they wrote under $out is
+# root's, and a later step running as the invoking user cannot read a file
+# written there with mode 0600. The output is handed back after the last
+# container whatever the result, since a failed run is the one whose logs are
+# read. A failed hand-back is said here and changes no verdict.
+if ! handed="$(docker run --rm --volume "$out:/out" "$image" chown -R "$(id -u):$(id -g)" /out 2>&1)"; then
+	echo "$obligation: hand-back: FAILED - $out was not handed back to $(id -u):$(id -g): $handed"
+fi
 
 grep -E '^(memory peak|archive |step |bpf |match |DIFFER |missing |extra |refused: )' "$out/run.log" || true
 

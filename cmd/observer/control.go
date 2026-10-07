@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/evandukss/edge-observer/sink"
 	"io"
 	"io/fs"
 	"os"
@@ -17,6 +20,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/evandukss/edge-observer/account"
 	protected "github.com/evandukss/edge-observer/activation"
 	"github.com/evandukss/edge-observer/attachment"
@@ -25,7 +30,7 @@ import (
 	"github.com/evandukss/edge-observer/spool"
 )
 
-// Everything a session keeps in the configured directory, beside its spools.
+// Session state under the configured directory. Output files use stable paths.
 const (
 	// pidName is the file a running session holds locked for its whole life.
 	pidName = "observer.pid"
@@ -34,7 +39,7 @@ const (
 	// Nothing listens: a request is a file plus a signal.
 	controlName = "control"
 
-	// sessionsName holds one directory per session: its spool and sealed account.
+	// sessionsName holds one directory per session: accounts and control state.
 	sessionsName = "sessions"
 
 	// sealedName is the account a session writes once, when it ends.
@@ -56,12 +61,12 @@ var (
 	errNotRunning     = errors.New("no observer is running for this configuration")
 )
 
-// errNeverSealed is a session directory holding a spool and no sealed account:
-// a capture nothing accounts for. errNotASession is a directory holding
-// neither.
+// errNeverSealed identifies session state without a sealed account. Historical
+// approved output and spool files also identify a session. errNotASession means
+// neither an account nor session state was found.
 var (
-	errNeverSealed = errors.New("this session never sealed: its spool is here and no account was written beside it")
-	errNotASession = errors.New("this directory holds no sealed account and no spool, so it is no session's directory")
+	errNeverSealed = errors.New("this session never sealed: session state is here but no sealed account was written")
+	errNotASession = errors.New("this directory holds no sealed account or session state, so it is no session's directory")
 )
 
 // lock is the pid file a session holds for its whole life, as an advisory
@@ -125,6 +130,40 @@ func describeHolder(content []byte) string {
 // holder is the process and session holding the pid file, or errNotRunning.
 // It asks the lock, not the file's content.
 func holder(directory string) (int, string, error) {
+	return holderUsing(directory, probeHolder)
+}
+
+func probeHolder(file *os.File) (bool, error) {
+	// Taking even a shared flock can refuse a concurrent start. The kernel's
+	// lock inventory answers without taking one. Match the open inode, so a
+	// replacement at the pathname cannot identify another file's holder.
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+		return false, err
+	}
+	locks, err := os.Open("/proc/locks")
+	if err != nil {
+		return false, fmt.Errorf("read kernel locks: %w", err)
+	}
+	defer func() { _ = locks.Close() }()
+	scan := bufio.NewScanner(locks)
+	for scan.Scan() {
+		fields := strings.Fields(scan.Text())
+		if len(fields) != 8 || fields[1] != "FLOCK" || fields[3] != "WRITE" {
+			continue
+		}
+		var major, minor, inode uint64
+		if _, err := fmt.Sscanf(fields[5], "%x:%x:%d", &major, &minor, &inode); err != nil {
+			return false, fmt.Errorf("decode kernel lock identity: %w", err)
+		}
+		if major == uint64(unix.Major(uint64(stat.Dev))) && minor == uint64(unix.Minor(uint64(stat.Dev))) && inode == stat.Ino {
+			return true, nil
+		}
+	}
+	return false, scan.Err()
+}
+
+func holderUsing(directory string, probe func(*os.File) (bool, error)) (int, string, error) {
 	path := filepath.Join(directory, pidName)
 	file, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -134,7 +173,11 @@ func holder(directory string) (int, string, error) {
 		return 0, "", fmt.Errorf("open %s: %w", path, err)
 	}
 	defer func() { _ = file.Close() }()
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err == nil {
+	held, err := probe(file)
+	if err != nil {
+		return 0, "", err
+	}
+	if !held {
 		return 0, "", fmt.Errorf("%w: nothing holds %s", errNotRunning, path)
 	}
 	content, err := os.ReadFile(path)
@@ -165,11 +208,14 @@ func newIdentity() string {
 // ask leaves one request for the running session, signals it, and waits up to
 // within for the answer.
 func ask(directory, kind string, body []byte, within time.Duration) ([]byte, error) {
-	pid, _, err := holder(directory)
+	pid, session, err := holder(directory)
 	if err != nil {
 		return nil, err
 	}
-	control := filepath.Join(directory, controlName)
+	if session == "." || !filepath.IsLocal(session) || strings.ContainsAny(session, "/\\") {
+		return nil, errors.New("invalid running session identity")
+	}
+	control := filepath.Join(directory, sessionsName, session, controlName)
 	if err := os.MkdirAll(control, 0o700); err != nil {
 		return nil, fmt.Errorf("make %s: %w", control, err)
 	}
@@ -250,65 +296,127 @@ func (c *controller) serve() int {
 	return answered
 }
 
-// logger writes log records to the configured file, plus standard output in
-// the foreground, or to standard output alone where configured.
+// logger queues operational records independently of capture and activation.
 type logger struct {
-	mutex sync.Mutex
-	file  *os.File
-	out   io.Writer
+	mutex        sync.Mutex
+	file         *os.File
+	out          io.Writer
+	queue        *sink.Queue
+	destinations []string
 }
+
+const logQueueBytes int64 = 1 << 20
 
 func openLog(settings policy.Settings, foreground bool, stdout io.Writer) (*logger, error) {
-	if settings.Log == policy.Stdout {
-		if !foreground {
-			return nil, errors.New("the log is configured as stdout, and a detached observer has no standard " +
-				"output: configure a file, or run it in the foreground")
-		}
-		return &logger{out: stdout}, nil
+	if settings.Log == policy.Stdout && !foreground {
+		return nil, errors.New("stdout logging requires foreground operation")
 	}
-	if err := os.MkdirAll(filepath.Dir(settings.Log), 0o750); err != nil {
-		return nil, fmt.Errorf("make the log's directory: %w", err)
+	l := &logger{}
+	l.queue, _ = sink.NewQueue(logQueueBytes)
+	if settings.Log != policy.Stdout {
+		_ = l.queue.Register("file", sink.NewFile(settings.Log))
+		l.destinations = append(l.destinations, "file")
 	}
-	file, err := os.OpenFile(settings.Log, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("open the log: %w", err)
-	}
-	opened := &logger{file: file}
 	if foreground {
-		opened.out = stdout
+		l.out = stdout
+		_ = l.queue.Register("stdout", &logOutput{out: stdout})
+		l.destinations = append(l.destinations, "stdout")
 	}
-	return opened, nil
+	return l, nil
 }
 
-// write puts one record on one line wherever the log goes. A failed
-// destination is reported, and the other still written.
+type logOutput struct{ out io.Writer }
+
+func (s *logOutput) Write(ctx context.Context, p []byte) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	return s.out.Write(p)
+}
+func (*logOutput) Reopen(context.Context) error { return nil }
+func (*logOutput) Close(context.Context) error  { return nil }
 func (l *logger) write(record any) error {
 	line, err := json.Marshal(record)
 	if err != nil {
-		return fmt.Errorf("encode a log record: %w", err)
+		return err
 	}
 	line = append(line, '\n')
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
-	var failed []error
-	if l.file != nil {
-		if _, err := l.file.Write(line); err != nil {
-			failed = append(failed, fmt.Errorf("write the log file: %w", err))
+	if l.queue == nil {
+		l.queue, _ = sink.NewQueue(logQueueBytes)
+		if l.file != nil {
+			_ = l.queue.Register("file", &logOutput{out: l.file})
+			l.destinations = append(l.destinations, "file")
+		}
+		if l.out != nil {
+			_ = l.queue.Register("stdout", &logOutput{out: l.out})
+			l.destinations = append(l.destinations, "stdout")
 		}
 	}
-	if l.out != nil {
-		if _, err := l.out.Write(line); err != nil {
-			failed = append(failed, fmt.Errorf("write standard output: %w", err))
+	var errs []error
+	for _, name := range l.destinations {
+		if err := l.queue.Enqueue(name, append([]byte(nil), line...)); err != nil {
+			errs = append(errs, err)
 		}
 	}
-	return errors.Join(failed...)
+	return errors.Join(errs...)
 }
-
-func (l *logger) close() error {
-	if l == nil || l.file == nil {
+func (l *logger) reopen(ctx context.Context) error { return l.queue.Reopen(ctx) }
+func (l *logger) destinationStats() map[string]sink.Stats {
+	if l == nil {
 		return nil
 	}
-	return l.file.Close()
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+	if l.queue == nil {
+		return nil
+	}
+	stats := make(map[string]sink.Stats, len(l.destinations))
+	for _, name := range l.destinations {
+		stats[name] = l.queue.DestinationStats(name)
+	}
+	return stats
+}
+func (l *logger) close() error {
+	if l == nil {
+		return nil
+	}
+	l.mutex.Lock()
+	q := l.queue
+	l.mutex.Unlock()
+	if q == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	return q.Shutdown(ctx)
+}
+
+func reopenCommand(path string, stdout io.Writer) error {
+	directory, err := sessionDirectory(path)
+	if err != nil {
+		return err
+	}
+	answer, err := ask(directory, "reopen", nil, askWithin)
+	if err != nil {
+		return err
+	}
+	var status struct {
+		Error  string `json:"error"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(answer, &status); err != nil {
+		return err
+	}
+	if status.Error != "" {
+		return errors.New(status.Error)
+	}
+	if status.Status != "reopened" {
+		return errors.New("reopen was not acknowledged")
+	}
+	_, err = stdout.Write(append(answer, '\n'))
+	return err
 }
 
 // targetCoverage is one target in a log record: what it selected, what the
@@ -523,9 +631,6 @@ type stopped struct {
 
 	// LogFailures is how many records could not be written to the log. The
 	// account holds what they would have restated.
-	LogFailures int `json:"log_failures"`
-	// This counts the controller consuming storage exhaustion, not Snapshot or
-	// Admit noticing it later. Without it an unwired idle controller is silent.
-	StorageExhaustionConsumptions uint64              `json:"storage_exhaustion_consumptions"`
-	Processing                    *account.Processing `json:"processing,omitempty"`
+	LogFailures int                 `json:"log_failures"`
+	Processing  *account.Processing `json:"processing,omitempty"`
 }

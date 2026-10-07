@@ -11,18 +11,19 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
-	"math"
 	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -76,18 +77,22 @@ func usage() string {
       activation record says which session it follows and how long nothing was
       observed in between
   ` + name + ` stop <configuration>
-      end the running session, sealing its account beside approved output
+      end the running session, sealing its account under sessions/<session>
   ` + name + ` reload <configuration>
       put in force what the configuration the session was started with now ADDS:
       a target needing no probe beyond what is attached. Anything it takes away,
       and a library nothing has attached, is refused and waits for a restart
+  ` + name + ` reopen <configuration>
+      reopen approved, derived and log files after rotation, acknowledging only
+      after each old write has finished and the replacement file is open
   ` + name + ` dry-run <configuration> [--text [--local]]
       what the policy WOULD select, printed before anything attaches
-  ` + name + ` inspect <configuration | session directory> [--text]
+  ` + name + ` inspect <configuration | session directory> [--text [--file <path> ...] [--session <id>]]
       the running session's account, as it stands; or, given a session's
-      directory, the account that session sealed when it ended, read from that
-      directory alone on any machine. There --text adds approved records,
-      permitted values and their capture-time provenance from approved.jsonl;
+      directory, the account that session sealed when it ended. --text adds
+      approved records from the stable approved.jsonl, filtered to that session;
+      --file selects explicit files, including rotated files, and --session
+      selects another session. Historical session-local output is also readable;
       missing or empty approved output is an error
 
 The configuration is one JSON file, observer.config/1 of
@@ -103,9 +108,13 @@ conditions, arguments included, for a view that stays on this host.`
 }
 
 func main() {
-	if err := run(os.Args[1:], os.Stdout); err != nil {
+	exitOnError(run(os.Args[1:], os.Stdout))
+}
+
+func exitOnError(err error) {
+	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, name+": "+err.Error())
-		os.Exit(1)
+		os.Exit(probe.CaptureFailureExitStatus)
 	}
 }
 
@@ -129,12 +138,38 @@ func run(arguments []string, stdout io.Writer) error {
 		"restart":   nil,
 		"stop":      nil,
 		"reload":    nil,
+		"reopen":    nil,
 		"dry-run":   {"--text", "--local"},
 		"inspect":   {"--text"},
 	}
 	accepts, known := allowed[command]
 	if !known {
 		return fmt.Errorf("unknown command %q\n%s", command, usage())
+	}
+	var files []string
+	sessionFilter := ""
+	if command == "inspect" {
+		var flags []string
+		for i := 0; i < len(options); i++ {
+			option := options[i]
+			if option == "--file" || option == "--session" {
+				if i+1 == len(options) {
+					return fmt.Errorf("%s requires a value", option)
+				}
+				i++
+				if option == "--file" {
+					files = append(files, options[i])
+				} else {
+					sessionFilter = options[i]
+				}
+			} else {
+				flags = append(flags, option)
+			}
+		}
+		options = flags
+		if (len(files) > 0 || sessionFilter != "") && !slices.Contains(options, "--text") {
+			return errors.New("--file and --session require --text")
+		}
 	}
 	for _, option := range options {
 		if !slices.Contains(accepts, option) {
@@ -155,12 +190,14 @@ func run(arguments []string, stdout io.Writer) error {
 		return restart(configuration, stdout)
 	case "stop":
 		return stop(configuration, stdout)
+	case "reopen":
+		return reopenCommand(configuration, stdout)
 	case "reload":
 		return reloadCommand(configuration, stdout)
 	case "dry-run":
 		return dryRun(configuration, text, local, stdout)
 	default:
-		return inspect(configuration, text, stdout)
+		return inspectFiles(configuration, text, stdout, files, sessionFilter)
 	}
 }
 
@@ -270,8 +307,38 @@ func dryRun(path string, text, local bool, stdout io.Writer) error {
 // directory alone - with, as text, its persisted approved records.
 // The second works on a copy on any machine.
 func inspect(path string, text bool, stdout io.Writer) error {
+	return inspectFiles(path, text, stdout, nil, "")
+}
+func inspectFiles(path string, text bool, stdout io.Writer, files []string, sessionFilter string) error {
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
-		return inspectFinished(os.DirFS(path), text, stdout)
+		if !text {
+			return inspectFinished(os.DirFS(path), false, stdout)
+		}
+		content, err := os.ReadFile(filepath.Join(path, sealedName))
+		if err != nil {
+			return inspectFinished(os.DirFS(path), true, stdout)
+		}
+		var sealed account.Account
+		if err := json.Unmarshal(content, &sealed); err != nil {
+			return err
+		}
+		if sessionFilter == "" && len(files) == 0 {
+			if _, err := os.Stat(filepath.Join(path, processing.ArtifactName)); err == nil {
+				return inspectFinished(os.DirFS(path), true, stdout)
+			}
+		}
+		if sessionFilter == "" {
+			sessionFilter = sealed.Session
+		}
+		if len(files) == 0 {
+			local := filepath.Join(path, processing.ArtifactName)
+			if _, err := os.Stat(local); err == nil {
+				files = []string{local}
+			} else {
+				files = []string{filepath.Join(filepath.Dir(filepath.Dir(path)), processing.ArtifactName)}
+			}
+		}
+		return inspectSelected(os.DirFS(path), stdout, files, sessionFilter)
 	}
 	directory, err := sessionDirectory(path)
 	if err != nil {
@@ -296,16 +363,65 @@ func inspect(path string, text bool, stdout io.Writer) error {
 		return fmt.Errorf("read the running session's account: %w", err)
 	}
 	account.Render(stdout, live, false)
-	return nil
+	if len(files) == 0 && sessionFilter == "" {
+		return nil
+	}
+	if len(files) == 0 {
+		files = []string{filepath.Join(directory, processing.ArtifactName)}
+	}
+	if sessionFilter == "" {
+		sessionFilter = live.Session
+	}
+	names := make([]string, 0, len(files))
+	for _, path := range files {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return err
+		}
+		names = append(names, strings.TrimPrefix(absolute, "/"))
+	}
+	return processing.ReadArtifactFiles(os.DirFS("/"), names, sessionFilter, func(a processing.Artifact) error { return processing.RenderArtifact(stdout, a) })
 }
 
 // inspectFinished prints the account a session sealed, reading only through
 // its directory. JSON is the sealed file as written; text is rendered as for a
 // running session, then the approved records. A session that never sealed
 // is refused: its output is a capture nothing accounts for.
+func inspectSelected(session fs.FS, stdout io.Writer, files []string, sessionFilter string) error {
+	var encoded bytes.Buffer
+	if err := inspectFinished(session, false, &encoded); err != nil {
+		return err
+	}
+	var sealed account.Account
+	if err := json.Unmarshal(encoded.Bytes(), &sealed); err != nil {
+		return err
+	}
+	var rendered bytes.Buffer
+	account.Render(&rendered, sealed, false)
+	if _, err := rendered.WriteTo(stdout); err != nil {
+		return err
+	}
+	names := make([]string, 0, len(files))
+	for _, path := range files {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return err
+		}
+		names = append(names, strings.TrimPrefix(absolute, "/"))
+	}
+	return processing.ReadArtifactFiles(os.DirFS("/"), names, sessionFilter, func(a processing.Artifact) error { return processing.RenderArtifact(stdout, a) })
+}
+
 func inspectFinished(session fs.FS, text bool, stdout io.Writer) error {
 	content, err := fs.ReadFile(session, sealedName)
 	if errors.Is(err, fs.ErrNotExist) {
+		if state, statErr := fs.Stat(session, controlName); statErr == nil {
+			if state.IsDir() {
+				return errNeverSealed
+			}
+		} else if !errors.Is(statErr, fs.ErrNotExist) {
+			return fmt.Errorf("read session control state: %w", statErr)
+		}
 		for _, name := range []string{processing.ArtifactName, spool.Name, spool.ConnectionsName} {
 			if _, statErr := fs.Stat(session, name); statErr == nil {
 				return errNeverSealed
@@ -454,6 +570,8 @@ func start(path string, stdout io.Writer) (err error) {
 	}
 	running.path = path
 	running.log = log
+	// Ends of executions reach the session from here on, with its log in place.
+	running.ends.serve(running)
 	if err := held.record(os.Getpid(), session); err != nil {
 		running.abandon()
 		_ = log.write(startFailed(session, time.Now(), err))
@@ -466,20 +584,25 @@ func start(path string, stdout io.Writer) (err error) {
 	record.MemoryAssurance = "Current payload-holder membership and limits verified. Memory containment is conditional on entering the isolated bounded no-swap cgroup before exec and keeping membership and limits fixed through capture. These readings do not establish that no allocation predates entry."
 	record.Follows = running.follows(activatedAt)
 	if err := log.write(record); err != nil {
-		// An activation nobody can read is not an activation: readiness is learned
-		// from this record alone.
-		running.abandon()
-		return fmt.Errorf("write the activation record: %w", err)
+		running.logFailures++
 	}
+
 	notify("READY=1\nSTATUS=activated session " + session)
 	// The parent returns on this record; nothing later is the parent's to report.
 	report(reporting, "activated %s", session)
 	reporting = nil
 
-	control := &controller{directory: read.Settings.Directory, answer: func(kind string, body []byte) ([]byte, error) {
+	control := &controller{directory: running.directory, answer: func(kind string, body []byte) ([]byte, error) {
 		switch kind {
 		case "inspect":
 			return json.MarshalIndent(running.snapshot(account.Live, time.Now()), "", "  ")
+		case "reopen":
+			ctx, cancel := context.WithTimeout(context.Background(), askWithin/2)
+			defer cancel()
+			if err := errors.Join(running.output.Reopen(ctx), log.reopen(ctx)); err != nil {
+				return nil, fmt.Errorf("reopen: %w", err)
+			}
+			return json.Marshal(map[string]string{"session": session, "status": "reopened"})
 		case "reload":
 			record := running.reload(time.Now(), body)
 			if err := log.write(record); err != nil {
@@ -487,7 +610,7 @@ func start(path string, stdout io.Writer) (err error) {
 			}
 			return json.Marshal(record)
 		default:
-			return nil, fmt.Errorf("a running session answers inspect and reload, and %q is not something it answers", kind)
+			return nil, fmt.Errorf("a running session answers inspect, reload and reopen, and %q is not something it answers", kind)
 		}
 	}}
 
@@ -497,31 +620,17 @@ func start(path string, stdout io.Writer) (err error) {
 	return running.finish(log)
 }
 
-// serveUntilStop is the production controller loop. Storage can withdraw an
-// idle capture without another event, worker decision, or diagnostic snapshot.
+// serveUntilStop is the production controller loop. Intake exhaustion can
+// withdraw idle capture; output failures are counted independently.
 func (d *daemon) serveUntilStop(stopping, asking <-chan os.Signal, ticks <-chan time.Time, control *controller, log *logger, previous account.Account) {
 	failed := d.startProcessing()
 	for {
 		select {
 		case <-failed:
-			d.consumeStorageExhaustion()
 			return
 		case <-stopping:
-			d.consumeStorageExhaustion()
-			return
-		case <-d.intake.Exhausted():
-			// The intake refused a record, so capture's input is incomplete. The gate
-			// takes intake_exhausted as its reason now, which requests withdrawal and
-			// makes every pending release ineligible, as at the input limit
-			// (probe.DeliveryGateOptions.IntakeExhausted). It is not the
-			// approved-output writer's refusal.
-			d.gate.ConsumeStorageExhaustion()
-			return
-		case <-d.storageExhausted:
-			d.consumeStorageExhaustion()
 			return
 		case <-d.gate.Withdrawal():
-			d.consumeStorageExhaustion()
 			return
 		case <-asking:
 			control.serve()
@@ -546,32 +655,39 @@ type daemon struct {
 	// again.
 	path string
 
-	// directory is this session's own: its approved output and sealed account.
+	// directory holds this session's accounts. Output uses stable parent paths.
 	directory string
 
-	output                        *processing.Writer
-	processing                    *processingRun
-	capture                       *capture.Session
-	attached                      probe.Attachment
-	intake                        *intake.Store
-	gate                          *probe.DeliveryGate
-	payloadPosture                protected.Posture
-	storageExhausted              <-chan struct{}
-	storageExhaustionConsumptions uint64
-	verifyParticipants            func(*probe.DeliveryGate, []process.Process) (protected.Posture, error)
+	output             *processing.Writer
+	processing         *processingRun
+	capture            *capture.Session
+	attached           probe.Attachment
+	intake             *intake.Store
+	gate               *probe.DeliveryGate
+	payloadPosture     protected.Posture
+	verifyParticipants func(*probe.DeliveryGate, []process.Process) (protected.Posture, error)
 	// processingTaken is processing.Options.Taken for this session's workers;
 	// nil outside tests.
 	processingTaken func(worker int, process fragment.Process, connection fragment.ConnectionID)
 
 	// plan is the account at activation - resolved policy and what the kernel
-	// confirmed attached - which every later account starts from.
-	plan account.Account
+	// confirmed attached - which every later account starts from. planMutex
+	// guards its processes, which an attachment's goroutine drops as their
+	// executions end (ended).
+	plan      account.Account
+	planMutex sync.Mutex
 
 	// log is the session's log, which extensions' standard error is copied
 	// into; extensionLogFailures counts the lines of it that could not be
 	// written, from the extensions' own goroutines.
 	log                  *logger
 	extensionLogFailures atomic.Int64
+
+	// endedLogFailures counts the ends of executions that could not be written
+	// to the log, from the attachment's goroutines (ended), and ends is where
+	// the attachment tells of them.
+	endedLogFailures atomic.Int64
+	ends             *endings
 
 	logFailures int
 }
@@ -608,22 +724,20 @@ func begin(read policy.Policy, session string) (*daemon, error) {
 		}
 		participants = append(participants, participant)
 	}
-	// The writer owns the signal fixed into the gate at construction. Opening
-	// it creates an empty approved-output file, not a durable capture sink.
-	if read.Settings.ApprovedOutputBoundMiB <= 0 || read.Settings.ApprovedOutputBoundMiB > math.MaxInt64/(1<<20) {
-		return nil, fmt.Errorf("limits.output_mib cannot be represented as a positive int64 byte allowance")
-	}
 	directory := filepath.Join(read.Settings.Directory, sessionsName, session)
-	output, err := processing.Open(directory, read.Settings.ApprovedOutputBoundMiB<<20)
-	if err != nil {
+	// Leave control state before capture starts, including when no command
+	// ever asks this session for an account before it dies.
+	if err := os.MkdirAll(filepath.Join(directory, controlName), 0700); err != nil {
 		return nil, err
 	}
-	removeOutput := func() {
-		_ = output.Close()
-		_ = os.Remove(filepath.Join(directory, processing.ArtifactName))
-		_ = os.Remove(directory)
+	output, err := processing.OpenWriter(processing.WriterOptions{Directory: read.Settings.Directory})
+	if err != nil {
+		_ = os.RemoveAll(directory)
+		return nil, err
 	}
-	prepared, err := protected.Prepare(read, participants, uint64(read.Settings.AdmittedEventLimit), output.Exhausted())
+	removeOutput := func() { _ = output.Close(); _ = os.RemoveAll(directory) }
+
+	prepared, err := protected.Prepare(read, participants, uint64(read.Settings.AdmittedEventLimit))
 	if err != nil {
 		removeOutput()
 		return nil, err
@@ -635,7 +749,8 @@ func begin(read policy.Policy, session string) (*daemon, error) {
 		_ = os.RemoveAll(directory)
 	}
 	recording := prepared.Recording
-	attached, observed, err := observe(catalog, resolution, table, recording, prepared.Gate)
+	ends := &endings{}
+	attached, observed, err := observe(catalog, resolution, table, recording, prepared.Gate, ends.told)
 	if err != nil {
 		leaveNothing()
 		return nil, err
@@ -658,9 +773,9 @@ func begin(read policy.Policy, session string) (*daemon, error) {
 	return &daemon{
 		policy: read, session: session, directory: directory,
 		capture: recording, attached: attached, plan: plan,
-		output: output, storageExhausted: output.Exhausted(),
+		output: output,
 		intake: prepared.Intake, gate: prepared.Gate, payloadPosture: prepared.Posture,
-		verifyParticipants: protected.VerifyActive,
+		verifyParticipants: protected.VerifyActive, ends: ends,
 	}, nil
 }
 
@@ -676,7 +791,11 @@ func (d *daemon) abandon() {
 // only for a port target and the boot id only for a pid target; an unreadable
 // boot refuses those pid targets by name.
 func resolve(approval process.Approval) (process.Resolution, process.Table, error) {
-	table, err := process.Read(procfs)
+	return resolveFrom(procfs, approval)
+}
+
+func resolveFrom(root string, approval process.Approval) (process.Resolution, process.Table, error) {
+	table, err := process.Read(root)
 	if err != nil {
 		return process.Resolution{}, process.Table{}, err
 	}
@@ -684,7 +803,7 @@ func resolve(approval process.Approval) (process.Resolution, process.Table, erro
 		return slices.ContainsFunc(approval.Rules, has) || slices.ContainsFunc(approval.Exclusions, has)
 	}
 	if names(func(rule process.Rule) bool { return rule.Port != 0 }) {
-		listeners, err := process.ReadListeners(procfs)
+		listeners, err := process.ReadListeners(root)
 		if err != nil {
 			return process.Resolution{}, process.Table{}, fmt.Errorf("read the listening sockets a port "+
 				"resolves against: %w", err)
@@ -693,11 +812,11 @@ func resolve(approval process.Approval) (process.Resolution, process.Table, erro
 	}
 	host := process.Host{Table: table}
 	if names(func(rule process.Rule) bool { return rule.PID != nil }) {
-		if boot, err := process.ReadBoot(procfs); err == nil {
+		if boot, err := process.ReadBoot(root); err == nil {
 			host.Boot = boot
 		}
 	}
-	return approval.Resolve(host), table, nil
+	return approval.ResolveArguments(root, host)
 }
 
 // undumpable makes this process non-dumpable, as the payload holder must be
@@ -757,8 +876,6 @@ func posture() error {
 
 // snapshot is the session's account as it stands at one moment.
 func (d *daemon) snapshot(kind account.Kind, at time.Time) account.Account {
-	a := d.plan
-	a.Kind = kind
 	run := account.Run{Seen: d.capture.Stats()}
 	run.Losses, run.LossesErr = losses(d.attached)
 	run.Refusals, run.RefusalsErr = refused(d.attached)
@@ -767,11 +884,28 @@ func (d *daemon) snapshot(kind account.Kind, at time.Time) account.Account {
 		if run.GrantsErr == nil && run.Grants == nil {
 			run.Grants = []probe.Grant{}
 		}
+		// Read after the grants: reading them lets go of the admissions it finds
+		// ended, which are counted here.
+		if ending, can := d.attached.(probe.Ending); can && run.GrantsErr == nil {
+			run.Ended, run.GrantsErr = ending.EndedCounts()
+		}
 	} else {
 		run.GrantsErr = errors.New("this attachment does not record what it admitted")
 	}
 	run.Processing = d.processingSnapshot()
+	// The plan is read after the grants, whose reading drops the processes it
+	// finds ended.
+	d.planMutex.Lock()
+	a := d.plan
+	a.Processes = slices.Clone(d.plan.Processes)
+	d.planMutex.Unlock()
+	a.Kind = kind
 	a.Ran(at, run)
+	if d.log != nil && d.log.queue != nil {
+		stats := d.log.queue.Stats()
+		a.LogDelivery = &stats
+		a.LogDestinations = d.log.destinationStats()
+	}
 	return a
 }
 
@@ -780,6 +914,12 @@ func (d *daemon) snapshot(kind account.Kind, at time.Time) account.Account {
 func (d *daemon) follows(activatedAt time.Time) *follows {
 	last, err := lastSealed(d.policy.Settings.Directory)
 	if err != nil || last.Session == "" {
+		return nil
+	}
+	content, err := os.ReadFile(last.Account)
+	var prior account.Account
+	if err != nil || json.Unmarshal(content, &prior) != nil || prior.Kind != account.Sealed ||
+		prior.Session != last.Session || prior.Seal == nil || !prior.Seal.Sealed.Equal(last.Sealed) {
 		return nil
 	}
 	return &follows{
@@ -796,15 +936,14 @@ func (d *daemon) follows(activatedAt time.Time) *follows {
 func (d *daemon) finish(log *logger) error {
 	sealer := &connection.Sealer{Producer: producing(d.attached), Within: drainWithin}
 	seal, sealErr := sealer.Stop()
-	// The backend's production count makes a trailing loss visible.
-	d.capture.Finish(seal.Sealed, seal.Counters.ReservationAttempts)
+	// Every connection still open is settled against what the producer holds.
+	d.capture.Finish(seal.Sealed)
 	seal.Counters = seal.Counters.Join(d.capture.Counted())
 	// Raw fragments are not persisted in this pipeline. Approved route records
 	// have different units and cannot satisfy the legacy spool identity.
 	noSpool := connection.Uncounted("raw fragments are not persisted; approved route records are counted separately")
 	seal.Counters.Persisted, seal.Counters.PersistedDropped, seal.Counters.PersistedRefused = noSpool, noSpool, noSpool
 	processingErr := d.finishProcessing(processing.Finalization{Withdrawn: seal.Withdrawal.Complete, Drained: seal.Drain.Complete})
-	d.consumeStorageExhaustion()
 	_ = d.intake.Close()
 	seal.Sealed = time.Now()
 
@@ -821,9 +960,12 @@ func (d *daemon) finish(log *logger) error {
 
 	record := stopped{
 		Record: "stopped", Version: recordVersion, Session: d.session, At: time.Now(),
-		Sealed: sealErr == nil, Complete: sealErr == nil && seal.Complete, LogFailures: d.logFailures + int(d.extensionLogFailures.Load()),
-		StorageExhaustionConsumptions: d.storageExhaustionConsumptions,
-		Processing:                    final.Processing,
+		Sealed: sealErr == nil, Complete: sealErr == nil && seal.Complete, LogFailures: d.logFailures + int(d.extensionLogFailures.Load()) + int(d.endedLogFailures.Load()),
+		Processing: final.Processing,
+	}
+	if log != nil && log.queue != nil {
+		delivery := log.queue.Stats()
+		record.LogFailures = int(delivery.Failed + delivery.Dropped)
 	}
 	path := filepath.Join(d.directory, sealedName)
 	content, err := json.MarshalIndent(final, "", "  ")
@@ -867,11 +1009,40 @@ func (d *daemon) finish(log *logger) error {
 	if err := place(filepath.Join(d.policy.Settings.Directory, lastName), last); err != nil {
 		record.Error = err.Error()
 	}
-	return log.write(record)
+	_ = log.write(record)
+	_ = log.close()
+	if log.queue != nil {
+		stats := log.queue.Stats()
+		final.LogDelivery = &stats
+		final.LogDestinations = log.destinationStats()
+		content, err = json.MarshalIndent(final, "", "  ")
+		if err == nil {
+			err = place(path, append(content, '\n'))
+		}
+		if err != nil {
+			return fmt.Errorf("seal log delivery counts: %w", err)
+		}
+		if record.Contract != "" {
+			projected, err := published.Account(final)
+			if err == nil {
+				content, err = json.MarshalIndent(projected, "", "  ")
+			}
+			if err == nil {
+				err = place(contractPath, append(content, '\n'))
+			}
+			if err != nil {
+				return fmt.Errorf("seal contract log delivery counts: %w", err)
+			}
+		}
+	}
+	if reason.InvalidatesCapture() {
+		return fmt.Errorf("capture ended: %s", reason)
+	}
+	return errors.Join(sealErr, processingErr)
 }
 
 // notify tells a supervisor that named a notify socket that the session is up.
-// It is never the only readiness signal - the activation record in the log is -
+// Readiness follows successful activation independently of log delivery.
 // and a write failure changes nothing.
 func notify(state string) {
 	socket := os.Getenv("NOTIFY_SOCKET")
@@ -929,7 +1100,7 @@ func (u unstoppable) Account() (connection.Counters, error) {
 // at once: a probe is placed on a file and fires for every process running it,
 // so per-process placement would report each call once per placement.
 func observe(catalog probe.Catalog, resolution process.Resolution, table process.Table,
-	sink probe.Sink, gate *probe.DeliveryGate) (probe.Attachment, []attachment.Observed, error) {
+	sink probe.Sink, gate *probe.DeliveryGate, ended func(probe.Ended)) (probe.Attachment, []attachment.Observed, error) {
 	state := gate.Snapshot()
 	if state.MaxEvents == 0 || state.Charged != 0 || state.Reason != "" {
 		return nil, nil, &protected.Refusal{Check: protected.DeliveryGate, PID: os.Getpid(), Detail: "attach requires the verified fresh delivery gate"}
@@ -937,7 +1108,7 @@ func observe(catalog probe.Catalog, resolution process.Resolution, table process
 	adapter, canAttach := catalog.Adapters()[0].(probe.Adapter)
 
 	attempts := make([]attachment.Attempt, 0, len(resolution.Selections))
-	request := probe.Request{Deny: resolution.Denials, DeliveryGate: gate}
+	request := probe.Request{Deny: resolution.Denials, DeliveryGate: gate, Ended: ended}
 	for _, one := range resolution.Selections {
 		p, found := table.Lookup(one.ObserverPID)
 		if !found {

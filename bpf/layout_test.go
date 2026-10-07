@@ -81,7 +81,8 @@ func TestTheInFlightMirrorNamesEveryFieldTheProgramDeclares(t *testing.T) {
 		{"net_ino", 8}, {"opened", 8}, {"local", 16}, {"peer", 16}, {"lport", 2}, {"dport", 2},
 		{"socket_fd", 4}, {"sockets", 1}, {"ends", 1},
 		{"outcome", 1}, {"io", 1},
-		{"dir", 1}, {"count", 1}, {"early", 1}, {"deferred", 1}, {"live", 1}, {"live_padding", 3},
+		{"dir", 1}, {"count", 1}, {"early", 1}, {"deferred", 1}, {"live", 1},
+		{"nested", 1}, {"live_padding", 6}, {"occupancy", 8}, {"number", 8},
 	}
 
 	if len(declared) != len(mirrored) {
@@ -182,6 +183,11 @@ func TestTheEventReaderTakesEachFieldFromWhereTheProgramPutsIt(t *testing.T) {
 		{Field{"parent_ns_ino", 8}, 160}, {Field{"parent_pid", 4}, 168},
 		{Field{"target", 4}, 172}, {Field{"rule", 4}, 176}, {Field{"admitted_by", 1}, 180},
 		{Field{"padding_origin", 3}, 181},
+		{Field{"occupancy", 8}, 184}, {Field{"number", 8}, 192}, {Field{"unlocated", 8}, 200},
+		{Field{"last_sent", 8}, 208}, {Field{"last_received", 8}, 216},
+		{Field{"born", 1}, 224}, {Field{"overlapped", 1}, 225}, {Field{"in_flight", 1}, 226},
+		{Field{"exited", 1}, 227}, {Field{"padding_place", 4}, 228}, {Field{"dropped", 8}, 232}, {Field{"begin_unlocated", 8}, 240},
+		{Field{"admission_birth", 8}, 248},
 	}
 
 	if len(declared) != len(reader) {
@@ -210,8 +216,8 @@ func TestTheEventReaderTakesEachFieldFromWhereTheProgramPutsIt(t *testing.T) {
 
 	// The payload begins where the fixed part ends (rawHeader in package ebpf). A
 	// field added at the end moves it without moving any offset above.
-	if at != 184 {
+	if at != 256 {
 		t.Errorf("the fixed part of struct event is %d bytes and package ebpf reads its payload "+
-			"from offset 184, so every payload it copies starts in the wrong place", at)
+			"from offset 256, so every payload it copies starts in the wrong place", at)
 	}
 }

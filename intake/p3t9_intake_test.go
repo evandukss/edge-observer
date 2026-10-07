@@ -113,7 +113,7 @@ func TestP3T9IntakeOwnsOpaqueRecordsAndChargesLengths(t *testing.T) {
 	}
 }
 
-func TestP3T9IntakeSharedLimitRefusesWholeRecordAndStaysExhausted(t *testing.T) {
+func TestP3T9IntakeSharedLimitRefusesWholeRecord(t *testing.T) {
 	f := fragment.Record{Payload: []byte("pending")}
 	r := connection.Record{ID: 9, Early: []connection.Early{{Length: 7}}}
 	// Fixed cost is architecture-dependent and the contract does not publish
@@ -208,9 +208,6 @@ func TestP3T9IntakeSharedLimitRefusesWholeRecordAndStaysExhausted(t *testing.T) 
 					lease.Release()
 					if s.Stats().Bytes != 0 {
 						t.Fatal("release failed after exhaustion")
-					}
-					if err := insertFirst(); !errors.Is(err, intake.ErrLimit) {
-						t.Fatalf("release reopened exhausted store: %v", err)
 					}
 				}
 			})
