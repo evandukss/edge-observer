@@ -178,6 +178,15 @@ bpf)
 
 esac
 
+# The containers run as root, so on a Linux host what they wrote under $out is
+# root's, and a later step running as the invoking user cannot read a file
+# written there with mode 0600. The output is handed back after the last
+# container whatever the result, since a failed run is the one whose logs are
+# read. A failed hand-back is said here and changes no verdict.
+if ! handed="$(docker run --rm --volume "$out:/out" "$image" chown -R "$(id -u):$(id -g)" /out 2>&1)"; then
+	echo "$obligation: hand-back: FAILED - $out was not handed back to $(id -u):$(id -g): $handed"
+fi
+
 grep -E '^(memory peak|archive |step |bpf |match |DIFFER |missing |extra |refused: )' "$out/run.log" || true
 
 if [ "${#verdicts[@]}" -eq 0 ]; then
