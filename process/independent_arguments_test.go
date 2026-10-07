@@ -402,10 +402,12 @@ func independentForceDescriptors(t *testing.T, n int) {
 	}
 }
 
-// A process caught between its exec and the placing of its argv is reread
-// within the bound and decided on its real arguments. The window is forced
-// with 200000 close-on-exec descriptors; every first reading that saw it is
-// counted, and at least one must have, or nothing was measured.
+// A process caught between exec and argv placement is decided on reread
+// arguments or refused at the deadline. Scheduling can exhaust the bound for
+// any start. Of 20 starts, at least one caught window must settle successfully:
+// this is the minimum evidence of a working reread, not a success-rate claim.
+// The window is forced with 200000 close-on-exec descriptors; no caught window
+// is a wiring failure, distinct from catching windows but never settling one.
 func TestIndependentArgumentsTheForcedExecWindowIsRereadAndDecided(t *testing.T) {
 	directory, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -417,7 +419,7 @@ func TestIndependentArgumentsTheForcedExecWindowIsRereadAndDecided(t *testing.T)
 	independentForceDescriptors(t, 200000)
 
 	const starts = 20
-	window := 0
+	window, reread, refused := 0, 0, 0
 	for i := range starts {
 		command := exec.Command(path, "600")
 		if err := command.Start(); err != nil {
@@ -425,10 +427,28 @@ func TestIndependentArgumentsTheForcedExecWindowIsRereadAndDecided(t *testing.T)
 		}
 		pid := int32(command.Process.Pid)
 		first, err := process.Identify(independentProcfs, pid)
-		if err == nil && first.Executable == path && len(first.Arguments) == 0 {
+		caught := err == nil && first.Executable == path && len(first.Arguments) == 0
+		if caught {
 			window++
+			if first.ArgumentEvidence != process.ArgumentsUndetermined {
+				t.Errorf("start %d: empty arguments have evidence %d, want ArgumentsUndetermined", i, first.ArgumentEvidence)
+			}
+			if got := rule.Decide(first); got != process.Indeterminate {
+				t.Errorf("start %d: argument rule decides %d on empty arguments, want Indeterminate", i, got)
+			}
+			empty := process.Rule{Executable: path}
+			if got := empty.Decide(first); got != process.Indeterminate {
+				t.Errorf("start %d: executable-only rule decides %d on empty arguments, want Indeterminate", i, got)
+			}
+			byPID := process.Rule{PID: &process.PIDGuard{PID: pid, Start: first.StartTime}}
+			excluding := process.Approval{Rules: []process.Rule{byPID}, Exclusions: []process.Rule{empty}}
+			if got := excluding.Decide(first); got != process.Indeterminate {
+				t.Errorf("start %d: exclusion decides %d on empty arguments, want Indeterminate", i, got)
+			}
 		}
+		began := time.Now()
 		settled, settling := approval.SettleArguments(independentProcfs, process.TableOf(first))
+		waited := time.Since(began)
 		p, found := settled.Lookup(pid)
 		decided := rule.Decide(p)
 		_ = command.Process.Kill()
@@ -436,13 +456,37 @@ func TestIndependentArgumentsTheForcedExecWindowIsRereadAndDecided(t *testing.T)
 		if err != nil {
 			t.Fatalf("wiring, not the property: start %d: the first reading of pid %d failed: %v", i, pid, err)
 		}
-		if settling != nil || !found || decided != process.MatchFound {
+		if !found || p.Executable != path || p.StartTime != first.StartTime {
+			t.Errorf("start %d: pid %d lost its identity on settling: found %v, executable %q, start %d; want %s, start %d",
+				i, pid, found, p.Executable, p.StartTime, path, first.StartTime)
+			continue
+		}
+		if settling != nil {
+			var refusal process.ArgumentsRefusal
+			if !errors.As(settling, &refusal) || refusal.PID != pid || refusal.Executable != path ||
+				refusal.Detail != "the command line could not be established" || waited < process.ArgumentReadBound ||
+				p.ArgumentEvidence != process.ArgumentsUndetermined || decided != process.Indeterminate {
+				t.Errorf("start %d: pid %d refused after %v with evidence %d, decision %d, error %v; "+
+					"want undetermined arguments refused at the deadline", i, pid, waited, p.ArgumentEvidence, decided, settling)
+			} else {
+				refused++
+			}
+			continue
+		}
+		if p.ArgumentEvidence != process.ArgumentsKnown || !slices.Equal(p.Arguments, command.Args) || decided != process.MatchFound {
 			t.Errorf("start %d: pid %d first read with arguments %q settled to found %v, arguments %q, decision %d, "+
-				"error %v; want MatchFound", i, pid, first.Arguments, found, p.Arguments, decided, settling)
+				"evidence %d; want known arguments %q and MatchFound", i, pid, first.Arguments, found, p.Arguments,
+				decided, p.ArgumentEvidence, command.Args)
+		} else if caught {
+			reread++
 		}
 	}
 	t.Logf("forced window: %d of %d first readings saw the executable readable and the command line 0 bytes", window, starts)
+	t.Logf("settled after a forced window: %d; refused at the deadline: %d", reread, refused)
 	if window == 0 {
 		t.Fatalf("wiring, not the property: no first reading of %d saw the forced window, so no reread was measured", starts)
+	}
+	if reread == 0 {
+		t.Errorf("none of %d forced windows settled to known arguments; want at least one successful reread", window)
 	}
 }
