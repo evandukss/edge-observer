@@ -18,7 +18,7 @@ import (
 // The parent is the tracer and deliberately does not wait for the worker
 // until commanded. Its child is the admitted TLS actor. No observer result
 // decides when the two terminal tasks have been established.
-const executionZombieSource = independentTransferSource + `
+const executionZombieSource = trafficTransferSource + `
 #include <sys/ptrace.h>
 #include <sys/syscall.h>
 static int commands[2], reports[2];
@@ -145,8 +145,8 @@ func executionThreadCount(t *testing.T, pid int32, want string) {
 func TestATerminalGroupsAdmissionIsLetGoOfAtItsLastTasksExit(t *testing.T) {
 	for _, traced := range []bool{false, true} {
 		t.Run(fmt.Sprintf("traced=%t", traced), func(t *testing.T) {
-			port, received := independentPeer(t)
-			actor := independentActor(t, executionZombieSource, port)
+			port, received := trafficPeer(t)
+			actor := trafficActor(t, executionZombieSource, port)
 			pid := executionActorNumber(t, actor, "actor")
 			parent := loaded(t, pid)
 			session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: points(t, parent), Admit: authorise(parent)})
@@ -154,7 +154,7 @@ func TestATerminalGroupsAdmissionIsLetGoOfAtItsLastTasksExit(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer func() { _ = session.Close() }()
-			admitted := independentAdmittedIdentity(t, session, parent)
+			admitted := trafficAdmittedIdentity(t, session, parent)
 			if _, err := io.WriteString(actor.input, "P\n"); err != nil {
 				t.Fatal(err)
 			}
@@ -180,7 +180,7 @@ func TestATerminalGroupsAdmissionIsLetGoOfAtItsLastTasksExit(t *testing.T) {
 			actorLine(t, actor, "transfer 0\n")
 			peerReceived(t, received, "/execution-worker")
 			_ = drain(session, 100*time.Millisecond)
-			independentWithdrawal(t, session, admitted, ebpf.GrantEndedWhileRunning)
+			trafficWithdrawal(t, session, admitted, ebpf.GrantEndedWhileRunning)
 			live, err := session.Withdrawn()
 			if err != nil || len(live) != 1 {
 				t.Fatalf("live group result: %v %+v", err, live)
@@ -211,12 +211,12 @@ func TestATerminalGroupsAdmissionIsLetGoOfAtItsLastTasksExit(t *testing.T) {
 				}
 				executionThreadCount(t, pid, "1")
 			}
-			if held, err := ebpf.IndependentKernelGrantPresent(session, admitted); err != nil || held {
+			if held, err := ebpf.KernelGrantPresent(session, admitted); err != nil || held {
 				t.Fatalf("fixture: absent grant not established: %t %v", held, err)
 			}
 			// The group's last task has exited, so its end is established and the
 			// session lets go of the admission rather than holding it as terminal.
-			independentLetGo(t, session, admitted)
+			trafficLetGo(t, session, admitted)
 			if !reflect.DeepEqual(live[0].Reading, retained) || live[0].Reading.Witness.TID != tid || live[0].Reading.Observed.From.IsZero() {
 				t.Error("past observation was lost after witness exit")
 			}

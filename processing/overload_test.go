@@ -244,7 +244,7 @@ func TestAConnectionCutOrdersAgainstHeldOutputAuthorization(t *testing.T) {
 }
 
 func TestAConnectionCutOrdersAgainstPendingExtensionSubmission(t *testing.T) {
-	bin := independentPeer(t)
+	bin := extensionPeer(t)
 	dir := t.TempDir()
 	audit := filepath.Join(dir, "received.jsonl")
 	entries, err := json.Marshal([]any{map[string]any{"name": "worker", "command": []string{bin, "--mode", "unchanged", "--record", audit}, "fields": []string{"request.line"}, "timeout_ms": 1000}})

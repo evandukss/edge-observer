@@ -9,8 +9,8 @@ import (
 	"github.com/evandukss/edge-observer/processing"
 )
 
-// Supplementary representation check added after the five producer reds were
-// captured. It is not red-first evidence or the independent public-reader test.
+// A supplementary representation check. It does not stand in for the tests of
+// the public reader.
 func TestPolicyExclusionEvidencePreservesAvailability(t *testing.T) {
 	out := &outputLog{}
 	w, store := worker(t, rulesPlan(t, `"remove": {"headers": ["authorization"]}`), out)

@@ -10,7 +10,7 @@ package extension
 import "time"
 
 // Protocol is the protocol version, matched exactly in start and ready.
-const Protocol = "observer.extension/1"
+const Protocol = "observer.extension/2"
 
 // DerivedVersion is the version of every line the observer writes to an
 // extension's derived file.

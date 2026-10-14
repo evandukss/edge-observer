@@ -28,7 +28,7 @@ import (
 // The peer is a Go TLS server, so the OpenSSL probes cannot observe it. Its
 // receipt and the client's checked response establish both halves of each
 // exchange independently of the observer and of the client's stdout.
-func independentPeer(t *testing.T) (int, <-chan string) {
+func trafficPeer(t *testing.T) (int, <-chan string) {
 	t.Helper()
 	received := make(chan string, 32)
 	peer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -58,7 +58,7 @@ func peerReceived(t *testing.T, received <-chan string, want string) {
 
 // The OpenSSL setup comes from the arming fixture; this actor takes an
 // explicit path argument and verifies the peer response.
-const independentTransferSource = `
+const trafficTransferSource = `
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <openssl/ssl.h>
@@ -105,7 +105,7 @@ static int transfer(const char *path) {
 // libc invokes this callback before fork returns in the parent. The child is
 // never stopped; the callback waits for its completed transfer and exit.
 func immediateForkSource() string {
-	return independentTransferSource + `
+	return trafficTransferSource + `
 static int wait_in_parent;
 static int parent_wait_status;
 static void before_parent_return(void) {
@@ -143,12 +143,12 @@ int main(int argc, char **argv) {
 `
 }
 
-func independentActor(t *testing.T, source string, port int) *armingProcess {
+func trafficActor(t *testing.T, source string, port int) *armingProcess {
 	t.Helper()
-	return independentActorIn(t, source, port, 0)
+	return trafficActorIn(t, source, port, 0)
 }
 
-func independentActorIn(t *testing.T, source string, port int, cloneflags uintptr) *armingProcess {
+func trafficActorIn(t *testing.T, source string, port int, cloneflags uintptr) *armingProcess {
 	t.Helper()
 	directory := t.TempDir()
 	path := filepath.Join(directory, "actor.c")
@@ -191,11 +191,11 @@ func actorLine(t *testing.T, actor *armingProcess, want string) {
 }
 
 func TestChildTransfersBeforeItsParentsForkReturn(t *testing.T) {
-	port, received := independentPeer(t)
-	actor := independentActor(t, immediateForkSource(), port)
+	port, received := trafficPeer(t)
+	actor := trafficActor(t, immediateForkSource(), port)
 	parent := loaded(t, int32(actor.command.Process.Pid))
 	session, err := ebpf.Attach(ebpf.Options{
-		Program: bpf.Full(), Points: append(points(t, parent), independentForkPoint(t, parent)), Admit: authorise(parent),
+		Program: bpf.Full(), Points: append(points(t, parent), trafficForkPoint(t, parent)), Admit: authorise(parent),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -255,7 +255,7 @@ func TestChildTransfersBeforeItsParentsForkReturn(t *testing.T) {
 }
 
 func TestEqualLocalPIDsDoNotShareApproval(t *testing.T) {
-	port, received := independentPeer(t)
+	port, received := trafficPeer(t)
 	approvedPID, approvedSaid, approvedTalk := namespacedProcess(t, port)
 	unapprovedPID, unapprovedSaid, unapprovedTalk := namespacedProcess(t, port)
 	approved, unapproved := loaded(t, approvedPID), loaded(t, unapprovedPID)
@@ -265,7 +265,7 @@ func TestEqualLocalPIDsDoNotShareApproval(t *testing.T) {
 	selection := admit(approved)
 	selection.Mode = admission.ModeFollow
 	session, err := ebpf.Attach(ebpf.Options{
-		Program: bpf.Full(), Points: append(points(t, approved), independentForkPoint(t, approved)), Admit: []admission.Selection{selection},
+		Program: bpf.Full(), Points: append(points(t, approved), trafficForkPoint(t, approved)), Admit: []admission.Selection{selection},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -308,7 +308,7 @@ func TestEqualLocalPIDsDoNotShareApproval(t *testing.T) {
 
 // Resolve the actor's actual library with the existing fixture, then use the
 // published constructor so the fork window has both entry and return hooks.
-func independentForkPoint(t *testing.T, actor process.Process) ebpf.Point {
+func trafficForkPoint(t *testing.T, actor process.Process) ebpf.Point {
 	t.Helper()
 	resolved := forkPoint(t, actor)
 	return ebpf.ForkPoint(resolved.Symbol, resolved.Path, resolved.Offset)

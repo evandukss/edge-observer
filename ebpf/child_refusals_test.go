@@ -17,7 +17,7 @@ import (
 	"github.com/evandukss/edge-observer/ebpf"
 )
 
-func independentParentControl(t *testing.T, actor *armingProcess, session *ebpf.Session, received <-chan string) {
+func trafficParentControl(t *testing.T, actor *armingProcess, session *ebpf.Session, received <-chan string) {
 	t.Helper()
 	if _, err := io.WriteString(actor.input, "P\n"); err != nil {
 		t.Fatal(err)
@@ -30,15 +30,15 @@ func independentParentControl(t *testing.T, actor *armingProcess, session *ebpf.
 }
 
 func TestAlreadyExitedChildHasNoGrantBeforeAnyReconciliation(t *testing.T) {
-	port, received := independentPeer(t)
-	actor := independentActor(t, immediateForkSource(), port)
+	port, received := trafficPeer(t)
+	actor := trafficActor(t, immediateForkSource(), port)
 	parent := loaded(t, int32(actor.command.Process.Pid))
-	session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: append(points(t, parent), independentForkPoint(t, parent)), Admit: authorise(parent)})
+	session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: append(points(t, parent), trafficForkPoint(t, parent)), Admit: authorise(parent)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = session.Close() }()
-	independentParentControl(t, actor, session, received)
+	trafficParentControl(t, actor, session, received)
 	if _, err := io.WriteString(actor.input, "F\n"); err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestAlreadyExitedChildHasNoGrantBeforeAnyReconciliation(t *testing.T) {
 	if _, err := os.Stat(fmt.Sprintf("/proc/%d", child)); !os.IsNotExist(err) {
 		t.Fatalf("child not reaped before admission completed: %v", err)
 	}
-	present, err := ebpf.IndependentKernelGrantPresent(session, admission.Instance{Namespace: parent.Namespace, PID: child})
+	present, err := ebpf.KernelGrantPresent(session, admission.Instance{Namespace: parent.Namespace, PID: child})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestAlreadyExitedChildHasNoGrantBeforeAnyReconciliation(t *testing.T) {
 
 }
 
-const independentNewNamespaceMain = `
+const trafficNewNamespaceMain = `
 #include <sched.h>
 int main(int argc, char **argv) {
  if(argc!=2) return 10;
@@ -90,15 +90,15 @@ int main(int argc, char **argv) {
 `
 
 func TestUnenumeratedNamespaceIsNamedSeparatelyFromAnExitedChild(t *testing.T) {
-	port, received := independentPeer(t)
-	actor := independentActor(t, "#define _GNU_SOURCE\n"+independentTransferSource+independentNewNamespaceMain, port)
+	port, received := trafficPeer(t)
+	actor := trafficActor(t, "#define _GNU_SOURCE\n"+trafficTransferSource+trafficNewNamespaceMain, port)
 	parent := loaded(t, int32(actor.command.Process.Pid))
-	session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: append(points(t, parent), independentForkPoint(t, parent)), Admit: authorise(parent)})
+	session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: append(points(t, parent), trafficForkPoint(t, parent)), Admit: authorise(parent)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = session.Close() }()
-	independentParentControl(t, actor, session, received)
+	trafficParentControl(t, actor, session, received)
 	childPID, err := actor.child('N', "namespace-child")
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +117,7 @@ func TestUnenumeratedNamespaceIsNamedSeparatelyFromAnExitedChild(t *testing.T) {
 	if got := attribution(drain(session, 100*time.Millisecond), "/independent-new-namespace"); got != nil {
 		t.Errorf("never-enumerated namespace was read: %+v", got)
 	}
-	present, err := ebpf.IndependentKernelGrantPresent(session, child.Instance())
+	present, err := ebpf.KernelGrantPresent(session, child.Instance())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,8 +144,8 @@ func TestUnenumeratedNamespaceIsNamedSeparatelyFromAnExitedChild(t *testing.T) {
 	}
 }
 
-func exerciseIndependentExitBeforeAdmission(t *testing.T) {
-	port, received := independentPeer(t)
+func exerciseTrafficExitBeforeAdmission(t *testing.T) {
+	port, received := trafficPeer(t)
 	source := strings.Replace(heldFamilySource(), "if (child != 0) return child;", "if (child != 0) { int status; if(waitpid(child,&status,WUNTRACED)!=child || !WIFSTOPPED(status)) exit(30); return child; }", 1)
 	source = strings.Replace(source, "if (command[0] == 'P') {", `if (command[0] == 'T') {
   transient_child=held_child(0); printf("transient %d\n",transient_child);
@@ -154,7 +154,7 @@ func exerciseIndependentExitBeforeAdmission(t *testing.T) {
   if(waitpid(transient_child,&status,0)!=transient_child) return 31;
   printf("transient-exited %d\n",status);
  } else if (command[0] == 'P') {`, 1)
-	actor := independentActor(t, source, port)
+	actor := trafficActor(t, source, port)
 	parent := loaded(t, int32(actor.command.Process.Pid))
 	runtime.LockOSThread()
 	listener, err := installArmingListener()
@@ -162,7 +162,7 @@ func exerciseIndependentExitBeforeAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	coordinated := coordinateArming(listener, actor)
-	session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: append(points(t, parent), independentForkPoint(t, parent)), Admit: authorise(parent)})
+	session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: append(points(t, parent), trafficForkPoint(t, parent)), Admit: authorise(parent)})
 	if err != nil {
 		t.Fatal(armingAttachFailure(coordinated.errors, err))
 	}
@@ -187,11 +187,11 @@ func exerciseIndependentExitBeforeAdmission(t *testing.T) {
 		t.Fatal(err)
 	default:
 	}
-	independentParentControl(t, actor, session, received)
+	trafficParentControl(t, actor, session, received)
 	if _, err := os.Stat(fmt.Sprintf("/proc/%d", children.transient)); !os.IsNotExist(err) {
 		t.Fatalf("transient child not reaped: %v", err)
 	}
-	present, err := ebpf.IndependentKernelGrantPresent(session, admission.Instance{Namespace: parent.Namespace, PID: children.transient})
+	present, err := ebpf.KernelGrantPresent(session, admission.Instance{Namespace: parent.Namespace, PID: children.transient})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func exerciseIndependentExitBeforeAdmission(t *testing.T) {
 func TestChildGoneBetweenAdoptionReadAndWriteIsNamed(t *testing.T) {
 	const environment = "OBSERVER_INDEPENDENT_EXIT_HELPER"
 	if os.Getenv(environment) == "1" {
-		exerciseIndependentExitBeforeAdmission(t)
+		exerciseTrafficExitBeforeAdmission(t)
 		return
 	}
 	command := exec.Command(os.Args[0], "-test.run=^TestChildGoneBetweenAdoptionReadAndWriteIsNamed$", "-test.v", "-test.timeout=45s")

@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/evandukss/edge-observer/account"
+	"github.com/evandukss/edge-observer/contentcoding"
 	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/contract/record"
 	"github.com/evandukss/edge-observer/extension"
@@ -191,17 +192,25 @@ func (e *extensions) counts() []account.ExtensionCounts {
 // its id and index, the exchange as handed over and the reconstruction
 // pipeline's copy of it as the chain leaves it, what each extension did to it,
 // and where it is in the chain. It holds the exchange's charges - what it was
-// handed over with (intake.Parsing) and its copy's (intake.Policy) - until its
-// lines are written or it is let go (letGo).
+// handed over with and its decoded content (intake.Parsing), and its copy's
+// (intake.Policy) - until its lines are written or it is let go (letGo).
 type dispatch struct {
 	b     *batch
 	id    uint64
 	index int
 	role  reconstruct.Role
 	// excluded is an exchange the output will not write, and reason why, once
-	// that is decidable; "" until then.
+	// that is decidable; "" until then. An exchange excluded alone has its
+	// reason from the start.
 	excluded bool
 	reason   string
+	// decoded is what prepare made of the exchange: the charges of its decoded
+	// content, given back once (releaseContent). omitted is, for the request
+	// and the response, a body whose decoding did not complete, which the copy
+	// does not hold (undecoded): an extension is sent its marker, never its
+	// bytes or anything read from them.
+	decoded prepared
+	omitted [2]bool
 
 	// source is the exchange as handed over. processed is the first
 	// reconstruction pipeline's copy of it (w.pipelines[reconstruction]), alone
@@ -250,22 +259,47 @@ type completion struct {
 // chain issues an exchange the pairing handed over its id and index and puts
 // it on its connection's chain, behind the exchanges before it: each goes
 // through every extension in turn, one at a time, and then its lines are
-// written. The first reconstruction pipeline's copy, which every extension
-// and every line reads, is made and charged before the id is issued: a copy
-// the shared allowance refuses cuts the connection with nothing of the
-// exchange released. The first exchange that is not complete and supported
-// is excluded, and so is every one after it; each still takes an id and an
-// index, and is sent as excluded once its reason is decidable (settled), at
-// the latest at the connection's end or cut (decideTail).
+// written. What it does with the exchange is prepare's, as on the path
+// without extensions: a body that is encoded is decoded, and the copies are
+// made of the decoded content; a decoding the shared allowance refuses cuts
+// the connection with nothing of the exchange released. The first
+// reconstruction pipeline's copy, which every extension and every line
+// reads, is made and charged before the id is issued: a copy the shared
+// allowance refuses cuts the connection the same way.
+//
+// An exchange whose body cannot be decoded is excluded alone (excludeAlone):
+// its reason is decided now, it is counted once, and the exchanges after it
+// go on. The first exchange a stop excludes is excluded, and so is every one
+// after it; each still takes an id and an index, and is sent as excluded once
+// its reason is decidable (settled), at the latest at the connection's end or
+// cut (decideTail). Of an excluded exchange the copy holds no body whose
+// decoding did not complete (undecoded): what policy and every extension see
+// of it is its framing and extent, never its bytes.
 func (w *Worker) chain(ctx context.Context, b *batch, x reconstruct.Exchange, role reconstruct.Role) error {
 	p := b.parse
 	if !x.Complete || !countableMessage(x.Request) || !countableMessage(x.Response) {
 		p.countable = false
 	}
 	_, err := w.identity(b)
-	d := &dispatch{b: b, role: role, source: x, changedBy: map[string]int{},
-		excluded: err != nil || p.excluded || !supportedExchange(x)}
-	one := reconstruct.Connection{Process: b.process, ID: b.id, Role: role, Exchanges: []reconstruct.Exchange{x}}
+	prep := prepared{verdict: verdictStop}
+	if err == nil {
+		prep = w.prepare(b, x, role)
+	}
+	if prep.verdict == verdictCut {
+		p.reserver.Release(x.Charge)
+		w.cutByAllowance(b)
+		return nil
+	}
+	d := &dispatch{b: b, role: role, source: x, changedBy: map[string]int{}, decoded: prep,
+		excluded: prep.verdict != verdictWrite, reason: prep.reason}
+	copied := x
+	if prep.verdict != verdictStop {
+		copied = prep.exchange
+	}
+	if d.excluded {
+		copied, d.omitted = undecoded(copied)
+	}
+	one := reconstruct.Connection{Process: b.process, ID: b.id, Role: role, Exchanges: []reconstruct.Exchange{copied}}
 	for i, pipeline := range w.pipelines {
 		if pipeline.Input != config.ReconstructionInput || p.failed[pipeline.Name] {
 			continue
@@ -273,6 +307,7 @@ func (w *Worker) chain(ctx context.Context, b *batch, x reconstruct.Exchange, ro
 		processed, run, held, failed, full := w.policyCopy(b, one, pipeline.Slots)
 		if full {
 			w.returnPolicy(b, d.policy)
+			w.releaseContent(b, &d.decoded)
 			p.reserver.Release(x.Charge)
 			w.cutByAllowance(b)
 			return nil
@@ -303,15 +338,23 @@ func (w *Worker) chain(ctx context.Context, b *batch, x reconstruct.Exchange, ro
 		// No pipeline can give an extension its record of it: it is not
 		// released, as nothing of a connection was when that was found at its
 		// retirement.
+		w.releaseContent(b, &d.decoded)
 		p.reserver.Release(x.Charge)
 		return nil
 	}
 	request, response := directions(role)
-	d.index = p.exchanges
-	p.exchanges++
-	d.id = w.release.issued.Add(1)
+	switch prep.verdict {
+	case verdictExclude:
+		// Its reason is decided now, and nothing later changes it.
+		d.index, d.id = w.excludeAlone(b, x, role, prep.reason)
+	default:
+		d.index = p.exchanges
+		p.exchanges++
+		d.id = w.release.issued.Add(1)
+	}
 	w.extensions.issue(1)
-	if d.excluded {
+	switch prep.verdict {
+	case verdictStop:
 		if !p.excluded {
 			p.excluded = true
 			for _, side := range []struct {
@@ -328,7 +371,7 @@ func (w *Worker) chain(ctx context.Context, b *batch, x reconstruct.Exchange, ro
 			b.invalid = true
 		}
 		d.reason = b.settled(d)
-	} else {
+	case verdictWrite:
 		p.good++
 		p.released[request], p.released[response] = x.Request.End, x.Response.End
 	}
@@ -431,15 +474,53 @@ func (w *Worker) decideTail(b *batch) {
 	}
 }
 
-// letGo gives back what a dispatch holds: its copy's charge and what its
-// exchange was handed over with, once.
+// letGo gives back what a dispatch holds: its copy's charge, its decoded
+// content and what its exchange was handed over with, once.
 func (w *Worker) letGo(d *dispatch) {
 	w.returnPolicy(d.b, d.policy)
 	d.policy = 0
+	w.releaseContent(d.b, &d.decoded)
 	if p := d.b.parse; p != nil {
 		p.reserver.Release(d.source.Charge)
 	}
 	d.source.Charge = http1.Charge{}
+}
+
+// undecoded is x without the bytes of any body whose decoding did not
+// complete - one with captured bytes whose captured Content-Encoding names
+// anything but identity, and no decoded content (reconstruct.Message's
+// Content) - and which of the request and the response that was. Such a
+// message keeps its headers, framing, captured extent and loss, and holds no
+// body bytes and no shape: nothing derived from the encoded bytes is copied,
+// so no rule reads them and no extension is sent them. The messages of x are
+// not changed.
+func undecoded(x reconstruct.Exchange) (reconstruct.Exchange, [2]bool) {
+	var omitted [2]bool
+	for i, m := range []*reconstruct.Message{x.Request, x.Response} {
+		if m == nil || m.Content != nil || m.BodyLength == 0 || !encoded(m) {
+			continue
+		}
+		bare := *m
+		bare.Body, bare.Shape, bare.ShapeRefused = nil, nil, ""
+		if i == 0 {
+			x.Request = &bare
+		} else {
+			x.Response = &bare
+		}
+		omitted[i] = true
+	}
+	return x, omitted
+}
+
+// encoded is a message whose captured Content-Encoding names anything but
+// identity: a coding, known or not, or a value that is not a list of codings.
+func encoded(m *reconstruct.Message) bool {
+	fields := contentEncodings(m)
+	if len(fields) == 0 {
+		return false
+	}
+	list, verdict := contentcoding.ParseList(fields)
+	return verdict != contentcoding.Supported || list.Len() != 0
 }
 
 // drop lets go of every exchange on a connection's chain without writing it:
@@ -655,7 +736,7 @@ func (w *Worker) exchangeMessage(d *dispatch, k int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	side := func(m *reconstruct.Message, s record.Side, request bool) map[string]any {
+	side := func(m *reconstruct.Message, s record.Side, request, omitted bool) map[string]any {
 		prefix := "response."
 		if request {
 			prefix = "request."
@@ -680,7 +761,15 @@ func (w *Worker) exchangeMessage(d *dispatch, k int) ([]byte, error) {
 		if headers {
 			out["headers"], out["trailers"] = r.Headers, r.Trailers
 		}
-		if body {
+		switch {
+		case body && omitted:
+			// What was captured of a body whose decoding did not complete is
+			// its extent and its loss; the copy holds nothing of its bytes, and
+			// the marker is the exchange's reason, never its coding.
+			out["body"] = map[string]any{"length": r.Body.Length, "kept": "", "holed": r.Body.Holed, "elided": r.Body.Elided,
+				"encoding": r.Body.Encoding, "content": map[string]string{"state": omittedState, "reason": d.reason}}
+			out["framing"], out["structure"] = r.Framing, map[string]string{"state": omittedState}
+		case body:
 			out["body"], out["framing"], out["structure"] = r.Body, r.Framing, r.Structure
 		}
 		return map[string]any{"state": record.Present, "message": out}
@@ -703,8 +792,8 @@ func (w *Worker) exchangeMessage(d *dispatch, k int) ([]byte, error) {
 	message := map[string]any{
 		"type": "exchange", "id": strconv.FormatUint(d.id, 10),
 		"connection_id": strconv.FormatUint(uint64(d.b.id), 10), "index": d.index, "output": output,
-		"exchange": map[string]any{"index": d.index, "complete": e.Complete, "request": side(e.Request, projected.Request, true),
-			"response": side(e.Response, projected.Response, false), "removed": removed},
+		"exchange": map[string]any{"index": d.index, "complete": e.Complete, "request": side(e.Request, projected.Request, true, d.omitted[0]),
+			"response": side(e.Response, projected.Response, false, d.omitted[1]), "removed": removed},
 	}
 	if identity := d.b.parse.identity; selected(config.FieldConnection) && identity != nil {
 		message["connection"] = *identity
@@ -754,13 +843,17 @@ func (w *Worker) project(d *dispatch) (record.Exchange, error) {
 	return e, nil
 }
 
+// omittedState is the state of an omitted body's content and structure in
+// what an extension is sent (undecoded).
+const omittedState = "omitted"
+
 // The replacement rules of the protocol.
 var (
 	protocolPattern = regexp.MustCompile(`^HTTP/[0-9]\.[0-9]$`)
 	// readOnly are members of a component an answer names that cannot be
 	// replaced; any other unknown member is malformed.
 	readOnly = []string{"kind", "complete", "framed", "defect", "state", "length", "holed", "elided", "encoding",
-		"framing", "structure", "stream", "detail", "index", "id"}
+		"content", "framing", "structure", "stream", "detail", "index", "id"}
 )
 
 const (

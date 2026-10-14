@@ -532,9 +532,9 @@ func TestEverySelectedProcessIsJudgedInTheOrderGiven(t *testing.T) {
 	}
 }
 
-// Decision 477 item 2: preflight runs before attach, so it states the conditional
-// consequence a user must know - a present byte mover that cannot be probed leaves
-// capture not live - in the TLS library requirement it reads.
+// Preflight runs before attach, so it states the conditional consequence a user
+// must know - a present byte mover that cannot be probed leaves capture not
+// live - in the TLS library requirement it reads.
 func TestThePreflightTLSRequirementStatesTheNotLiveConsequence(t *testing.T) {
 	c := meeting(t)
 	p := c.live()

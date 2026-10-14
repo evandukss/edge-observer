@@ -79,6 +79,17 @@ type Provenance struct {
 	Observer      Observer      `json:"observer"`
 	Contracts     []string      `json:"contracts"`
 	Configuration Configuration `json:"configuration"`
+
+	// Kernel is optional: an account written before sessions recorded their
+	// kernel does not have it.
+	Kernel *Kernel `json:"kernel,omitempty" account:"optional"`
+}
+
+// Kernel is the kernel the session ran on, read when it activated: a fact about
+// the session, where Observer.Floor is a claim about the build.
+type Kernel struct {
+	Block
+	Release string `json:"release"`
 }
 
 // Observer is what the build that wrote the account can do, and the kernel
@@ -585,6 +596,32 @@ type ProcessingAggregate struct {
 	InputCut           string        `json:"input_cut" account:"count"`
 	Authorized         string        `json:"authorized" account:"count"`
 	Written            string        `json:"written" account:"count"`
+	// ExcludedExchanges is the exchanges excluded alone, by reason. It is
+	// absent where the operational account did not count them, which is not
+	// zero.
+	ExcludedExchanges *ExcludedExchanges `json:"excluded_exchanges,omitempty" account:"optional"`
+	// DecoderFaults is the decodings whose decoder library failed and was
+	// contained, a decimal string. Each one's exchange is counted in
+	// ExcludedExchanges as content_decoding_failed too. It is absent where the
+	// operational account did not count them, which is not zero.
+	DecoderFaults string `json:"decoder_faults,omitempty" account:"optional,count"`
+}
+
+// ExcludedExchanges is the exchanges a session excluded alone, by the reason
+// each was excluded for, as decimal strings: content_coding_unsupported, a body
+// in a coding the observer does not undo or in more than one;
+// content_decoding_failed, a body that did not decode;
+// content_decoded_too_large, a body that decoded to more than the per-message
+// body bound; content_decoding_too_costly, a body whose decoding would take
+// more work than the decoder's budget allows. Each exchange is counted once,
+// under one reason, however many sides, routes or extensions it had. It is
+// neither a processing failure nor a cut, and an exchange excluded with a
+// connection's truncated suffix is not counted here.
+type ExcludedExchanges struct {
+	ContentCodingUnsupported string `json:"content_coding_unsupported" account:"count"`
+	ContentDecodingFailed    string `json:"content_decoding_failed" account:"count"`
+	ContentDecodedTooLarge   string `json:"content_decoded_too_large" account:"count"`
+	ContentDecodingTooCostly string `json:"content_decoding_too_costly" account:"count"`
 }
 
 // Processed is one pipeline's dispositions.

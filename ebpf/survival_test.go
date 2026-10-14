@@ -51,8 +51,8 @@ func survivingFamilySource() string {
 func TestRootExitPreservesSurvivorsButDoesNotSelectAReplacement(t *testing.T) {
 	for _, mode := range []admission.Mode{admission.ModeExisting, admission.ModeFollow} {
 		t.Run(fmt.Sprint(mode), func(t *testing.T) {
-			port, received := independentPeer(t)
-			actor := independentActor(t, survivingFamilySource(), port)
+			port, received := trafficPeer(t)
+			actor := trafficActor(t, survivingFamilySource(), port)
 			parent := loaded(t, int32(actor.command.Process.Pid))
 			child, err := actor.child('L', "live")
 			if err != nil {
@@ -62,7 +62,7 @@ func TestRootExitPreservesSurvivorsButDoesNotSelectAReplacement(t *testing.T) {
 			selected := admit(parent)
 			selected.Mode = mode
 			session, err := ebpf.Attach(ebpf.Options{
-				Program: bpf.Full(), Points: append(points(t, parent), independentForkPoint(t, parent)), Admit: []admission.Selection{selected},
+				Program: bpf.Full(), Points: append(points(t, parent), trafficForkPoint(t, parent)), Admit: []admission.Selection{selected},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -124,7 +124,7 @@ func TestRootExitPreservesSurvivorsButDoesNotSelectAReplacement(t *testing.T) {
 			if mode == admission.ModeExisting && born != nil {
 				t.Errorf("existing-only survivor admitted a new child after root exit: %+v", born)
 			}
-			replacement := independentActor(t, immediateForkSource(), port)
+			replacement := trafficActor(t, immediateForkSource(), port)
 			if _, err := io.WriteString(replacement.input, "P\n"); err != nil {
 				t.Fatal(err)
 			}

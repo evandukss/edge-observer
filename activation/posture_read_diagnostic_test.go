@@ -1,4 +1,4 @@
-//go:build linux && p3t5diagnostic
+//go:build linux && posturediagnostic
 
 package activation
 
@@ -27,13 +27,13 @@ import (
 // runner occupies a leaf below a root with the memory controller enabled.
 // It records the observed classification; it does not assert the predicted
 // Check value or change production behavior to obtain a particular answer.
-func TestP3T5UnreadablePostureDiagnostic(t *testing.T) {
+func TestUnreadablePostureDiagnostic(t *testing.T) {
 	runPostureReadConstruction(t, false)
 }
 
 func runPostureReadConstruction(t *testing.T, classify bool) {
 	t.Helper()
-	if mode := os.Getenv("P3T5_POSTURE_READ_MODE"); mode != "" {
+	if mode := os.Getenv("POSTURE_READ_MODE"); mode != "" {
 		postureReadDiagnosticChild(t, mode, classify)
 		return
 	}
@@ -74,7 +74,7 @@ func runPostureReadConstruction(t *testing.T, classify bool) {
 			if mode == "missing_memory_file" {
 				base = parentDir
 			}
-			dir, err := os.MkdirTemp(base, "p3t5-posture-read-")
+			dir, err := os.MkdirTemp(base, "posture-read-")
 			if err != nil {
 				t.Fatalf("setup: create owned cgroup: %v", err)
 			}
@@ -109,7 +109,7 @@ func runPostureReadConstruction(t *testing.T, classify bool) {
 			defer cancel()
 			cmd := exec.CommandContext(ctx, executable, "-test.run=^"+testName+"$", "-test.v", "-test.count=1", "-test.timeout=25s")
 			cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(group.Fd())}
-			cmd.Env = append(os.Environ(), "P3T5_POSTURE_READ_MODE="+mode, "P3T5_POSTURE_READ_GROUP="+strings.TrimPrefix(dir, root))
+			cmd.Env = append(os.Environ(), "POSTURE_READ_MODE="+mode, "POSTURE_READ_GROUP="+strings.TrimPrefix(dir, root))
 			output, err := cmd.CombinedOutput()
 			t.Logf("CHILD mode=%s output:\n%s", mode, output)
 			if err != nil {
@@ -124,7 +124,7 @@ func postureReadDiagnosticChild(t *testing.T, mode string, classify bool) {
 	if !slices.Contains([]string{"compliant", "missing_memory_file", "unlimited_memory", "missing_participant", "changed_participant"}, mode) {
 		t.Fatalf("unknown diagnostic mode %q", mode)
 	}
-	group := os.Getenv("P3T5_POSTURE_READ_GROUP")
+	group := os.Getenv("POSTURE_READ_GROUP")
 	membership, err := os.ReadFile("/proc/self/cgroup")
 	if err != nil || !slices.Contains(strings.Split(string(membership), "\n"), "0::"+group) {
 		t.Fatalf("setup: pre-exec placement not established: expected=%q actual=%q error=%v", group, membership, err)

@@ -20,8 +20,8 @@ import (
 	"github.com/evandukss/edge-observer/spool"
 )
 
-func independentCustomBIOSource(sidePort int) string {
-	return fmt.Sprintf("#define SIDE_PORT %d\n", sidePort) + independentTransferSource + `
+func trafficCustomBIOSource(sidePort int) string {
+	return fmt.Sprintf("#define SIDE_PORT %d\n", sidePort) + trafficTransferSource + `
 #include <stdint.h>
 static int transport, other, ambiguous;
 static struct sockaddr_in side;
@@ -138,14 +138,14 @@ func TestCustomBIOBindsOneSocketAndReportsTwoDescriptorsAsAmbiguous(t *testing.T
 			}()
 		}
 	}()
-	actor := independentActor(t, independentCustomBIOSource(side.LocalAddr().(*net.UDPAddr).Port), listener.Addr().(*net.TCPAddr).Port)
+	actor := trafficActor(t, trafficCustomBIOSource(side.LocalAddr().(*net.UDPAddr).Port), listener.Addr().(*net.TCPAddr).Port)
 	parent := loaded(t, int32(actor.command.Process.Pid))
 	disk, err := spool.Open(t.TempDir(), 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = disk.Close() })
-	sink := &independentBindingSink{recording: capture.Recording(disk, disk), transfers: make(chan probe.Transfer, 8)}
+	sink := &trafficBindingSink{recording: capture.Recording(disk, disk), transfers: make(chan probe.Transfer, 8)}
 	live, err := attach.NeweBPF(process.Approval{}).Attach(probe.Request{Processes: []process.Process{parent}, Admit: authorise(parent)}, sink)
 	if err != nil {
 		t.Fatal(err)
@@ -183,7 +183,7 @@ func TestCustomBIOBindsOneSocketAndReportsTwoDescriptorsAsAmbiguous(t *testing.T
 				t.Fatalf("second descriptor did not transfer inside the same SSL_read callback: %q, %v", buffer[:n], err)
 			}
 		}
-		one := independentBindingTransfer(t, sink, message)
+		one := trafficBindingTransfer(t, sink, message)
 		want := probe.BoundTo
 		if round == 1 {
 			want = probe.BoundAmbiguously
@@ -193,9 +193,9 @@ func TestCustomBIOBindsOneSocketAndReportsTwoDescriptorsAsAmbiguous(t *testing.T
 		}
 		command("F")
 		actorLine(t, actor, "freed\n")
-		waitIndependentLifecycleConnections(t, disk, int64(round+1))
+		waitTrafficLifecycleConnections(t, disk, int64(round+1))
 	}
-	records := independentLifecycleConnections(t, disk.ConnectionsPath())
+	records := trafficLifecycleConnections(t, disk.ConnectionsPath())
 	if len(records) != 2 || records[0].ID == records[1].ID {
 		t.Fatalf("two completed TLS lifetimes did not retain separate stream identities: %+v", records)
 	}

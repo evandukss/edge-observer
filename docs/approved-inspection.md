@@ -42,7 +42,7 @@ capture-time policy revision unchanged.
 `policy_exclusions` records actual removals by processing policy from retained
 messages, per pipeline. It never carries a removed value.
 
-The worker writes `observer.approved/4`. Each entry names the exchange index,
+The worker writes `observer.approved/5`. Each entry names the exchange index,
 `request` or `response`, the `field` removed and a `disposition`:
 
 | field | disposition | written when |
@@ -95,7 +95,7 @@ bodies use Go string quoting.
 
 The canonical envelope is in the [record contract](../contract/record/record.md#approved-line-envelope).
 
-The writer emits `observer.approved/4`. Each line carries `session`,
+The writer emits `observer.approved/5`. Each line carries `session`,
 `policy_revision`, `route`, and `connection` metadata. The metadata's ending
 never asserts an observed close without evidence.
 
@@ -110,8 +110,17 @@ never asserts an observed close without evidence.
 - `record: "connection"` is emitted once at retirement, on the connections route.
   It has final connection metadata, no exchange id, index or reconstruction.
   It carries any `reconstruction_truncation` describing the incomplete suffix,
-  and always `reconstruction_unplaced`, the connection's unplaced total;
-  exchange lines do not carry that retirement evidence.
+  and always `reconstruction_unplaced`, the connection's unplaced total, and
+  `excluded_exchanges`, its exchanges excluded alone by reason; exchange lines
+  do not carry that retirement evidence.
+- An exchange whose body cannot be decoded - an unsupported coding, a stream
+  that does not decode, content over the body bound, or a decoding over its
+  work budget - is excluded alone. It
+  keeps its id and index, no line carries it, it is counted once in its
+  connection line's `excluded_exchanges`, and the exchanges after it are
+  written. A message whose body was decoded is written as its content, and its
+  `body.content` says so
+  ([record contract](../contract/record/record.md#decoded-bodies)).
 - Every line has present `policy_exclusions`, `extension_outcomes` and
   `replacement_exclusions` lists. On an exchange they refer only to that
   exchange's index; on a connection they are empty.
@@ -121,8 +130,9 @@ reused. An id denotes the same connection and index on every route and in every
 extension. Indexes on one connection rise across its lines, and a line once
 written is never changed. Dropping a line cannot renumber any later exchange.
 With `write_content` false, no exchange line is emitted and no exchange id is
-issued. Versions 3 and 4 have no `exchange_ids` range. Readers retain support
-for versions 1 to 3 under their historical rules: a version 3 line was written
+issued. Versions 3 to 5 have no `exchange_ids` range. Readers retain support
+for versions 1 to 4 under their historical rules: a version 4 line has no
+`excluded_exchanges` and no decoded body, a version 3 line was written
 only after its connection's retirement and carries its final record, and a
 version 2 line has its connection's contiguous id range.
 
@@ -209,14 +219,27 @@ Diagnostics do not quote malformed record content.
 
 Both reading and rendering validate these structural requirements:
 
-- The artifact version is `observer.approved/4`, `observer.approved/3`, `observer.approved/2` or `observer.approved/1`;
+- The artifact version is `observer.approved/5`, `observer.approved/4`,
+  `observer.approved/3`, `observer.approved/2` or `observer.approved/1`;
   policy revision, pipeline, sink and route kind are nonempty. Connection
   record kind/version and identity are present.
-- In `observer.approved/4`, an exchange line carries the provisional connection
-  record and a provisional `reconstruction.unplaced`, and a connection line the
-  final record and its `reconstruction_unplaced`; no earlier version has a
-  provisional record. The exact rules are in the
+- In `observer.approved/4` and `observer.approved/5`, an exchange line carries
+  the provisional connection record and a provisional
+  `reconstruction.unplaced`, and a connection line the final record and its
+  `reconstruction_unplaced`; no earlier version has a provisional record. The
+  exact rules are in the
   [record contract](../contract/record/record.md#approved-line-envelope).
+- In `observer.approved/5`, a connection line carries `excluded_exchanges`,
+  every reason present with a decimal count and no leading zero, and no other
+  line or earlier version carries it
+  ([record contract](../contract/record/record.md#exchanges-excluded-alone)).
+- Only `observer.approved/5` carries `body.content`. Its state is `decoded`,
+  its `length` a decimal with no leading zero, on a body whose `length` is not
+  zero and whose `holed` and `elided` are `0`. Its `codings`, where present,
+  are exactly one of `gzip`, `deflate`, `br` and `zstd`, and exactly the
+  codings the written `Content-Encoding` fields name, unless an extension's
+  change of that message's headers is what is written
+  ([record contract](../contract/record/record.md#decoded-bodies)).
 - A reconstruction has the published record kind/version, names the same
   connection and process, and contains at least one exchange. Exchange indexes
   are unique and nonnegative. Each exchange is complete with present, complete,
@@ -224,7 +247,7 @@ Both reading and rendering validate these structural requirements:
   Body encoding is base64 and its retained bytes decode. Message directions are
   sent or received; stream offsets are unsigned decimal integers with end at
   least start.
-- Truncation requires a reconstruction or a version 3 or 4 retirement line, state `truncated`, suffix
+- Truncation requires a reconstruction or a version 3, 4 or 5 retirement line, state `truncated`, suffix
   `indeterminate`, and one or two stops ordered sent then received, without
   repetition. Offsets are unsigned decimal integers; evidence cannot precede
   the exclusion boundary. Reasons are the codes declared in `TruncationStop`.
@@ -232,7 +255,7 @@ Both reading and rendering validate these structural requirements:
   `reconstruction_truncated`. That reason also requires truncation evidence.
 - Each exclusion is a unique entry referring to an existing retained exchange
   and to request or response. Metadata-only records carry no populated
-  exclusion evidence. Version 3 and 4 retirement lines can carry truncation evidence.
+  exclusion evidence. Version 3, 4 and 5 retirement lines can carry truncation evidence.
 - In `observer.approved/1`, an entry names headers or trailers and a lowercase
   HTTP field token, and the named field cannot also be present in that message
   section. No structure state is `removed`.

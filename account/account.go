@@ -62,6 +62,14 @@ type Floor struct {
 	WouldEstablish string `json:"would_establish"`
 }
 
+// Kernel is the kernel a session ran on, read once when it activated, so a
+// copy inspected on another host still names the kernel it ran on. Release is
+// what that kernel calls itself; Why is why it could not be read.
+type Kernel struct {
+	Release string `json:"release,omitempty"`
+	Why     string `json:"why,omitempty"`
+}
+
 // Instance is one process as an account names it. Never its arguments.
 type Instance struct {
 	PID          int32   `json:"pid"`
@@ -225,6 +233,10 @@ type Account struct {
 	Build probe.Capability `json:"build"`
 	Floor Floor            `json:"floor"`
 
+	// Kernel is the kernel the session ran on. An account written before
+	// sessions recorded it has none, and a dry run has no session.
+	Kernel *Kernel `json:"kernel,omitempty"`
+
 	Targets    []Target    `json:"targets"`
 	Exclusions []Exclusion `json:"exclusions"`
 
@@ -366,6 +378,7 @@ type ExtensionCounts struct {
 // GateReason is the current capture-wide invalidation reason, independently of
 // whether a candidate reached authorization. Counts are the last returned
 // worker outcome; the gate is read later.
+// ExcludedExchanges is the exchanges processing excluded alone, by reason.
 // Its presence identifies a session that does not create a raw spool.
 type Processing struct {
 	Delivery           sink.Stats       `json:"delivery"`
@@ -376,10 +389,36 @@ type Processing struct {
 	InputCut           uint64           `json:"input_cut"`
 	Authorized         uint64           `json:"authorized"`
 	Written            uint64           `json:"written"`
+	// ExcludedExchanges is nil in an account written by an observer that did
+	// not count them: not counted, which is not zero.
+	ExcludedExchanges *ExcludedExchanges `json:"excluded_exchanges,omitempty"`
+	// DecoderFaults is the decodings whose decoder library failed and was
+	// contained. Each one's exchange was excluded alone and is counted in
+	// ExcludedExchanges as content_decoding_failed too; this says how many of
+	// those were the decoder's own failure rather than the body's. Nil in an
+	// account written by an observer that did not count them.
+	DecoderFaults *uint64 `json:"decoder_faults,omitempty"`
 	// ExchangeIDs is the number of exchange ids the session issued, and
 	// Extensions one entry per configured extension, in the order it runs.
 	ExchangeIDs uint64            `json:"exchange_ids"`
 	Extensions  []ExtensionCounts `json:"extensions"`
+}
+
+// ExcludedExchanges is the exchanges a session excluded alone, by the reason
+// each was excluded for: a body in a coding the observer does not undo or in
+// more than one, a body that did not decode, a body that decoded to more than
+// the per-message body bound, and a body whose decoding would take more work
+// than the decoder's budget allows. Each exchange is counted once, under one
+// reason, however many sides, routes or extensions it had, and a count stays
+// when its connection is later cut. An exchange excluded alone is written on no
+// line, takes its id and index, and is neither a processing failure nor a cut;
+// an exchange excluded with a connection's truncated suffix is not counted
+// here.
+type ExcludedExchanges struct {
+	ContentCodingUnsupported uint64 `json:"content_coding_unsupported"`
+	ContentDecodingFailed    uint64 `json:"content_decoding_failed"`
+	ContentDecodedTooLarge   uint64 `json:"content_decoded_too_large"`
+	ContentDecodingTooCostly uint64 `json:"content_decoding_too_costly"`
 }
 
 // Plan is the account of a policy resolved and not attached. inspect, where
@@ -704,12 +743,26 @@ func Render(to io.Writer, a Account, local bool) {
 			"included, and is not for anything that leaves this host")
 	}
 	say("policy     revision %s, generation %d", a.Policy.Revision, a.Policy.Generation)
+	// The floor is the build's and the kernel line the session's. A version at or
+	// above the floor is not a promise: a kernel runs the build if it loads the
+	// programs.
+	declared := fmt.Sprintf("this build declares kernel %s as the oldest it runs on", a.Floor.Published)
 	if a.Floor.Proved {
-		say("floor      kernel %s or newer is published, and loading there is proved", a.Floor.Published)
+		say("floor      %s, and has been run on %s; on any kernel, whether it runs is decided by loading its "+
+			"programs", declared, a.Floor.Published)
 	} else {
-		say("floor      kernel %s or newer is published, and loading there is UNPROVED - a claim about the "+
-			"artifact and not about this run. Established: %s. What would establish it: %s",
-			a.Floor.Published, a.Floor.Established, a.Floor.WouldEstablish)
+		say("floor      %s, and has not been run on %s; on any kernel, whether it runs is decided by loading its "+
+			"programs. What is known: %s. What would settle it: %s", declared, a.Floor.Published,
+			a.Floor.Established, a.Floor.WouldEstablish)
+	}
+	switch {
+	case a.Kind == Planned:
+	case a.Kernel == nil:
+		say("kernel     this session's kernel was not recorded")
+	case a.Kernel.Why != "":
+		say("kernel     this session's kernel could not be read when it activated: %s", a.Kernel.Why)
+	default:
+		say("kernel     this session ran on kernel %s, read when it activated", a.Kernel.Release)
 	}
 
 	for _, target := range a.Targets {

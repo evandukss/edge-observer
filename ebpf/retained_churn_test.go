@@ -129,9 +129,9 @@ var churnRefusals = map[string]uint32{
 func TestChurnedExecutionsLeaveNothingInTheKernelTablesOrTheSession(t *testing.T) {
 	const children = 64
 	port, answered := churnPeer(t)
-	actor := independentActor(t, churnSource, port)
+	actor := trafficActor(t, churnSource, port)
 	parent := loaded(t, int32(actor.command.Process.Pid))
-	points := append(points(t, parent), independentForkPoint(t, parent))
+	points := append(points(t, parent), trafficForkPoint(t, parent))
 	points = append(points, socketPointsFor(t, parent)...)
 	var ended []probe.Ended
 	endedAt := make(chan probe.Ended, children)

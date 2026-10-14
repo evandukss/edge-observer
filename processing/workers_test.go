@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/evandukss/edge-observer/contentcoding"
 	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/fragment"
 	"github.com/evandukss/edge-observer/intake"
@@ -102,6 +103,9 @@ type runOptions struct {
 	output  processing.Output
 	gate    func(store *intake.Store) *probe.DeliveryGate
 	taken   func(int, fragment.Process, fragment.ConnectionID)
+	// decoder, where set, decodes in place of contentcoding.Decode, on every
+	// worker at once.
+	decoder func(contentcoding.List, []byte, contentcoding.Options) contentcoding.Result
 }
 
 func startRun(t *testing.T, plan *config.ProcessingPlan, o runOptions) (*processing.Run, *intake.Store) {
@@ -120,8 +124,12 @@ func startRun(t *testing.T, plan *config.ProcessingPlan, o runOptions) (*process
 	} else if gate, err = probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 1 << 40, IntakeExhausted: store.Exhausted()}); err != nil {
 		t.Fatal(err)
 	}
-	run, err := processing.Start(processing.Options{Session: "fixture-session", Plan: plan, PolicyRevision: "workers", Intake: store, Gate: gate,
-		Output: o.output, Workers: o.workers, Taken: o.taken})
+	options := processing.Options{Session: "fixture-session", Plan: plan, PolicyRevision: "workers", Intake: store, Gate: gate,
+		Output: o.output, Workers: o.workers, Taken: o.taken}
+	if o.decoder != nil {
+		options = processing.DecodeWith(options, o.decoder)
+	}
+	run, err := processing.Start(options)
 	if err != nil || run == nil {
 		t.Fatalf("wiring, not the property: the workers did not start: %v", err)
 	}

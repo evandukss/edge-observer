@@ -120,7 +120,7 @@ func main() {
 				}
 				log(map[string]any{"descendant": c.Process.Pid})
 			}
-			send(map[string]any{"type": "ready", "protocol": "observer.extension/1"})
+			send(map[string]any{"type": "ready", "protocol": "observer.extension/2"})
 			if *mode == "blocked-stdin" {
 				for {
 					time.Sleep(time.Hour)

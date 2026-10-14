@@ -17,8 +17,8 @@ import (
 	"github.com/evandukss/edge-observer/spool"
 )
 
-func independentDescriptorReplacementSource() string {
-	prefix, _, _ := strings.Cut(independentHandleReuseSource, "int main(int argc")
+func trafficDescriptorReplacementSource() string {
+	prefix, _, _ := strings.Cut(trafficHandleReuseSource, "int main(int argc")
 	return prefix + `
 #include <sys/stat.h>
 int main(int argc, char **argv) {
@@ -71,15 +71,15 @@ int main(int argc, char **argv) {
 }
 
 func TestDup2InvalidatesABufferedHandlesBindingWithoutATLSRebind(t *testing.T) {
-	port, written := independentGreetingPeer(t)
-	actor := independentActor(t, independentDescriptorReplacementSource(), port)
+	port, written := trafficGreetingPeer(t)
+	actor := trafficActor(t, trafficDescriptorReplacementSource(), port)
 	parent := loaded(t, int32(actor.command.Process.Pid))
 	disk, err := spool.Open(t.TempDir(), 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = disk.Close() })
-	sink := &independentBindingSink{recording: capture.Recording(disk, disk), transfers: make(chan probe.Transfer, 8)}
+	sink := &trafficBindingSink{recording: capture.Recording(disk, disk), transfers: make(chan probe.Transfer, 8)}
 	live, err := attach.NeweBPF(process.Approval{}).Attach(probe.Request{Processes: []process.Process{parent}, Admit: authorise(parent)}, sink)
 	if err != nil {
 		t.Fatal(err)
@@ -100,7 +100,7 @@ func TestDup2InvalidatesABufferedHandlesBindingWithoutATLSRebind(t *testing.T) {
 		t.Fatalf("live binding and unread buffered bytes control: %q, %v, %v", line, err, scanErr)
 	}
 	peerReceived(t, written, "peer-control-socket")
-	control := independentBindingTransfer(t, sink, "peer-control-")
+	control := trafficBindingTransfer(t, sink, "peer-control-")
 	if control.Endpoint != handle || control.Bound != probe.BoundTo || control.Descriptor != descriptor || control.Binding == 0 {
 		t.Fatalf("first socket read did not establish a binding: %+v", control)
 	}
@@ -113,14 +113,14 @@ func TestDup2InvalidatesABufferedHandlesBindingWithoutATLSRebind(t *testing.T) {
 	}
 	command("R")
 	actorLine(t, actor, "buffered-read 6\n")
-	current := independentBindingTransfer(t, sink, "socket")
+	current := trafficBindingTransfer(t, sink, "socket")
 	if current.Endpoint != handle || current.Bound != probe.BoundInvalidated {
 		t.Errorf("buffered read inherited a descriptor binding invalidated by dup2 without a TLS rebind: before=%+v after=%+v", control, current)
 	}
 	command("F")
 	actorLine(t, actor, "freed\n")
-	waitIndependentLifecycleConnections(t, disk, 1)
-	records := independentLifecycleConnections(t, disk.ConnectionsPath())
+	waitTrafficLifecycleConnections(t, disk, 1)
+	records := trafficLifecycleConnections(t, disk.ConnectionsPath())
 	if len(records) != 1 {
 		t.Fatalf("descriptor uncertainty split one TLS stream into %d connections", len(records))
 	}

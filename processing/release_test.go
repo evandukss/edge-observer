@@ -15,11 +15,13 @@ import (
 	"github.com/evandukss/edge-observer/admission"
 	"github.com/evandukss/edge-observer/capture"
 	"github.com/evandukss/edge-observer/connection"
+	"github.com/evandukss/edge-observer/contentcoding"
 	"github.com/evandukss/edge-observer/contract/record"
 	"github.com/evandukss/edge-observer/fragment"
 	"github.com/evandukss/edge-observer/intake"
 	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/processing"
+	"github.com/evandukss/edge-observer/reconstruct"
 	"github.com/evandukss/edge-observer/sink"
 )
 
@@ -147,11 +149,23 @@ type releasingOptions struct {
 	output          processing.Output
 	beforeAuthorize func()
 	maxEvents       uint64
+	// rules are the configuration's rules, none where empty; limits the
+	// reading's bounds; intakeBytes the shared allowance, 16 MiB where zero.
+	rules       string
+	limits      reconstruct.Limits
+	intakeBytes int64
+	// decodeCharges, where set, is told of every decoding charge, and decoder
+	// decodes in place of contentcoding.Decode.
+	decodeCharges func(processing.DecodeCharge)
+	decoder       func(contentcoding.List, []byte, contentcoding.Options) contentcoding.Result
 }
 
 func newReleasing(t *testing.T, o releasingOptions) *releasing {
 	t.Helper()
-	store, err := intake.New(16 << 20)
+	if o.intakeBytes == 0 {
+		o.intakeBytes = 16 << 20
+	}
+	store, err := intake.New(o.intakeBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,9 +186,16 @@ func newReleasing(t *testing.T, o releasingOptions) *releasing {
 			return r.out.WriteApproved(ctx, a)
 		})
 	}
-	options := processing.ObserveTurns(processing.Options{Session: "release", Plan: rulesPlan(t, ""),
-		PolicyRevision: "release-policy", Intake: store, Gate: gate, Output: output, ConnectionInput: o.connectionInput},
+	options := processing.ObserveTurns(processing.Options{Session: "release", Plan: rulesPlan(t, o.rules),
+		PolicyRevision: "release-policy", Intake: store, Gate: gate, Output: output, ConnectionInput: o.connectionInput,
+		Limits: o.limits},
 		func(one processing.Turn) { r.turns = append(r.turns, one) })
+	if o.decodeCharges != nil {
+		options = processing.ObserveDecodeCharges(options, o.decodeCharges)
+	}
+	if o.decoder != nil {
+		options = processing.DecodeWith(options, o.decoder)
+	}
 	r.worker, err = processing.New(options)
 	if err != nil {
 		t.Fatal(err)
@@ -290,7 +311,7 @@ func TestEveryPairOfAnOpenConnectionIsWrittenWhileItIsOpen(t *testing.T) {
 		t.Fatalf("a connection whose every byte was released has a truncation: %+v", retirements[0].ReconstructionTruncation)
 	}
 	for _, a := range exchanges {
-		if a.Version != processing.ArtifactVersion4 || !a.Connection.Provisional {
+		if a.Version != processing.ArtifactVersion5 || !a.Connection.Provisional {
 			t.Fatalf("an exchange line is version %s, provisional %t", a.Version, a.Connection.Provisional)
 		}
 		if fmt.Sprint(a.Connection) != fmt.Sprint(final.Identified()) {
@@ -676,8 +697,9 @@ func TestEvidenceTakingBackAnEstablishedOffsetStopsRelease(t *testing.T) {
 // still takes an id and an index.
 func TestNothingAfterAnUnreleasedExchangeIsReleased(t *testing.T) {
 	r := newReleasing(t, releasingOptions{})
-	gzipped := "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 2\r\n\r\nOK"
-	calls := append(pair("/one"), wrote("GET /two HTTP/1.1\r\nHost: a\r\n\r\n"), read(gzipped))
+	// A transfer coding other than chunked is framed, countable and a stop.
+	transferCoded := "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n2\r\nOK\r\n0\r\n\r\n"
+	calls := append(pair("/one"), wrote("GET /two HTTP/1.1\r\nHost: a\r\n\r\n"), read(transferCoded))
 	c := converse(t, 1, append(calls, pair("/three")...)...)
 	r.give(c.fragments...)
 	r.drain()

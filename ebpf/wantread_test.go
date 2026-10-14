@@ -96,7 +96,7 @@ func TestAWantReadReturnIsAMeasuredNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	actor := independentActor(t, wantReadSource, port)
+	actor := trafficActor(t, wantReadSource, port)
 	parent := loaded(t, int32(actor.command.Process.Pid))
 	session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: points(t, parent), Admit: authorise(parent)})
 	if err != nil {

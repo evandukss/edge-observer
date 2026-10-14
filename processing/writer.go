@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/evandukss/edge-observer/contentcoding"
 	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/contract/record"
 	"github.com/evandukss/edge-observer/extension"
@@ -17,10 +18,10 @@ import (
 
 const (
 	ArtifactName = "approved.jsonl"
-	// ArtifactVersion is what the worker writes. The reader also reads
-	// versions 1 to 3, each under its own rules; a reader of an earlier
-	// version alone refuses a later one.
-	ArtifactVersion  = ArtifactVersion4
+	// ArtifactVersion is what the worker writes. The reader reads versions 1
+	// to 5, each under its own rules; a reader of an earlier version alone
+	// refuses a later one.
+	ArtifactVersion  = ArtifactVersion5
 	ArtifactVersion2 = "observer.approved/2"
 	ArtifactVersion1 = "observer.approved/1"
 )
@@ -58,6 +59,48 @@ const ArtifactVersion3 = "observer.approved/3"
 // retirement, carries the final record. Version 3 promised every exchange line
 // came after its connection's retirement, which version 4 does not.
 const ArtifactVersion4 = "observer.approved/4"
+
+// ArtifactVersion5 is version 4's two lines, on a connection whose exchanges
+// can be excluded one at a time. An exchange whose body cannot be decoded is
+// excluded alone: it keeps its id and index, no line carries it, and the
+// connection line counts it under its reason (ExcludedExchanges), while the
+// exchanges after it are written. A truncation's offset is therefore the
+// first byte after the last exchange the connection accounted for, written or
+// excluded alone. A message whose body was decoded is written as its content,
+// with the decoding recorded in its body (record.Content).
+const ArtifactVersion5 = "observer.approved/5"
+
+// The reasons an exchange is excluded alone, as the connection line and the
+// account spell them. They are not truncation reasons: an exchange excluded
+// alone ends nothing.
+const (
+	// ReasonContentCodingUnsupported is a Content-Encoding naming a coding
+	// other than gzip, x-gzip, deflate, br and zstd, or more than one.
+	ReasonContentCodingUnsupported = contentcoding.ReasonCodingUnsupported
+	// ReasonContentDecodingFailed is a body that is not a valid stream of its
+	// codings: corrupt, truncated, failing a check, or with bytes after it.
+	ReasonContentDecodingFailed = contentcoding.ReasonDecodingFailed
+	// ReasonContentDecodedTooLarge is a body whose decoding, at any stage,
+	// would exceed the per-message body bound.
+	ReasonContentDecodedTooLarge = contentcoding.ReasonDecodedTooLarge
+	// ReasonContentDecodingTooCostly is a body whose decoding would take more
+	// work than the decoder's budget allows.
+	ReasonContentDecodingTooCostly = contentcoding.ReasonDecodingTooCostly
+)
+
+// ExcludedExchanges is, on a version 5 connection line, how many of the
+// connection's exchanges were excluded alone, by reason, each a decimal
+// string. Every member is present, "0" included. Each such exchange is
+// counted once, under the one reason it was excluded for, however many sides,
+// routes or extensions it had, and a count made stays when the connection is
+// later cut or loses capture. An exchange excluded with the suffix a
+// truncation describes is not counted here.
+type ExcludedExchanges struct {
+	ContentCodingUnsupported string `json:"content_coding_unsupported"`
+	ContentDecodingFailed    string `json:"content_decoding_failed"`
+	ContentDecodedTooLarge   string `json:"content_decoded_too_large"`
+	ContentDecodingTooCostly string `json:"content_decoding_too_costly"`
+}
 
 const (
 	ArtifactExchange   = "exchange"
@@ -105,6 +148,9 @@ type Artifact struct {
 	// Unplaced). It is determined where the connection's content was read to
 	// its retirement, and undetermined with its reason where it was not.
 	ReconstructionUnplaced *record.Count `json:"reconstruction_unplaced,omitempty"`
+	// ExcludedExchanges is, on a version 5 connection line and only there,
+	// the connection's exchanges excluded alone, by reason.
+	ExcludedExchanges *ExcludedExchanges `json:"excluded_exchanges,omitempty"`
 	// ExchangeIDs is historical version 2 data. Version 3 uses ExchangeID
 	// on each exchange line; versions 1 and 3 have no range.
 	ExchangeIDs *IDRange `json:"exchange_ids,omitempty"`

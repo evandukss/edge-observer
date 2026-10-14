@@ -765,7 +765,7 @@ func (s *Session) settleLocked(found *stream, final probe.Final, ending bool) {
 			located := missing
 			if !ending {
 				// An open connection settled at session end. Only the producer's refused
-				// ring reservations in the tail are located losses (decision 476): the
+				// ring reservations in the tail are located losses: the
 				// occupancy's final dropped total, less the drops already BELOW the last
 				// number seen (carried on that event, droppedBelow), is the tail's drops.
 				// Subtracting the drops below, not every gap below, is what keeps a non-drop
@@ -774,7 +774,7 @@ func (s *Session) settleLocked(found *stream, final probe.Final, ending bool) {
 				// failed reservations, not the shortfall, is what counts a drop that sits
 				// below a later submitted-but-abandoned event and leaves the abandoned
 				// event and those non-drop gaps as the uncounted, explicitly incomplete
-				// tail (decision 475).
+				// tail.
 				located = int64(one.terminal.Dropped) - int64(found.droppedBelow[one.direction])
 				if located < 0 {
 					located = 0

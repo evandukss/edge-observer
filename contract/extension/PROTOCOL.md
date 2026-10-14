@@ -1,6 +1,6 @@
 # The extension protocol
 
-Status: Live, draft protocol `observer.extension/1`. **This remains a draft.** No machine-readable schema
+Status: Live, draft protocol `observer.extension/2`. **This remains a draft.** No machine-readable schema
 is published; this document is the contract and the worked examples below show every message. Where the
 observer and this document disagree this document is corrected first.
 
@@ -48,6 +48,9 @@ attribution of what an extension says, never its truth.
   as JSON requires. A carriage return before the line feed is not stripped.
 - **Every message has a `type`.** A message the observer receives with a `type` it does not know is a
   protocol violation; a member a message does not define is ignored, so a later draft can add members.
+- **A value a later draft adds is read by what it is a value of.** An `output.reason` an extension does
+  not know is still the reason of an excluded exchange, opaque. A `content` or `structure` `state` it
+  does not know means the body is not available to interpret: never that `kept` holds the body's content.
 - **A line is bounded**, line feed included: `frame_bytes_to_extension` for what the observer writes and
   `frame_bytes_from_extension` for what the extension writes (Bounds).
 - **Standard error is drained, never read as protocol.** The observer reads it continuously, so an
@@ -71,7 +74,8 @@ carries the same `exchange_id`, `index` and connection `id`.
 **Ids and indexes are issued as the observer reads a connection**: one per
 exchange, in wire order, when its reading hands the exchange over. An exchange
 whose copy the shared allowance has no room for takes none, and its connection
-is cut. With extensions configured an exchange also needs the copy every
+is cut, and so does one whose decoding the allowance has no room for. With
+extensions configured an exchange also needs the copy every
 extension and every line reads: one that no pipeline still working on its
 connection can copy and project takes none, and is neither sent nor written.
 Without extensions a failed pipeline withholds only its own lines, and the
@@ -149,7 +153,7 @@ An entry's `fields` select from seven. Each brings the parts of the record named
 |---|---|
 | `request.line` | the request's `method`, `target` and `protocol` |
 | `request.headers` | the request's `headers[]` and `trailers[]`, `{name, value}` in order, names as sent |
-| `request.body` | the request's `body` (`length`, `kept` in base64, `holed`, `elided`, `encoding`), `framing` and `structure` |
+| `request.body` | the request's `body` (`length`, `kept` in base64, `holed`, `elided`, `encoding`, and `content` for a body decoded or omitted), `framing` and `structure` |
 | `response.line` | the response's `status`, `reason` and `protocol` |
 | `response.headers` | the response's `headers[]` and `trailers[]` |
 | `response.body` | the response's `body`, `framing` and `structure` |
@@ -162,11 +166,13 @@ absent side as `{"state": "absent"}`.
 
 **Read-only, never replaceable**: identity (`id`, `connection_id`, `index`, `kind`, the connection
 record), completeness (`complete`, `framed`, `defect`, a side's `state`), loss (`length`, `holed`,
-`elided`), `encoding`, `structure`, and the policy evidence in `removed[]`. The record carries no timing;
-neither does an exchange.
+`elided`), `encoding`, `content`, `structure`, and the policy evidence in `removed[]`. The record carries
+no timing; neither does an exchange.
 
 **Never sent**: a field the entry does not select; a value `remove` took out; anything outside the
-prefix of a connection that capture established; a parser's diagnostic text (`detail`).
+prefix of a connection that capture established; a parser's diagnostic text (`detail`); a body's bytes
+as they were encoded for transfer, and anything derived from a body that was not decoded
+([Decoded and omitted bodies](#decoded-and-omitted-bodies)).
 
 ### After the built-in rules
 
@@ -180,31 +186,93 @@ within the selected fields, as the approved output records them: `{message, fiel
 empty `kept`, keeps its `length`, has `structure.state` `removed`, and is listed. The removed value itself
 is never sent, in any form, in any exchange.
 
+### Decoded and omitted bodies
+
+Which coding a body carries is read from the message's `Content-Encoding` fields **as captured**, before
+any rule ran, so a rule that removes or masks that header changes nothing below.
+
+**A body whose captured `Content-Encoding` names one coding the observer undoes** - `gzip` (or `x-gzip`),
+`deflate`, `br` or `zstd`, once `identity` is set aside - is decoded once, within the per-message body
+bound, before any rule runs, unless a stop or the other message's coding has already excluded its
+exchange. Where the decoding completes, the rules apply to the decoded content, and that is what the
+extension receives, as the output writes it ([../record/record.md](../record/record.md#decoded-bodies)),
+whether its exchange is sent eligible or excluded for its other message:
+
+- `kept` is the decoded content, after the rules, and `structure` is derived from the decoded bytes;
+- `content` records the decoding: `{"state": "decoded", "length": L, "codings": [C]}`. `L` is the
+  decoded content's length, a decimal string, before any rule removed part of it. `C` is the coding
+  undone, `x-gzip` named `gzip`. `codings` is present only where every captured `Content-Encoding` field
+  reaches the extension unchanged by `remove`, `mask` and `truncate`; where one did not, `content` says
+  only that the body was decoded;
+- `length`, `holed`, `elided`, `framing`, the headers and the stream offsets stay what capture saw:
+  `length` is the extent of the body as it was sent, not of the content.
+
+**`content` is read-only, and a replacement body is content.** A `request.body` or `response.body`
+replacement is never decoded, whatever the message's `Content-Encoding` says: it goes through the
+built-in chain as content, like any replacement, and the next extension and the output see it so.
+`content` still describes what the observer did to the captured body, never the replacement, and an
+answer that names `content` fails as `read_only`.
+
+**An undecoded body is omitted.** On an exchange sent excluded, whatever its reason - an exchange
+excluded alone, or one a stop excluded, a mixed defect included - a body with captured bytes whose
+captured `Content-Encoding` names anything but `identity`, and whose decoding did not complete, is
+omitted, together with everything derived from its bytes. That is a body never decoded, because a stop
+or the other message's coding excluded the exchange first, and one whose decoding failed or was stopped
+at a bound. The rules never see its bytes, so `removed[]` lists no removal of it or from inside it. What
+is sent of it:
+
+- `body`: `length`, `holed`, `elided` and `encoding` as for any body, `kept` empty, and `content`
+  `{"state": "omitted", "reason": R}`, where `R` is the exchange's exclusion reason, the same as its
+  `output.reason`;
+- `framing`, and the headers after the rules;
+- `structure`: `{"state": "omitted"}`, with no shape.
+
+The marker is the exclusion reason and never the `Content-Encoding` value, which a rule may have
+removed: a removed header is not sent back by any other route. A body decoded on an exchange excluded
+for its other message is sent decoded, after the rules, with its `content` record, just as a body whose
+captured fields name only `identity`, or none, is sent as captured on an excluded exchange: the exchange
+is still excluded, and a change to it fails. The observer never decodes a body only to send it on an
+excluded exchange. `content` with state `omitted`, and `structure` with state `omitted`, occur only in
+what an extension is sent, never in the approved output, which does not write an excluded exchange.
+
 ### Which exchanges
 
 **Every exchange the observer's reading of a connection hands over is sent, in index order**, including
 incomplete and one-sided ones. `output` says whether the approved output will write it:
 
 - `{"state": "eligible"}`: the output will write it, unless processing refuses it for another reason;
-- `{"state": "excluded", "reason": R}`: the output will not write it, for the truncation reason R the
-  connection's line records (`capture_hole`, `positions_unknown`, `incomplete_message`, `malformed_message`,
-  `ambiguous_framing`, `processing_limit`, `unsupported_message`, `unpaired_exchange`, `unparsed_suffix`,
-  `connection_cut`).
+- `{"state": "excluded", "reason": R}`: the output will not write it, for R:
+  - for an exchange **excluded alone**, the reason one of its bodies could not be decoded:
+    `content_coding_unsupported`, `content_decoding_failed`, `content_decoded_too_large` or
+    `content_decoding_too_costly` ([../record/record.md](../record/record.md#exchanges-excluded-alone));
+  - otherwise the truncation reason the connection's line records (`capture_hole`, `positions_unknown`,
+    `incomplete_message`, `malformed_message`, `ambiguous_framing`, `processing_limit`,
+    `unsupported_message`, `unpaired_exchange`, `unparsed_suffix`, `connection_cut`).
 
-**The output writes a connection's exchanges up to the first one it cannot write.** That one and every one
-after it are excluded. **Each excluded exchange is sent as soon as its reason is decidable, and then let
-go**, with the reason its connection line records. A reason is decidable once nothing later can change it:
-once the connection has been read past where the first exchange the output cannot write stopped, in the
-direction the reason comes from, with no stop of capture's there. At the latest it is decidable when the
-connection ends or the session ends, or when the connection is cut, where the reason is `connection_cut`.
-So a connection does not accumulate excluded exchanges: each waits only until its reason is decidable and
-its extensions have answered.
+**An exchange excluded alone stops nothing after it.** Its reason is decided once both its messages are
+read and vouched for by capture, ranked between its two bodies as the connection line ranks it, and
+nothing later changes it: not a cut, not a capture loss, not the number of extensions. A stop outranks
+it: an exchange a stop excludes is not excluded alone. It is sent at once, keeps its id and index,
+and the exchanges after it on its connection go on and are written as usual. Its connection line counts
+it once, under its reason, in `excluded_exchanges`, however many extensions it went through. A body of
+it whose decoding did not complete is omitted ([Decoded and omitted bodies](#decoded-and-omitted-bodies)).
+
+**The output writes a connection's exchanges up to the first one it cannot write for any other reason.**
+That one and every one after it are excluded. **Each excluded exchange is sent as soon as its reason is
+decidable, and then let go**, with the reason its connection line records. A reason is decidable once
+nothing later can change it: once the connection has been read past where the first exchange the output
+cannot write stopped, in the direction the reason comes from, with no stop of capture's there. At the
+latest it is decidable when the connection ends or the session ends, or when the connection is cut, where
+the reason is `connection_cut`. So a connection does not accumulate excluded exchanges: each waits only
+until its reason is decidable and its extensions have answered.
 
 **An excluded exchange can be read and never changed**: a `changed` answer for one fails.
 
 **A connection is cut** when it cannot hold more unreleased work: at its own bound, or with the observer's
-shared allowance full. What it had not released is discarded unread and never sent. The exchanges it had
-released are still sent, in order, and their lines written; its held excluded exchanges are sent as above.
+shared allowance full, including when decoding a body needs room the allowance does not have. Such a
+decoding excludes nothing: the exchange takes no id and is never sent. What it had not released is
+discarded unread and never sent. The exchanges it had released are still sent, in order, and their lines
+written; its held excluded exchanges are sent as above.
 
 **A capture loss** on a connection withdraws what it has not yet sent: each exchange that has not reached an
 extension skips it as `withdrawn`, and its line is withdrawn too. The connection's `connection_done` still
@@ -251,7 +319,7 @@ selects, each replaced whole - there is no patch language:
 | `request.line` | `{"method", "target", "protocol"}`, all three: a method an HTTP token, a target of printable ASCII without space, a protocol `HTTP/` and a digit, a dot and a digit |
 | `response.line` | `{"status", "reason", "protocol"}`, all three: a status a number from 100 to 999, a reason of printable ASCII, space and tab, a protocol as above |
 | `request.headers`, `response.headers` | `{"headers": [...], "trailers": [...]}`, both lists, each item `{name, value}`: a name an HTTP token, a value with no CR, LF or NUL; at most 128 headers, 32 trailers and 65536 bytes of headers |
-| `request.body`, `response.body` | `{"kept": "<base64>"}`: the replacement bytes, standard base64 with padding, at most 8388608 bytes decoded |
+| `request.body`, `response.body` | `{"kept": "<base64>"}`: the replacement bytes, standard base64 with padding, at most 8388608 bytes decoded. They are content, never decoded again, whatever the message's `Content-Encoding` says |
 
 **An answer is validated whole.** Any failure below fails the exchange, and it keeps the form it had
 before this extension - nothing of the answer is applied. Each reason is counted
@@ -261,7 +329,7 @@ before this extension - nothing of the answer is applied. Each reason is counted
 |---|---|
 | `malformed` | is not one of the three shapes, or a replacement breaks its rules above |
 | `not_given` | changes a field the entry does not select, or a field of a side that is absent |
-| `read_only` | changes `connection`, or names a member of a component that is not replaceable (`length`, `structure` ...) |
+| `read_only` | changes `connection`, or names a member of a component that is not replaceable (`length`, `content`, `structure` ...) |
 | `removed_content` | replaces a body `remove` took out whole (`structure.state` `removed`, or values removed): content that was removed was not given, and supplying it is refused |
 | `excluded` | is `changed` for an excluded exchange |
 | `declined` | is `failed`, with the extension's own reason |
@@ -274,7 +342,7 @@ replacement content is recorded apart from removals of captured content**, attri
 that supplied it, so a header an extension adds back is removed again and the output says which extension
 supplied it. A replacement never changes completeness, loss or identity: a body replaced keeps the
 `length`, `holed` and `elided` capture gave it, so **an extension cannot make an incomplete capture
-complete**.
+complete**, and keeps the `content` that describes how its captured body was decoded.
 
 **Extensions run in the order the configuration lists them, each after the one before** has answered or
 failed. Each sees the exchange as the previous ones and the chain left it. The output records, per written
@@ -426,7 +494,7 @@ Every constant, in one place. `start` discloses each under the name in the first
 | member | value |
 |---|---|
 | `type` | `"start"` |
-| `protocol` | `"observer.extension/1"` |
+| `protocol` | `"observer.extension/2"` |
 | `extension` | the entry's `name` |
 | `session` | the session id |
 | `generation` | this generation, a decimal string from `"1"` |
@@ -462,7 +530,7 @@ Every constant, in one place. `start` discloses each under the name in the first
 
 ### Extension to observer
 
-**`ready`**: `{"type": "ready", "protocol": "observer.extension/1"}`.
+**`ready`**: `{"type": "ready", "protocol": "observer.extension/2"}`.
 
 **`result`**: `type`, `id`, `outcome`; `changes` with `changed`; `reason` with `failed`, a string the
 observer cuts at `reason_bytes`.
@@ -476,7 +544,7 @@ Each is one line on the wire, wrapped here to be read.
 **`start`**, generation 1 of an extension selecting the two lines, in a session with the default
 `limits.events` and one extension:
 
-    {"type": "start", "protocol": "observer.extension/1", "extension": "inventory",
+    {"type": "start", "protocol": "observer.extension/2", "extension": "inventory",
      "session": "20261001T120000Z-4f2a", "generation": "1",
      "processing_revision": "sha256:5b0e...", "write_content": true,
      "fields": ["request.line", "response.line"], "timeout_ms": 250,
@@ -489,7 +557,7 @@ Each is one line on the wire, wrapped here to be read.
 
 **`ready`**:
 
-    {"type": "ready", "protocol": "observer.extension/1"}
+    {"type": "ready", "protocol": "observer.extension/2"}
 
 **`exchange`**, the first of a connection's three, eligible for output, with the two lines selected:
 
@@ -516,6 +584,64 @@ connection ended, with the request's headers selected and `authorization` remove
        "response": {"state": "absent"},
        "removed": [{"message": "request", "field": "message.headers.authorization",
          "disposition": "removed", "section": "headers"}]}}
+
+**`exchange`**, on another connection, with the response's headers and body selected, its body sent as
+29 bytes of gzip and decoded to the 9 bytes `{"id":42}`:
+
+    {"type": "exchange", "id": "31", "connection_id": "11", "index": 0,
+     "output": {"state": "eligible"},
+     "exchange": {"index": 0, "complete": true,
+       "request": {},
+       "response": {"state": "present", "message": {"kind": "response", "complete": true,
+         "framed": true, "defect": "none",
+         "headers": [{"name": "Content-Type", "value": "application/json"},
+           {"name": "Content-Encoding", "value": "gzip"}, {"name": "Content-Length", "value": "29"}],
+         "trailers": [],
+         "body": {"length": "29", "kept": "eyJpZCI6NDJ9", "holed": "0", "elided": "0",
+           "encoding": "base64", "content": {"state": "decoded", "length": "9", "codings": ["gzip"]}},
+         "framing": "content_length",
+         "structure": {"state": "derived", "shape": {"kind": "object", "fields": [{"name": "id",
+           "name_elided": false, "shape": {"kind": "integer", "count": 0, "elided": false}}],
+           "count": 0, "elided": false}}}},
+       "removed": []}}
+
+**`exchange`**, the next on that connection, excluded alone because its response body is not a valid
+gzip stream. Its body is omitted, and the exchanges after it go on:
+
+    {"type": "exchange", "id": "32", "connection_id": "11", "index": 1,
+     "output": {"state": "excluded", "reason": "content_decoding_failed"},
+     "exchange": {"index": 1, "complete": true,
+       "request": {},
+       "response": {"state": "present", "message": {"kind": "response", "complete": true,
+         "framed": true, "defect": "none",
+         "headers": [{"name": "Content-Type", "value": "application/json"},
+           {"name": "Content-Encoding", "value": "gzip"}, {"name": "Content-Length", "value": "912"}],
+         "trailers": [],
+         "body": {"length": "912", "kept": "", "holed": "0", "elided": "0", "encoding": "base64",
+           "content": {"state": "omitted", "reason": "content_decoding_failed"}},
+         "framing": "content_length",
+         "structure": {"state": "omitted"}}},
+       "removed": []}}
+
+**`exchange`**, the third, excluded alone because its request body, which this entry does not select, is
+not a valid gzip stream. Its response was decoded, and is sent as content:
+
+    {"type": "exchange", "id": "33", "connection_id": "11", "index": 2,
+     "output": {"state": "excluded", "reason": "content_decoding_failed"},
+     "exchange": {"index": 2, "complete": true,
+       "request": {},
+       "response": {"state": "present", "message": {"kind": "response", "complete": true,
+         "framed": true, "defect": "none",
+         "headers": [{"name": "Content-Type", "value": "application/json"},
+           {"name": "Content-Encoding", "value": "gzip"}, {"name": "Content-Length", "value": "29"}],
+         "trailers": [],
+         "body": {"length": "29", "kept": "eyJpZCI6NDJ9", "holed": "0", "elided": "0",
+           "encoding": "base64", "content": {"state": "decoded", "length": "9", "codings": ["gzip"]}},
+         "framing": "content_length",
+         "structure": {"state": "derived", "shape": {"kind": "object", "fields": [{"name": "id",
+           "name_elided": false, "shape": {"kind": "integer", "count": 0, "elided": false}}],
+           "count": 0, "elided": false}}}},
+       "removed": []}}
 
 **`result`**, one of each:
 
@@ -572,5 +698,7 @@ ended with its handle released. What it had not released was discarded, so no th
 ## Compatibility
 
 **What this protocol promises is narrow**: its version, the message shapes, the lifecycle, and the timeout
-and failure behaviour. A later draft changes the version. **It is not a security, privacy or correctness
-endorsement of any extension.**
+and failure behaviour. A later draft changes the version. **An extension that answers `ready` with any
+other version, `observer.extension/1` included, is retired as `protocol`**: one written for an earlier
+draft is updated to name this one, and to read the exclusion reasons, `content` and the `omitted` states
+above. **It is not a security, privacy or correctness endorsement of any extension.**

@@ -1,0 +1,335 @@
+//go:build attach
+
+package attach_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/evandukss/edge-observer/account"
+	"github.com/evandukss/edge-observer/activation"
+	"github.com/evandukss/edge-observer/capture"
+	"github.com/evandukss/edge-observer/connection"
+	"github.com/evandukss/edge-observer/probe"
+	"github.com/evandukss/edge-observer/probe/openssl/attach"
+	"github.com/evandukss/edge-observer/processing"
+)
+
+// failureTruncations is every truncation reason the approved records of the
+// session at directory carry, read from the records' own JSON.
+func failureTruncations(t *testing.T, directory string) []string {
+	t.Helper()
+	content, err := sessionApproved(directory)
+	if err != nil {
+		t.Fatalf("read the approved output: %v", err)
+	}
+	var reasons []string
+	for _, line := range bytes.Split(bytes.TrimSpace(content), []byte{'\n'}) {
+		var one struct {
+			Truncation *struct {
+				Stops []struct {
+					Reason string `json:"reason"`
+				} `json:"stops"`
+			} `json:"reconstruction_truncation"`
+		}
+		if err := json.Unmarshal(line, &one); err != nil {
+			t.Fatalf("an approved record is not JSON: %v", err)
+		}
+		if one.Truncation != nil {
+			for _, stop := range one.Truncation.Stops {
+				reasons = append(reasons, stop.Reason)
+			}
+		}
+	}
+	return reasons
+}
+
+// At the syscall boundary: undecided data held at stop is discarded and writes
+// no protected plaintext. An open connection carries a complete exchange with
+// both markers, then the start of a request whose Authorization carries the
+// protected marker and whose headers never end. At stop the complete exchange
+// is written with the protected header removed, the suffix is withheld with a
+// stated truncation reason and counted as a processing failure, and the
+// protected marker crosses no write. The control is the same connection without
+// the suffix.
+func TestUndecidedDataHeldAtStopIsDiscardedWithoutProtectedPlaintext(t *testing.T) {
+	binary := built(t)
+	for _, suffix := range []bool{true, false} {
+		name := map[bool]string{true: "an undecidable suffix held at stop", false: "the complete exchange only"}[suffix]
+		t.Run(name, func(t *testing.T) {
+			port := liveServing(t)
+			decided, open := speaking(t, port), speaking(t, port)
+			c := configuring(t, target("clients", decided.process))
+			liveEdit(t, c, liveRemoving)
+			w := failureWatched(t, binary, c, nil)
+			failureDecided(t, binary, c, decided)
+			liveAsk(t, open, "/?asked=hlt-complete", "X-Public: "+liveBoundaryPermitted, "Authorization: Bearer "+liveBoundaryProtected)
+			if suffix {
+				before := inspected(t, binary, c).Seen.Records
+				if _, err := io.WriteString(open.send, "GET /?asked=hlt-suffix HTTP/1.1\r\nHost: localhost\r\n"+
+					"Authorization: Bearer "+liveBoundaryProtected+"\r\n"); err != nil {
+					t.Fatalf("send the suffix: %v", err)
+				}
+				// The guard: the suffix reached capture before the stop.
+				liveUntil(t, binary, c, 10*time.Second, "wiring, not the property: the suffix never reached capture",
+					func(a account.Account) bool { return a.Seen != nil && a.Seen.Records > before })
+			}
+			w.signal(t, syscall.SIGTERM)
+			sealed := liveSealed(t, w.directory(c), w.session)
+			targets := liveTargets(liveApproved(t, w.directory(c)))
+			reasons := failureTruncations(t, w.directory(c))
+			t.Logf("processing %+v; truncations %v; targets %v", sealed.Processing, reasons, targets)
+			if !slices.Contains(targets, "/?asked=hlt-complete") {
+				t.Fatalf("wiring, not the property: the complete exchange before the suffix was not written: %v", targets)
+			}
+			if suffix {
+				if slices.Contains(targets, "/?asked=hlt-suffix") {
+					t.Errorf("the undecidable suffix was written as an exchange")
+				}
+				if sealed.Processing.ProcessingFailures == 0 || !slices.Contains(reasons, "incomplete_message") {
+					t.Errorf("the account does not say why the suffix was withheld: processing %+v, truncations %v",
+						sealed.Processing, reasons)
+				}
+			} else if sealed.Processing.ProcessingFailures != 0 || len(reasons) != 0 {
+				t.Fatalf("wiring, not the property: the control withheld something: %+v %v", sealed.Processing, reasons)
+			}
+			failureClean(t, w)
+		})
+	}
+}
+
+// At the syscall boundary. The approved write of the open connection's
+// exchange, made during finalisation, is held in the kernel by the instrument;
+// shutdown waits on it only up to its bound. The stop command is run and
+// allowed to reach its own bound, stopWithin. What stop reported and the
+// session's state after the bound are RECORDED, not asserted. Then the write is
+// released and the session is let finish. Asserted, before the release and
+// across the end: the protected marker crosses no write.
+func TestAWorkerHeldAtStopWritesNoProtectedPlaintextBeforeOrAfterTheStopBound(t *testing.T) {
+	binary := built(t)
+	port := liveServing(t)
+	decided, open := speaking(t, port), speaking(t, port)
+	c := configuring(t, target("clients", decided.process))
+	liveEdit(t, c, liveRemoving)
+	release := make(chan struct{})
+	var releasing sync.Once
+	t.Cleanup(func() { releasing.Do(func() { close(release) }) })
+	var held atomic.Int64
+	w := failureWatched(t, binary, c, failureHolding([]byte("asked=hlt-held"), release, &held))
+	failureDecided(t, binary, c, decided)
+	liveAsk(t, open, "/?asked=hlt-held", "X-Public: "+liveBoundaryPermitted, "Authorization: Bearer "+liveBoundaryProtected)
+
+	began := time.Now()
+	stdout, stderr, stopErr := liveCommand(t, 120*time.Second, binary, "stop", c.path)
+	took := time.Since(began)
+	// The guards: the worker's write really was held, and the stop bound really
+	// ran out with the session still up.
+	if held.Load() == 0 {
+		t.Fatalf("wiring, not the property: no approved write was held, so nothing was waited on: %s", w.boundary)
+	}
+	t.Logf("RECORDED: stop answered after %s with %v; stdout %q; stderr %q", took.Round(time.Millisecond), stopErr, stdout, stderr)
+	pid, _ := os.ReadFile(c.pidFile())
+	inspectOut, inspectErr, inspectExit := liveCommand(t, 60*time.Second, binary, "inspect", c.path)
+	t.Logf("RECORDED after the bound: session running %v; pid file %q; %d writes held; inspect %v, stdout %q, stderr %q",
+		!w.over(), strings.TrimSpace(string(pid)), held.Load(), inspectExit, inspectOut, inspectErr)
+	w.boundary.mutex.Lock()
+	protectedBefore := w.boundary.found[liveBoundaryProtected]
+	w.boundary.mutex.Unlock()
+	if protectedBefore != 0 {
+		t.Errorf("the protected marker crossed %d writes before the held write was released", protectedBefore)
+	}
+
+	releasing.Do(func() { close(release) })
+	w.ended(t, 60*time.Second)
+	t.Logf("RECORDED after the release: exit %v; stopped records %v", w.state, w.records("stopped"))
+	failureClean(t, w)
+}
+
+// failureRecorded is the approved output with every line handed to it kept, so an
+// in-process case can see what reached the output whether or not it was
+// written.
+type failureRecorded struct {
+	inner processing.Output
+	mutex sync.Mutex
+	lines [][]byte
+}
+
+func (r *failureRecorded) WriteApproved(ctx context.Context, a processing.Approved) error {
+	r.mutex.Lock()
+	r.lines = append(r.lines, a.Bytes())
+	r.mutex.Unlock()
+	return r.inner.WriteApproved(ctx, a)
+}
+
+// handed is how many lines were handed to the output.
+func (r *failureRecorded) handed() int {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	return len(r.lines)
+}
+
+func (r *failureRecorded) holding(needle string) int {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	count := 0
+	for _, line := range r.lines {
+		count += bytes.Count(line, []byte(needle))
+	}
+	return count
+}
+
+// IN-PROCESS and NOT THE SYSCALL BOUNDARY: the only way to the timeout branch,
+// since no seam holds delivery from outside the process. The real attachment,
+// intake, gate, worker and writer run in this process. A decided connection is
+// written first. An open connection's unfinished request body carrying both
+// markers is captured and left pending; then capture's sink is held so delivery
+// cannot finish, and the program's own finalisation order runs: the sealer
+// withdraws and drains within a second, which expires, then capture finishes
+// and the worker finishes with Drained=false. Asserted: the pending payload is
+// discarded, nothing of it reaches the approved output (every line handed to it
+// is kept here) or the file, and the seal says why. "Nothing reached any sink"
+// is established only for the approved output this process hands records to; a
+// write elsewhere by this process is not observed here.
+func TestInProcessNotTheSyscallBoundaryAnExpiredDrainDiscardsPendingPayload(t *testing.T) {
+	decidedClient := speaking(t, liveServing(t))
+	peer := unfinishedServing(t)
+	pendingClient := speaking(t, peer.port)
+	compiled := liveCompiled(t, decidedClient.process, pendingClient.process)
+	barrier := liveNewBarrier()
+	t.Cleanup(barrier.open)
+
+	_, store, err := activation.RecordingIntake(1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	sink := &liveHeldSink{barrier: barrier, inner: store}
+	recording := capture.Recording(sink, store)
+	directory := t.TempDir()
+	writer, err := processing.Open(directory, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	output := &failureRecorded{inner: writer}
+	gate, err := probe.NewDeliveryGate(probe.DeliveryGateOptions{MaxEvents: 1024, IntakeExhausted: store.Exhausted()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := processing.New(processing.Options{Plan: compiled.Processing, PolicyRevision: compiled.Revision,
+		Session: "hlt-in-process", Intake: store, Gate: gate, Output: output})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = worker.Close() })
+	// The worker's serial owner, on the program's cadence, until finalisation.
+	stopping, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopping:
+				return
+			case <-ticker.C:
+				if _, err := worker.Drain(context.Background()); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	var stopOnce sync.Once
+	stopDriver := func() { stopOnce.Do(func() { close(stopping); <-stopped }) }
+	t.Cleanup(stopDriver)
+
+	request := requesting(decidedClient.process, pendingClient.process)
+	request.DeliveryGate = gate
+	live, err := attach.NeweBPF(compiled.Approval).Attach(request, recording)
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { barrier.open(); _ = live.Close() })
+	recording.Observing(live.Capability())
+	producer, ok := live.(connection.Producer)
+	if !ok {
+		t.Fatal("the attachment cannot withdraw or drain")
+	}
+
+	liveAsk(t, decidedClient, "/?asked=hlt-decided", "X-Public: "+liveBoundaryPermitted, "Authorization: Bearer "+liveBoundaryProtected)
+	liveHangup(decidedClient)
+	for deadline := time.Now().Add(10 * time.Second); writer.Stats().Written == 0 && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if writer.Stats().Written == 0 {
+		t.Fatal("wiring, not the property: the decided connection was never written")
+	}
+	before := recording.Stats().Records
+	peer.begin(t, pendingClient, "/?asked=hlt-pending", "X-Public: "+liveBoundaryPermitted, "Authorization: Bearer "+liveBoundaryProtected)
+	for deadline := time.Now().Add(10 * time.Second); recording.Stats().Records < before+1 && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	sink.armed.Store(true)
+	peer.chunk(t, pendingClient, unfinishedChunk)
+	select {
+	case <-barrier.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("wiring, not the property: the delivery loop never reached the held sink")
+	}
+	stopDriver()
+	pending := store.Stats()
+	if pending.Queued+pending.Leased == 0 || recording.Stats().Records < before+1 {
+		t.Fatalf("wiring, not the property: no undecided payload was pending at finalisation: intake %+v, records %d from %d",
+			pending, recording.Stats().Records, before)
+	}
+
+	sealer := &connection.Sealer{Producer: producer, Within: time.Second}
+	seal, err := sealer.Stop()
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	// The guard: the drain window really expired.
+	if seal.Drain.Complete || seal.Complete {
+		t.Fatalf("wiring, not the property: the drain completed with delivery held: %+v", seal.Drain)
+	}
+	recording.Finish(seal.Sealed)
+	handed := output.handed()
+	outcome, err := worker.Finish(context.Background(), processing.Finalization{Withdrawn: seal.Withdrawal.Complete, Drained: seal.Drain.Complete})
+	t.Logf("seal because %q; outcome %+v (%v); intake before finish %+v, after %+v", seal.Because, outcome, err, pending, store.Stats())
+
+	if after := output.handed(); after != handed {
+		t.Errorf("finalisation with Drained=false handed %d records to the output after the drain expired", after-handed)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := writer.Drain(ctx); err != nil {
+		t.Fatalf("wiring, not the property: the writer did not finish writing what it was handed: %v", err)
+	}
+	if n := output.holding(liveBoundaryProtected); n != 0 {
+		t.Errorf("the protected marker reached the approved output %d times", n)
+	}
+	if n := output.holding("asked=hlt-pending"); n != 0 {
+		t.Errorf("the pending exchange reached the approved output %d times", n)
+	}
+	if outcome.Withheld.Known || outcome.Withheld.Why != "unsettled_input" || outcome.Pending != 0 {
+		t.Errorf("the pending payload was not discarded as unsettled: withheld %+v, pending %d", outcome.Withheld, outcome.Pending)
+	}
+	if !slices.ContainsFunc(seal.Because, func(one string) bool { return strings.Contains(one, "was not drained") }) {
+		t.Errorf("the seal does not say the drain did not finish: %q", seal.Because)
+	}
+	content, err := os.ReadFile(filepath.Join(directory, processing.ArtifactName))
+	if err != nil || bytes.Contains(content, []byte(liveBoundaryProtected)) || !bytes.Contains(content, []byte(liveBoundaryPermitted)) {
+		t.Errorf("the approved file (%v) holds the protected marker, or lacks the decided permitted one", err)
+	}
+}

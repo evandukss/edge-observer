@@ -16,7 +16,7 @@ import (
 
 // Test-state helpers, excluded from the artifact by the attach tag; removing a
 // map entry is not the supported capture shutdown.
-func IndependentReplaceGrant(s *Session, instance admission.Instance, generation admission.Generation) (func() error, error) {
+func ReplaceGrant(s *Session, instance admission.Instance, generation admission.Generation) (func() error, error) {
 	m := s.collection.Maps["allowed_processes"]
 	key := keyOf(instance)
 	var original admissionValue
@@ -34,7 +34,7 @@ func IndependentReplaceGrant(s *Session, instance admission.Instance, generation
 	return func() error { return m.Update(key, original, cilium.UpdateAny) }, err
 }
 
-func IndependentSavedCall(s *Session, pid int32) (admission.Generation, uint32, bool, error) {
+func SavedCall(s *Session, pid int32) (admission.Generation, uint32, bool, error) {
 	// The actor calls OpenSSL only on its main thread. Read the saved call kind
 	// from the map so a write in flight is not taken for the blocking read. Both
 	// offsets come from the object's BTF: a field inserted ahead would move them
@@ -89,7 +89,7 @@ func IndependentSavedCall(s *Session, pid int32) (admission.Generation, uint32, 
 
 // Fill the evidence map with historical generations; a later real TLS read
 // must be counted or make Reads report lost evidence.
-func IndependentFillReadHistory(s *Session, live admission.Generation) error {
+func FillReadHistory(s *Session, live admission.Generation) error {
 	m := s.collection.Maps["reads"]
 	if m == nil {
 		return ErrNoPayloadReads

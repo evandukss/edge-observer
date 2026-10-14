@@ -16,7 +16,7 @@ func TestALateRetractedEventCannotPreventReadmission(t *testing.T) {
 	for _, readmitFirst := range []bool{false, true} {
 		t.Run(map[bool]string{false: "absent grant", true: "replacement grant"}[readmitFirst], func(t *testing.T) {
 			port := sequencePeer(t, nil)
-			actor := independentActor(t, sequenceActorSource, port)
+			actor := trafficActor(t, sequenceActorSource, port)
 			p := loaded(t, int32(actor.command.Process.Pid))
 			arrived, release := make(chan struct{}), make(chan struct{})
 			var once sync.Once
@@ -74,7 +74,7 @@ func TestALateRetractedEventCannotPreventReadmission(t *testing.T) {
 
 func TestAReturnHeldPastItsGrantCheckLeavesNoRetractedReadEntry(t *testing.T) {
 	port := sequencePeer(t, nil)
-	actor := independentActor(t, sequenceActorSource, port)
+	actor := trafficActor(t, sequenceActorSource, port)
 	p := loaded(t, int32(actor.command.Process.Pid))
 	s, err := ebpf.Attach(ebpf.Options{Program: bpf.ReadBarrier(), Points: points(t, p), Admit: authorise(p)})
 	if err != nil {

@@ -21,7 +21,7 @@ import (
 	"github.com/evandukss/edge-observer/fragment"
 )
 
-type independentPendingRead struct {
+type trafficPendingRead struct {
 	actor      *armingProcess
 	session    *ebpf.Session
 	pid        int32
@@ -33,7 +33,7 @@ type independentPendingRead struct {
 // The same execution completes a peer-confirmed call, with captured response
 // bytes and a moving read counter, before its next call is held inside libssl.
 // The peer holds the response; the actor has no invalid pointer or fake return.
-func independentlyPendingRead(t *testing.T, outparam bool) independentPendingRead {
+func trafficPendingReadStarted(t *testing.T, outparam bool) trafficPendingRead {
 	t.Helper()
 	release := make(chan struct{})
 	var once sync.Once
@@ -53,7 +53,7 @@ func independentlyPendingRead(t *testing.T, outparam bool) independentPendingRea
 	if err != nil {
 		t.Fatal(err)
 	}
-	actor := independentActor(t, readActorSource(outparam), port)
+	actor := trafficActor(t, readActorSource(outparam), port)
 	process := loaded(t, int32(actor.command.Process.Pid))
 	session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: points(t, process), Admit: authorise(process)})
 	if err != nil {
@@ -98,18 +98,18 @@ func independentlyPendingRead(t *testing.T, outparam bool) independentPendingRea
 	if err != nil || refused != 0 {
 		t.Fatalf("pre-withdrawal refusal control: %d, %v", refused, err)
 	}
-	return independentPendingRead{actor, session, process.PID, generation, before[generation], unblock}
+	return trafficPendingRead{actor, session, process.PID, generation, before[generation], unblock}
 }
 
 // This wrapper returns the real producer's result unchanged and only releases
 // the peer the instant the real withdrawal completes, so no scheduling delay
 // is used as proof.
-type independentObservedWithdrawal struct {
+type trafficObservedWithdrawal struct {
 	*ebpf.Session
 	after func(connection.Withdrawal, error)
 }
 
-func (p independentObservedWithdrawal) StopProducing() (connection.Withdrawal, error) {
+func (p trafficObservedWithdrawal) StopProducing() (connection.Withdrawal, error) {
 	withdrawal, err := p.Session.StopProducing()
 	p.after(withdrawal, err)
 	return withdrawal, err
@@ -118,8 +118,8 @@ func (p independentObservedWithdrawal) StopProducing() (connection.Withdrawal, e
 func TestStopProducingRefusesTheReturningCallAndSealsItsCount(t *testing.T) {
 	for _, outparam := range []bool{false, true} {
 		t.Run(fmt.Sprintf("outparam=%t", outparam), func(t *testing.T) {
-			pending := independentlyPendingRead(t, outparam)
-			coordinated := independentObservedWithdrawal{Session: pending.session, after: func(withdrawal connection.Withdrawal, err error) {
+			pending := trafficPendingReadStarted(t, outparam)
+			coordinated := trafficObservedWithdrawal{Session: pending.session, after: func(withdrawal connection.Withdrawal, err error) {
 				if err != nil || !withdrawal.Complete || withdrawal.Instances != 1 {
 					t.Fatalf("withdrawal did not report the one real grant: %+v, %v", withdrawal, err)
 				}
@@ -156,7 +156,7 @@ func TestStopProducingRefusesTheReturningCallAndSealsItsCount(t *testing.T) {
 }
 
 func TestSealDoesNotCallAnExecutingReadAnEmptyRun(t *testing.T) {
-	pending := independentlyPendingRead(t, false)
+	pending := trafficPendingReadStarted(t, false)
 	sealer := connection.Sealer{Producer: pending.session, Within: 200 * time.Millisecond}
 	seal, err := sealer.Stop()
 	if err != nil {
@@ -177,8 +177,8 @@ func TestSealDoesNotCallAnExecutingReadAnEmptyRun(t *testing.T) {
 }
 
 func TestRingReaderFailureCannotSealAsZeroLoss(t *testing.T) {
-	pending := independentlyPendingRead(t, false)
-	if err := ebpf.IndependentFailRingReader(pending.session); err != nil {
+	pending := trafficPendingReadStarted(t, false)
+	if err := ebpf.FailRingReader(pending.session); err != nil {
 		t.Fatal(err)
 	}
 	pending.release()
@@ -200,7 +200,7 @@ func TestRingReaderFailureCannotSealAsZeroLoss(t *testing.T) {
 func TestRestartDoesNotReadThePreviousAdmissionsSavedCall(t *testing.T) {
 	for _, outparam := range []bool{false, true} {
 		t.Run(fmt.Sprintf("outparam=%t", outparam), func(t *testing.T) {
-			pending := independentlyPendingRead(t, outparam)
+			pending := trafficPendingReadStarted(t, outparam)
 			withdrawal, err := pending.session.StopProducing()
 			if err != nil || !withdrawal.Complete || withdrawal.Instances != 1 {
 				t.Fatalf("old authority was not withdrawn: %+v, %v", withdrawal, err)

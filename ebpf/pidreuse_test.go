@@ -171,9 +171,9 @@ func reuseCommand(actor *armingProcess, command, kind string) (reusedIdentity, e
 	return who, nil
 }
 
-func exerciseIndependentPIDReuse(t *testing.T) {
-	port, received := independentPeer(t)
-	actor := independentActor(t, reuseFamilySource(), port)
+func exerciseTrafficPIDReuse(t *testing.T) {
+	port, received := trafficPeer(t)
+	actor := trafficActor(t, reuseFamilySource(), port)
 	line, err := actor.output.ReadString('\n')
 	var rootPID int32
 	if _, scanErr := fmt.Sscanf(line, "selected %d", &rootPID); err != nil || scanErr != nil || rootPID <= 0 {
@@ -262,7 +262,7 @@ func exerciseIndependentPIDReuse(t *testing.T) {
 		}
 	}()
 	session, err := ebpf.Attach(ebpf.Options{
-		Program: bpf.Full(), Points: append(points(t, root), independentForkPoint(t, root)), Admit: authorise(root),
+		Program: bpf.Full(), Points: append(points(t, root), trafficForkPoint(t, root)), Admit: authorise(root),
 	})
 	if err != nil {
 		select {
@@ -318,7 +318,7 @@ func TestPIDReusedBetweenAdoptionAndSweepIsNotAdmitted(t *testing.T) {
 		if err := unix.Mount("proc", "/proc", "proc", 0, ""); err != nil {
 			t.Fatal(err)
 		}
-		exerciseIndependentPIDReuse(t)
+		exerciseTrafficPIDReuse(t)
 		return
 	}
 	command := exec.Command(os.Args[0], "-test.run=^TestPIDReusedBetweenAdoptionAndSweepIsNotAdmitted$", "-test.v", "-test.timeout=45s")

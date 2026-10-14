@@ -264,12 +264,16 @@ func (w *Worker) handOver(ctx context.Context, b *batch, x reconstruct.Exchange)
 // releaseExchange issues one exchange its id and index and writes its lines,
 // one per reconstruction pipeline and route, with the connection's
 // provisional record: its retirement has not been read, or need not have
-// been. The first exchange that is not complete and supported is excluded, and
-// so is every one after it; each still takes an id and an index. Every
-// pipeline's copy of a released exchange is made, and charged, before the
-// exchange takes its id: a copy the shared allowance refuses cuts the
-// connection with nothing of the exchange released, and the copies are given
-// back once its lines are written.
+// been. What it does with the exchange is prepare's: a body that is encoded is
+// written decoded; one that cannot be decoded excludes its exchange alone
+// (excludeAlone), and the exchanges after it go on; the first exchange a stop
+// excludes is excluded, and so is every one after it; each still takes an id
+// and an index. A decoding the shared allowance refuses cuts the connection
+// with nothing of the exchange released. Every pipeline's copy of a released
+// exchange is made, and charged, before the exchange takes its id: a copy the
+// shared allowance refuses cuts the connection with nothing of the exchange
+// released, and the copies, and the decoded content, are given back once its
+// lines are written.
 func (w *Worker) releaseExchange(ctx context.Context, b *batch, x reconstruct.Exchange, role reconstruct.Role) error {
 	p := b.parse
 	if !x.Complete || !countableMessage(x.Request) || !countableMessage(x.Response) {
@@ -277,7 +281,21 @@ func (w *Worker) releaseExchange(ctx context.Context, b *batch, x reconstruct.Ex
 	}
 	request, response := directions(role)
 	identity, err := w.identity(b)
-	if err != nil || p.excluded || !supportedExchange(x) {
+	prep := prepared{verdict: verdictStop}
+	if err == nil {
+		prep = w.prepare(b, x, role)
+	}
+	defer w.releaseContent(b, &prep)
+	switch prep.verdict {
+	case verdictCut:
+		w.cutByAllowance(b)
+		return nil
+	case verdictExclude:
+		index, id := w.excludeAlone(b, x, role, prep.reason)
+		w.reportOne(b, index, id, releaseExcluded)
+		return nil
+	}
+	if prep.verdict == verdictStop {
 		index := p.exchanges
 		p.exchanges++
 		id := w.release.issued.Add(1)
@@ -307,6 +325,7 @@ func (w *Worker) releaseExchange(ctx context.Context, b *batch, x reconstruct.Ex
 	var copies []copied
 	var charged int64
 	defer func() { w.returnPolicy(b, charged) }()
+	x = prep.exchange
 	one := reconstruct.Connection{Process: b.process, ID: b.id, Role: role, Exchanges: []reconstruct.Exchange{x}}
 	for _, pipeline := range w.pipelines {
 		if pipeline.Input != config.ReconstructionInput || p.failed[pipeline.Name] {
@@ -512,8 +531,8 @@ func (w *Worker) retireRead(ctx context.Context, b *batch, metadata record.Conne
 				a := Artifact{Version: ArtifactVersion, Record: ArtifactConnection, Session: w.options.Session,
 					PolicyRevision: w.options.PolicyRevision, Route: route, Connection: metadata,
 					ReconstructionTruncation: truncation, ReconstructionUnplaced: w.unplacedTotal(b),
-					PolicyExclusions: []PolicyExclusion{}, ExtensionOutcomes: []ExtensionOutcome{},
-					ReplacementExclusions: []ReplacementExclusion{}}
+					ExcludedExchanges: b.excludedExchanges(), PolicyExclusions: []PolicyExclusion{},
+					ExtensionOutcomes: []ExtensionOutcome{}, ReplacementExclusions: []ReplacementExclusion{}}
 				if _, err := w.emit(ctx, a, b.loss, b.retirementEvidence()); err != nil {
 					return err
 				}
@@ -531,8 +550,25 @@ func (w *Worker) retireRead(ctx context.Context, b *batch, metadata record.Conne
 	return nil
 }
 
+// excludedExchanges is what a connection line states as the connection's
+// exchanges excluded alone, by reason: what its reading counted, however it
+// ended, and zero where nothing of it was read.
+func (b *batch) excludedExchanges() *ExcludedExchanges {
+	var counted Exclusions
+	if b.parse != nil {
+		counted = b.parse.exclusions
+	}
+	return &ExcludedExchanges{
+		ContentCodingUnsupported: strconv.FormatUint(counted.ContentCodingUnsupported, 10),
+		ContentDecodingFailed:    strconv.FormatUint(counted.ContentDecodingFailed, 10),
+		ContentDecodedTooLarge:   strconv.FormatUint(counted.ContentDecodedTooLarge, 10),
+		ContentDecodingTooCostly: strconv.FormatUint(counted.ContentDecodingTooCostly, 10),
+	}
+}
+
 // refusals is the exchanges a read connection withheld: known only where its
-// whole content was read as complete, framed HTTP/1 pairs.
+// whole content was read as complete, framed HTTP/1 pairs. An exchange
+// excluded alone is not withheld (Outcome.Excluded).
 func (b *batch) refusals() connection.Count {
 	p := b.parse
 	prefix := b.prefix()
@@ -545,7 +581,7 @@ func (b *batch) refusals() connection.Count {
 	if prefix.truncated() || !p.countable || p.unplaced() != 0 || p.role() == reconstruct.RoleUnknown {
 		return connection.Uncounted("reconstruction_incomplete")
 	}
-	return connection.Counted(int64(p.exchanges - p.good))
+	return connection.Counted(int64(p.exchanges-p.good) - int64(p.exclusions.Total()))
 }
 
 func (p *parsing) role() reconstruct.Role {
@@ -676,8 +712,8 @@ func (w *Worker) processDiscarded(ctx context.Context, b *batch, reason string) 
 			artifact := Artifact{Version: ArtifactVersion, Record: ArtifactConnection,
 				Session: w.options.Session, PolicyRevision: w.options.PolicyRevision, Route: route,
 				Connection: metadata, ReconstructionTruncation: truncation, ReconstructionUnplaced: w.unplacedTotal(b),
-				PolicyExclusions: []PolicyExclusion{}, ExtensionOutcomes: []ExtensionOutcome{},
-				ReplacementExclusions: []ReplacementExclusion{}}
+				ExcludedExchanges: b.excludedExchanges(), PolicyExclusions: []PolicyExclusion{},
+				ExtensionOutcomes: []ExtensionOutcome{}, ReplacementExclusions: []ReplacementExclusion{}}
 			if _, err := w.emit(ctx, artifact, nil, b.retirementEvidence()); err != nil {
 				return err
 			}
@@ -851,11 +887,28 @@ func (r *release) failure() error {
 	return r.err
 }
 
-func supportedExchange(e reconstruct.Exchange) bool {
-	return e.Complete && supportedMessage(e.Request) && supportedMessage(e.Response)
+// supportedMessage is a message processing reads as it was captured: no
+// standing stop applies to it (unstopped), and it names no content coding but
+// identity. A stop's reason is read with it (messageStop, exclusionReason,
+// batch.settled): beside a stopped message, one that names a coding is
+// unsupported_message, as it always was.
+func supportedMessage(m *reconstruct.Message) bool {
+	if !unstopped(m) {
+		return false
+	}
+	for _, h := range m.Headers {
+		if strings.EqualFold(h.Name, "content-encoding") && !strings.EqualFold(strings.TrimSpace(h.Value), "identity") {
+			return false
+		}
+	}
+	return true
 }
 
-func supportedMessage(m *reconstruct.Message) bool {
+// unstopped is a message none of the standing stops applies to, whatever its
+// content codings: complete and framed, with no defect, hole or elision,
+// HTTP/1.0 or HTTP/1.1, no CONNECT, informational response or Upgrade, and no
+// transfer coding but one chunked.
+func unstopped(m *reconstruct.Message) bool {
 	if m == nil || !m.Complete || !m.Framed || m.Defect != http1.DefectNone || m.BodyHoled != 0 || m.BodyElided != 0 {
 		return false
 	}
@@ -870,10 +923,6 @@ func supportedMessage(m *reconstruct.Message) bool {
 		switch strings.ToLower(h.Name) {
 		case "upgrade":
 			return false
-		case "content-encoding":
-			if !strings.EqualFold(strings.TrimSpace(h.Value), "identity") {
-				return false
-			}
 		case "transfer-encoding":
 			encodings++
 			if encodings > 1 || !strings.EqualFold(strings.TrimSpace(h.Value), "chunked") {

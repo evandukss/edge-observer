@@ -103,8 +103,8 @@ func recycled(t *testing.T, actor *armingProcess, received <-chan string) uint64
 // its own, numbered from one at offset zero with its own binding. Joined, the
 // second connection's bytes would continue the first's stream.
 func TestARecycledHandleIsTwoConnections(t *testing.T) {
-	port, received := independentPeer(t)
-	actor := independentActor(t, recycleSource, port)
+	port, received := trafficPeer(t)
+	actor := trafficActor(t, recycleSource, port)
 	run := deliverHeldWith(t, actor, ebpf.Options{})
 	handle := recycled(t, actor, received)
 	records := run.seal(t)
@@ -151,8 +151,8 @@ func TestARecycledHandleIsTwoConnections(t *testing.T) {
 // not live: no occupancy forms and the session names the refused probe, so a
 // recycled handle cannot join two connections into one placed stream.
 func TestARefusedRecycleProbeLeavesCaptureNotLive(t *testing.T) {
-	port, received := independentPeer(t)
-	actor := independentActor(t, recycleSource, port)
+	port, received := trafficPeer(t)
+	actor := trafficActor(t, recycleSource, port)
 	run := deliverHeldWith(t, actor, ebpf.Options{FailEntry: []string{"SSL_clear"}})
 	if !slices.Contains(run.session.Unprobed(), "SSL_clear") {
 		t.Fatalf("the refused SSL_clear probe is not named: unprobed %v", run.session.Unprobed())

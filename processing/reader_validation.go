@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/evandukss/edge-observer/contentcoding"
 	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/contract/record"
 	"github.com/evandukss/edge-observer/extension"
@@ -14,7 +15,8 @@ import (
 
 // Error text is structural and never includes a value taken from the file.
 func validateArtifact(a Artifact) error {
-	if a.Version != ArtifactVersion4 && a.Version != ArtifactVersion3 && a.Version != ArtifactVersion2 && a.Version != ArtifactVersion1 {
+	if a.Version != ArtifactVersion5 && a.Version != ArtifactVersion4 && a.Version != ArtifactVersion3 &&
+		a.Version != ArtifactVersion2 && a.Version != ArtifactVersion1 {
 		return errors.New("unsupported artifact version")
 	}
 	if a.PolicyRevision == "" || a.Route.Pipeline == "" || a.Route.Sink == "" || a.Route.Kind == "" {
@@ -29,6 +31,9 @@ func validateArtifact(a Artifact) error {
 	if err := unplacedTotal(a); err != nil {
 		return err
 	}
+	if err := excludedCounts(a); err != nil {
+		return err
+	}
 	if a.Version == ArtifactVersion2 {
 		if err := validateIDs(a); err != nil {
 			return err
@@ -37,7 +42,7 @@ func validateArtifact(a Artifact) error {
 			return errors.New("missing extension outcomes or replacement exclusions")
 		}
 	}
-	if a.Version == ArtifactVersion3 || a.Version == ArtifactVersion4 {
+	if exchangeLines(a.Version) {
 		if a.Session == "" || a.ExchangeIDs != nil || a.PolicyExclusions == nil || a.ExtensionOutcomes == nil || a.ReplacementExclusions == nil {
 			return errors.New("invalid exchange-line envelope")
 		}
@@ -48,7 +53,7 @@ func validateArtifact(a Artifact) error {
 			}
 			// Unplaced is a total over the connection, which a line that can
 			// precede the retirement does not state.
-			if a.Version == ArtifactVersion4 && a.Reconstruction.Unplaced != provisionalUnplaced {
+			if provisionalLines(a.Version) && a.Reconstruction.Unplaced != provisionalUnplaced {
 				return errors.New("exchange line stating its connection's unplaced total")
 			}
 		case ArtifactConnection:
@@ -66,7 +71,7 @@ func validateArtifact(a Artifact) error {
 	}
 	r := a.Reconstruction
 	if r == nil {
-		if (a.ReconstructionTruncation != nil && a.Version != ArtifactVersion3 && a.Version != ArtifactVersion4) || len(a.PolicyExclusions) != 0 || len(a.ExtensionOutcomes) != 0 ||
+		if (a.ReconstructionTruncation != nil && !exchangeLines(a.Version)) || len(a.PolicyExclusions) != 0 || len(a.ExtensionOutcomes) != 0 ||
 			len(a.ReplacementExclusions) != 0 {
 			return errors.New("reconstruction evidence without reconstruction")
 		}
@@ -97,6 +102,17 @@ func validateArtifact(a Artifact) error {
 	owners, err := validateOutcomes(a, exchanges)
 	if err != nil {
 		return err
+	}
+	for _, e := range r.Exchanges {
+		for _, side := range []struct {
+			m       *record.Message
+			headers string
+		}{{e.Request.Message, config.FieldRequestHeaders}, {e.Response.Message, config.FieldResponseHeaders}} {
+			replaced := owners[component{exchange: e.Index, field: side.headers}] != ""
+			if err := decodedContent(a.Version, side.m, replaced); err != nil {
+				return err
+			}
+		}
 	}
 	seen := make(map[PolicyExclusion]bool, len(a.PolicyExclusions))
 	bodyEntry := map[*record.Message]bool{}
@@ -155,14 +171,114 @@ func validateArtifact(a Artifact) error {
 	return nil
 }
 
-// unplacedTotal is a version 4 connection line's unplaced total, required
+// exchangeLines is whether a version writes one line per exchange and one per
+// connection: version 3 and later.
+func exchangeLines(version string) bool {
+	return version == ArtifactVersion3 || provisionalLines(version)
+}
+
+// provisionalLines is whether a version can write an exchange line before its
+// connection retires: version 4 and later.
+func provisionalLines(version string) bool {
+	return version == ArtifactVersion4 || version == ArtifactVersion5
+}
+
+// excludedCounts is a version 5 connection line's counts of exchanges excluded
+// alone, required there and nowhere else: every reason present, each a
+// decimal string with no leading zero.
+func excludedCounts(a Artifact) error {
+	c := a.ExcludedExchanges
+	if a.Version != ArtifactVersion5 || a.Record != ArtifactConnection {
+		if c != nil {
+			return errors.New("excluded exchange counts outside a version 5 connection line")
+		}
+		return nil
+	}
+	if c == nil {
+		return errors.New("connection line without its excluded exchange counts")
+	}
+	for _, count := range []string{c.ContentCodingUnsupported, c.ContentDecodingFailed, c.ContentDecodedTooLarge,
+		c.ContentDecodingTooCostly} {
+		if _, ok := canonicalDecimal(count); !ok {
+			return errors.New("invalid excluded exchange count")
+		}
+	}
+	return nil
+}
+
+// decodedContent is a message's record of its decoded content, which only a
+// version 5 line carries: state decoded, a decimal decoded length, on a body
+// that had captured bytes, none of them missing or elided. Its codings, where
+// present, are one known name (contentcoding.MaxCodings), and, unless an
+// extension's change of the message's headers is what is written, exactly the
+// codings the written Content-Encoding fields name: a record never names a
+// coding the written headers do not show.
+func decodedContent(version string, m *record.Message, replaced bool) error {
+	c := m.Body.Content
+	if c == nil {
+		return nil
+	}
+	if version != ArtifactVersion5 {
+		return errors.New("decoded content before version 5")
+	}
+	length, okLength := decimalOffset(m.Body.Length)
+	if c.State != record.ContentDecoded || !okLength || length == 0 || m.Body.Holed != "0" || m.Body.Elided != "0" {
+		return errors.New("invalid decoded content")
+	}
+	if _, ok := canonicalDecimal(c.Length); !ok {
+		return errors.New("invalid decoded content length")
+	}
+	if c.Codings == nil {
+		return nil
+	}
+	if len(c.Codings) == 0 || len(c.Codings) > contentcoding.MaxCodings {
+		return errors.New("invalid decoded content codings")
+	}
+	for _, name := range c.Codings {
+		if !slices.Contains(codingNames, name) {
+			return errors.New("invalid decoded content codings")
+		}
+	}
+	if replaced {
+		return nil
+	}
+	var values []string
+	for _, h := range m.Headers {
+		if strings.EqualFold(h.Name, "content-encoding") {
+			values = append(values, h.Value)
+		}
+	}
+	list, verdict := contentcoding.ParseList(values)
+	if verdict != contentcoding.Supported || list.Len() != len(c.Codings) {
+		return errors.New("decoded content codings the written headers do not name")
+	}
+	for i, name := range c.Codings {
+		if list.At(i).String() != name {
+			return errors.New("decoded content codings the written headers do not name")
+		}
+	}
+	return nil
+}
+
+// codingNames is every coding a decoded content record can name.
+var codingNames = []string{contentcoding.Gzip.String(), contentcoding.Deflate.String(), contentcoding.Brotli.String(),
+	contentcoding.Zstd.String()}
+
+// canonicalDecimal is an unsigned decimal string with no leading zero, "0"
+// included.
+func canonicalDecimal(value string) (uint64, bool) {
+	n, ok := decimalOffset(value)
+	return n, ok && (value == "0" || value[0] != '0')
+}
+
+// unplacedTotal is a version 4 or 5 connection line's unplaced total, required
 // there and nowhere else: bytes, and either a determined decimal value with no
 // reason or an undetermined state with a reason and no value.
 func unplacedTotal(a Artifact) error {
 	u := a.ReconstructionUnplaced
-	if a.Version != ArtifactVersion4 || a.Record != ArtifactConnection {
+	if !provisionalLines(a.Version) || a.Record != ArtifactConnection {
 		if u != nil {
-			return errors.New("unplaced total outside a version 4 connection line")
+			return errors.New("unplaced total outside a version 4 or 5 connection line")
 		}
 		return nil
 	}
@@ -187,21 +303,21 @@ func unplacedTotal(a Artifact) error {
 	return nil
 }
 
-// provisionalUnplaced is the only unplaced count a version 4 exchange line
-// carries.
+// provisionalUnplaced is the only unplaced count a version 4 or 5 exchange
+// line carries.
 var provisionalUnplaced = record.Count{State: record.Undetermined, Unit: record.Bytes, Why: record.WhyProvisional}
 
 // connectionForm is the line's connection record in the form the line's
-// version and kind require. A version 4 exchange line carries the provisional
-// record: Provisional set, and none of the lifecycle and totals members. A
-// version 4 connection line carries the final record: Provisional unset, and
-// every one of those members stated - an ending that names how, associations,
-// placements and early as lists, fragments and early_unmeasured with a state.
-// No earlier version has a provisional record.
+// version and kind require. A version 4 or 5 exchange line carries the
+// provisional record: Provisional set, and none of the lifecycle and totals
+// members. A version 4 or 5 connection line carries the final record:
+// Provisional unset, and every one of those members stated - an ending that
+// names how, associations, placements and early as lists, fragments and
+// early_unmeasured with a state. No earlier version has a provisional record.
 func connectionForm(a Artifact) error {
 	c := a.Connection
 	switch {
-	case a.Version == ArtifactVersion4 && a.Record == ArtifactExchange:
+	case provisionalLines(a.Version) && a.Record == ArtifactExchange:
 		if !c.Provisional {
 			return errors.New("exchange line without a provisional connection record")
 		}
@@ -210,7 +326,7 @@ func connectionForm(a Artifact) error {
 				return errors.New("provisional connection record carrying lifecycle or totals")
 			}
 		}
-	case a.Version == ArtifactVersion4:
+	case provisionalLines(a.Version):
 		if c.Provisional {
 			return errors.New("provisional connection record on a connection line")
 		}

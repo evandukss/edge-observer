@@ -200,7 +200,7 @@ func TestTheFloorAndItsProofStatusReachTheAccountAndACapturedRunDoesNotProveIt(t
 
 			// The rendering is read against the same account.
 			floor := line(t, rendered(a, false), "floor")
-			if !strings.Contains(floor, published) || !strings.Contains(floor, "UNPROVED") {
+			if !strings.Contains(floor, published) || !strings.Contains(floor, "has not been run on "+published) {
 				t.Errorf("the floor line reads %q", floor)
 			}
 		})
@@ -301,10 +301,10 @@ type errFixed string
 
 func (e errFixed) Error() string { return string(e) }
 
-// Decision 477 item 2: a byte mover that could not be probed leaves capture not
-// live, and Describe says so where a user reads it - naming the function and the
-// consequence that the whole attachment sequences nothing. With every byte mover
-// probed, no such line appears.
+// A byte mover that could not be probed leaves capture not live, and Describe
+// says so where a user reads it - naming the function and the consequence that
+// the whole attachment sequences nothing. With every byte mover probed, no such
+// line appears.
 func TestDescribeNamesTheNotLiveStateWhenAByteMoverIsUnprobed(t *testing.T) {
 	notLive := account.Describe(probe.Capability{Backend: probe.BPF, Program: "full", Payload: true,
 		Unprobed: []string{"SSL_write", "SSL_sendfile"}})

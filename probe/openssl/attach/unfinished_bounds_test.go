@@ -40,10 +40,10 @@ func unfinishedServing(t *testing.T) *unfinishedPeer {
                 print("body " + str(len(part)), flush=True)
             return
 `
-	if strings.Count(t18ServerSource, before) != 1 {
+	if strings.Count(liveServerSource, before) != 1 {
 		t.Fatal("wiring, not the property: the HTTP peer has no unique request handler")
 	}
-	source := strings.Replace(t18ServerSource, before, body+before, 1)
+	source := strings.Replace(liveServerSource, before, body+before, 1)
 	certificate, key := certificate(t)
 	script := filepath.Join(t.TempDir(), "server.py")
 	if err := os.WriteFile(script, []byte(source), 0o600); err != nil {

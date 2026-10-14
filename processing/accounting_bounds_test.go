@@ -344,7 +344,7 @@ import("bufio";"encoding/json";"os";"strings";"time")
 func main(){
  scan:=bufio.NewScanner(os.Stdin);scan.Buffer(make([]byte,4096),34<<20)
  for scan.Scan(){var m map[string]any;if json.Unmarshal(scan.Bytes(),&m)!=nil {os.Exit(2)}
- switch m["type"] {case "start":json.NewEncoder(os.Stdout).Encode(map[string]any{"type":"ready","protocol":"observer.extension/1"})
+ switch m["type"] {case "start":json.NewEncoder(os.Stdout).Encode(map[string]any{"type":"ready","protocol":"observer.extension/2"})
  case "exchange":
   if os.WriteFile(os.Args[1],append(append([]byte{},scan.Bytes()...),10),0600)!=nil {os.Exit(3)}
   for {if _,e:=os.Stat(os.Args[2]);e==nil {break};time.Sleep(time.Millisecond)}

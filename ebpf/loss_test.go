@@ -26,8 +26,8 @@ import (
 	"github.com/evandukss/edge-observer/spool"
 )
 
-func independentLossSource(streams int) string {
-	prefix, _, _ := strings.Cut(independentTransferSource, "static int transfer(")
+func trafficLossSource(streams int) string {
+	prefix, _, _ := strings.Cut(trafficTransferSource, "static int transfer(")
 	return fmt.Sprintf("#define STREAMS %d\n", streams) + prefix + `
 static SSL *streams[STREAMS];
 static int sockets[STREAMS];
@@ -89,7 +89,7 @@ int main(int argc, char **argv) {
 `
 }
 
-func independentFragments(t *testing.T, path string) []fragment.Record {
+func trafficFragments(t *testing.T, path string) []fragment.Record {
 	t.Helper()
 	file, err := os.Open(path)
 	if err != nil {
@@ -113,14 +113,14 @@ func independentFragments(t *testing.T, path string) []fragment.Record {
 	}
 }
 
-func waitIndependentMarker(t *testing.T, disk *spool.Spool, marker string) fragment.ConnectionID {
+func waitTrafficMarker(t *testing.T, disk *spool.Spool, marker string) fragment.ConnectionID {
 	t.Helper()
 	deadline := time.NewTimer(5 * time.Second)
 	defer deadline.Stop()
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		for _, record := range independentFragments(t, disk.Path()) {
+		for _, record := range trafficFragments(t, disk.Path()) {
 			if record.Direction == fragment.Received && strings.Contains(string(record.Payload), "peer-confirmed:"+marker+":end") {
 				return record.Connection
 			}
@@ -229,7 +229,7 @@ func (s *decodedLossEvidence) gaps(t *testing.T, streams int) (map[lossDirection
 	return gaps, unlocated
 }
 
-func exerciseIndependentStreamLoss(t *testing.T, streams int) {
+func exerciseTrafficStreamLoss(t *testing.T, streams int) {
 	var peerCalls atomic.Int64
 	peer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		peerCalls.Add(1)
@@ -240,7 +240,7 @@ func exerciseIndependentStreamLoss(t *testing.T, streams int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	actor := independentActor(t, independentLossSource(streams), port)
+	actor := trafficActor(t, trafficLossSource(streams), port)
 	parent := loaded(t, int32(actor.command.Process.Pid))
 	disk, err := spool.Open(t.TempDir(), 32<<20)
 	if err != nil {
@@ -248,7 +248,7 @@ func exerciseIndependentStreamLoss(t *testing.T, streams int) {
 	}
 	t.Cleanup(func() { _ = disk.Close() })
 	recording := capture.Recording(disk, disk)
-	sink := &independentHeldSink{capture: recording, entered: make(chan struct{}), release: make(chan struct{})}
+	sink := &trafficHeldSink{capture: recording, entered: make(chan struct{}), release: make(chan struct{})}
 	evidence := &decodedLossEvidence{inner: sink, capture: recording, numbers: make(map[lossDirection][]uint64), finals: make(map[uint64]probe.Final), occupancies: make(map[uint64]uint64)}
 	live, err := attach.NeweBPF(process.Approval{}).Attach(probe.Request{Processes: []process.Process{parent}, Admit: authorise(parent)}, evidence)
 	if err != nil {
@@ -273,7 +273,7 @@ func exerciseIndependentStreamLoss(t *testing.T, streams int) {
 	command('P')
 	ids := make(map[fragment.ConnectionID]bool)
 	for i := 0; i < streams; i++ {
-		ids[waitIndependentMarker(t, disk, fmt.Sprintf("/before-%d", i))] = true
+		ids[waitTrafficMarker(t, disk, fmt.Sprintf("/before-%d", i))] = true
 	}
 	if len(ids) != streams {
 		t.Fatalf("positive controls merged %d live TLS handles into %d streams", streams, len(ids))
@@ -303,7 +303,7 @@ func exerciseIndependentStreamLoss(t *testing.T, streams int) {
 	time.Sleep(200 * time.Millisecond)
 	command('A')
 	for i := 0; i < streams; i++ {
-		_ = waitIndependentMarker(t, disk, fmt.Sprintf("/after-%d", i))
+		_ = waitTrafficMarker(t, disk, fmt.Sprintf("/after-%d", i))
 	}
 	command('Q')
 	finalLoss, err := counting.Losses()
@@ -333,11 +333,11 @@ func exerciseIndependentStreamLoss(t *testing.T, streams int) {
 		t.Log("UNPROVED: unattributable-loss branch observed zero unlocated losses")
 	}
 	recording.Finish(seal.Sealed)
-	records := independentConnections(t, disk.ConnectionsPath())
+	records := trafficConnections(t, disk.ConnectionsPath())
 	if len(records) < streams {
 		t.Fatalf("persisted population lost physical streams: %d records for %d streams", len(records), streams)
 	}
-	fragments := independentFragments(t, disk.Path())
+	fragments := trafficFragments(t, disk.Path())
 	for _, record := range records {
 		for _, direction := range []fragment.Direction{fragment.Sent, fragment.Received} {
 			var afterOffset uint64
@@ -377,8 +377,8 @@ func exerciseIndependentStreamLoss(t *testing.T, streams int) {
 }
 
 func TestOneStreamKeepsItsBytesAndLosesItsPlacementAfterRingLoss(t *testing.T) {
-	exerciseIndependentStreamLoss(t, 1)
+	exerciseTrafficStreamLoss(t, 1)
 }
 func TestRingLossPlacementFollowsEachInterleavedDirectionsEvidence(t *testing.T) {
-	exerciseIndependentStreamLoss(t, 2)
+	exerciseTrafficStreamLoss(t, 2)
 }

@@ -1,0 +1,10 @@
+version: "2"
+
+linters:
+  exclusions:
+    paths:
+      # The decoder of github.com/andybalholm/brotli v1.2.6, kept as upstream
+      # wrote it apart from the changes its PROVENANCE lists, so that its diff
+      # against upstream stays reviewable. Findings in it are upstream's style;
+      # vet, gofmt and the builds still cover it.
+      - ^internal/brotli/

@@ -68,7 +68,7 @@ func executionPopulationActor(t *testing.T, generation admission.Generation) (*e
 
 func executionPopulationSession(t *testing.T, recorded, granted []admission.Selection) (*Session, *cilium.Map) {
 	t.Helper()
-	m, err := cilium.NewMap(&cilium.MapSpec{Name: "t11_population", Type: cilium.Hash, KeySize: uint32(binary.Size(instanceKey{})), ValueSize: uint32(binary.Size(admissionValue{})), MaxEntries: 16})
+	m, err := cilium.NewMap(&cilium.MapSpec{Name: "population", Type: cilium.Hash, KeySize: uint32(binary.Size(instanceKey{})), ValueSize: uint32(binary.Size(admissionValue{})), MaxEntries: 16})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,0 +1,72 @@
+internal/brotli: the decoder of github.com/andybalholm/brotli v1.2.6
+
+Upstream
+  module   github.com/andybalholm/brotli
+  version  v1.2.6
+  go.sum   h1:ftYnfj6usCp+UGV5kSJ3+chpMQgU+gJf/AxsUQ52REI=
+  licence  MIT: LICENSE in this directory, copied unchanged
+
+Copied unchanged: the sha256 of the upstream file, which this copy matches
+  4543d94dc53e3f22634106a24b0d4e141a036bf2fa23019a208c10c49025e52f  constants.go
+  a18f204b055eaacc5eda467a13854d4bc77dce08f03cc5651c667898d4f57079  context.go
+  dddf30e93ce92570eae8163693e7964fe4206b17bd34de649655727e584a0d4a  dictionary.go
+  fc40465ca1d9b7bb28641b2ab39929d98386795990029ec176c4dd1d96d96a3c  prefix_dec.go
+  51d4755ded5a3694477eaa7de1983bbde8ef8a3ad930265b016ea73f1b300176  symbol_list.go
+  5ed47f676cba4c88445a7f2e38be01f82d59f40536aca3b842c1ccdf0122611d  transform.go
+  9e4a26539ad04feb24fe61c3ed004ede39011798fb3361957133011ff5cdc000  util.go
+  3d180008e36922a4e8daec11c34c7af264fed5962d07924aea928c38e8663c94  LICENSE
+
+Reformatted by gofmt (go1.27.1), doc comments only: the syntax with comments
+dropped is the upstream file's. sha256 of the upstream file, then of the copy:
+  6dd862c1f397fcf230b31b8d28bd07a2655f79c59ba60099c0ec2b128c0af2de  bit_reader.go
+  a89840714497f8ce9cbfd23d029778ca9581e01f64dcb07376d54a34c83fb4c7  (copy)
+  a4a46b86fe329e27befe76beea255e1d2a38c720b0290e67f15603c2c68b607c  decode.go
+  044e6c0300b0ce066a13dca1b42845ac0bdb2cd7c804df7521b8987d49075892  (copy, before the change below)
+  e98547095f174cd588b24c302ee8540fa396346b64785c5b9f233a0238739781  huffman.go
+  e377605aac21705ecdd22e77aab9ddac17f22433fe42fb747a9bf1507425e920  (copy)
+
+Taken from an upstream file
+  block_length_prefix.go  lines 22-54 of brotli_bit_stream.go, prefixCodeRange and
+                          kBlockLengthPrefixCode, unchanged under a package clause and
+                          a comment; sha256 of those 33 lines with their newlines:
+                          e150edc76dad91699b6f39e836b5a7def0c86174ed9ce3bcb1c01ae918a849c9
+
+What is here is the decoder alone. The tables and data it reads are in
+dictionary.go (the static dictionary), prefix_dec.go, context.go and
+transform.go. Not copied: the module's tests and test data, its matchfinder and
+flate packages, and these files, which are the encoder or used by it alone:
+  backward_references.go backward_references_hq.go bit_cost.go bitwriter.go
+  block_splitter.go block_splitter_command.go block_splitter_distance.go
+  block_splitter_literal.go brotli_bit_stream.go cluster.go cluster_command.go
+  cluster_distance.go cluster_literal.go command.go compress_fragment.go
+  compress_fragment_two_pass.go dictionary_hash.go encode.go encoder.go
+  encoder_dict.go encoder_fast.go entropy_encode.go entropy_encode_static.go
+  fast_log.go find_match_length.go h10.go h5.go h6.go hash.go
+  hash_composite.go hash_forgetful_chain.go hash_longest_match_quickly.go
+  hash_rolling.go histogram.go http.go literal_cost.go memory.go metablock.go
+  metablock_command.go metablock_distance.go metablock_literal.go params.go
+  platform.go prefix.go quality.go ringbuffer.go static_dict.go
+  static_dict_lut.go utf8_util.go write_bits.go writer.go
+
+Changed here, decode.go against its reformatted copy above, and state.go and
+reader.go against upstream, whose sha256 are
+  84104a6b35b8fe8e80ce9089d981609b92201b006241068d07978a610ec74c8c  state.go
+  2fc265f1b9db2724dcdcb8c95ca642ee3a7024bfa4fe08345f3426b77e575874  reader.go
+The changes:
+  state.go   the Reader keeps context_map_storage, dist_context_map_storage and
+             context_modes_storage, and its work count and budget, which
+             decoderStateInit clears
+  decode.go  decodeContextMap's map and the metablock's context modes are cut
+             from that storage (contextMapStorage, zeroedFrom) instead of made;
+             each step budget.go counts is charged immediately before it runs,
+             and a refused charge ends the stream with decoderErrorTooCostly
+  reader.go  Read returns ErrTooCostly for decoderErrorTooCostly
+  storage.go new: that storage, made once at the largest size the format allows
+             and zeroed for each use
+  budget.go  new: the work count, the budget and its check, ErrTooCostly, and
+             what each counted step costs
+
+To reproduce: `go mod download -json github.com/andybalholm/brotli@v1.2.6`
+names the module's directory; the upstream checksums above are those of its
+files, `gofmt` on the three listed reproduces their copies, and
+`diff -u <dir>/<file> internal/brotli/<file>` shows every change.

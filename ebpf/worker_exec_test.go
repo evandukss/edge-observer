@@ -13,7 +13,7 @@ import (
 	"github.com/evandukss/edge-observer/ebpf"
 )
 
-const independentWorkerExecSource = independentTransferSource + `
+const trafficWorkerExecSource = trafficTransferSource + `
 #include <sys/syscall.h>
 
 static char *self_path, *port_text;
@@ -82,8 +82,8 @@ int main(int argc, char **argv) {
 `
 
 func TestWorkerExecDisposesTheCallUnderItsPreExecThreadKey(t *testing.T) {
-	port, received := independentPeer(t)
-	actor := independentActor(t, independentWorkerExecSource, port)
+	port, received := trafficPeer(t)
+	actor := trafficActor(t, trafficWorkerExecSource, port)
 	parent := loaded(t, int32(actor.command.Process.Pid))
 	session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: points(t, parent), Admit: authorise(parent)})
 	if err != nil {
@@ -111,7 +111,7 @@ func TestWorkerExecDisposesTheCallUnderItsPreExecThreadKey(t *testing.T) {
 	}
 	command("E")
 	actorLine(t, actor, fmt.Sprintf("inside-read %d\n", worker))
-	present, live, generation, function, err := ebpf.IndependentThreadCall(session, parent.PID, worker)
+	present, live, generation, function, err := ebpf.ThreadCall(session, parent.PID, worker)
 	if err != nil || !present || !live || generation != uint64(control.Generation) || function != 1 {
 		t.Fatalf("worker did not hold its own live SSL_read before exec: present=%t live=%t generation=%d function=%d err=%v", present, live, generation, function, err)
 	}
@@ -124,10 +124,10 @@ func TestWorkerExecDisposesTheCallUnderItsPreExecThreadKey(t *testing.T) {
 	if _, err := os.Stat(fmt.Sprintf("/proc/%d/task/%d", parent.PID, worker)); !os.IsNotExist(err) {
 		t.Fatalf("pre-exec worker identity still exists after the worker became leader: %v", err)
 	}
-	if held, err := ebpf.IndependentKernelGrantPresent(session, parent.Instance()); err != nil || held {
+	if held, err := ebpf.KernelGrantPresent(session, parent.Instance()); err != nil || held {
 		t.Fatalf("successful worker exec did not revoke its grant: held=%t err=%v", held, err)
 	}
-	present, live, generation, function, err = ebpf.IndependentThreadCall(session, parent.PID, worker)
+	present, live, generation, function, err = ebpf.ThreadCall(session, parent.PID, worker)
 	if err != nil {
 		t.Fatal(err)
 	}

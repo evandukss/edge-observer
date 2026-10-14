@@ -130,9 +130,13 @@ type parsing struct {
 	exchanges, good int
 	excluded        bool
 	countable       bool
-	// released is, per direction, the end of the last released exchange's
-	// message there: the first byte no exchange line carries.
+	// released is, per direction, the end of the last exchange's message there
+	// that the connection accounted for, written or excluded alone
+	// (excludeAlone): the first byte no exchange line carries and no exclusion
+	// count covers.
 	released [3]uint64
+	// exclusions counts the exchanges excluded alone, by reason.
+	exclusions Exclusions
 	// omitted is, per direction, why and where the first exchange not released
 	// stopped there.
 	omitted [3]*prefixCut

@@ -167,7 +167,7 @@ func certificationReleasePair(t *testing.T, a processing.Artifact, id uint64, in
 	if a.Connection.ID != strconv.FormatUint(id, 10) || a.Index == nil || *a.Index != index || a.ExchangeID == "" {
 		t.Errorf("release identity/index missing: %+v", a)
 	}
-	if a.Version != processing.ArtifactVersion4 || !a.Connection.Provisional {
+	if a.Version != processing.ArtifactVersion5 || !a.Connection.Provisional {
 		t.Errorf("online exchange carries final or legacy metadata: %+v", a.Connection)
 	}
 	for _, present := range a.Connection.Lifecycle() {

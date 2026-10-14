@@ -59,10 +59,8 @@ tests start, so they run as root and only on a kernel that allows it. They take 
 `-p 1` runs the two packages one after the other.
 
 Inside a container they also need the host's pid namespace: with Docker, `--privileged` and
-`--pid=host`. In one run without `--pid=host`, 27 of the 182 tests failed. Two of those failures name
-a cause: the tests compare the pids they see with the host pids the kernel reports. The cause of the
-other 25 is not established, and neither is whether the observer itself needs the host's pid
-namespace.
+`--pid=host`. Some of them approve a process by the pid they see and match it against the pid the
+kernel reports, which is the host's.
 
 ## Changing the BPF programs
 

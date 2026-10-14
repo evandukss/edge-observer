@@ -95,7 +95,7 @@ func TestTheLargestConfigurationStartsAndWrites(t *testing.T) {
 			observer := started(t, binary, c)
 			// The test server serves files, so the path is its root; the query is
 			// removed whole, and the exchange is found by its X-Keep value.
-			keep := "t27-largest-" + strconv.FormatBool(form)
+			keep := "lrg-largest-" + strconv.FormatBool(form)
 			request := "GET /?q0=removed HTTP/1.1\r\nHost: localhost\r\nX-Keep: " + keep + "\r\n" +
 				"X-R0: removed-value\r\nX-M0: masked-value\r\nX-T0: truncated-value\r\n\r\n"
 			if _, err := io.WriteString(client.send, request); err != nil {
