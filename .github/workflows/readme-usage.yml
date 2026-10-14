@@ -21,9 +21,14 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      - name: Setup - an evidence path traversable after capability drop
+        run: |
+          test ! -e /var/lib/observer-readme-usage
+          sudo install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /var/lib/observer-readme-usage
+          stat -c '%a %u %g %n' / /var /var/lib /var/lib/observer-readme-usage > /var/lib/observer-readme-usage/setup-path-permissions.txt
       - name: Capture the documented systemd usage path once
         env:
-          USAGE_OUT: ${{ runner.temp }}/readme-usage
+          USAGE_OUT: /var/lib/observer-readme-usage
           CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
         run: python3 .github/readme-usage/run.py
       - name: Keep evidence even when a command fails
@@ -31,6 +36,6 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: readme-usage-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/readme-usage
+          path: /var/lib/observer-readme-usage
           if-no-files-found: error
           retention-days: 30
