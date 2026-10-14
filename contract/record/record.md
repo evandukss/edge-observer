@@ -22,14 +22,14 @@ ids are unique within a session and mean nothing across sessions.
 ## Approved line envelope
 
 Durable approved output is LF-terminated JSON. This section is version
-`observer.approved/4`; where version 3 differs it says so, and versions 1 and 2
-remain readable under their original rules. Each line is fully processed under
-its `policy_revision`. Stable files append across sessions, so `session` is
-required on every line.
+`observer.approved/5`; where versions 3 and 4 differ it says so, and versions 1
+and 2 remain readable under their original rules. Each line is fully processed
+under its `policy_revision`. Stable files append across sessions, so `session`
+is required on every line.
 
 | Member | Meaning |
 |---|---|
-| `version` | `observer.approved/4` |
+| `version` | `observer.approved/5` |
 | `record` | `exchange` or `connection` |
 | `session` | the session that authorized this line |
 | `policy_revision` | the configuration revision applied before release |
@@ -40,6 +40,7 @@ required on every line.
 | `reconstruction` | exchange lines only: exactly one complete, processed request/response pair; its exchange index equals `index` |
 | `reconstruction_truncation` | connection lines only, where an incomplete suffix is known |
 | `reconstruction_unplaced` | connection lines only, always: the connection's unplaced total |
+| `excluded_exchanges` | connection lines only, always: the connection's exchanges excluded alone, by reason |
 | `policy_exclusions` | a present list of fields removed from captured content |
 | `extension_outcomes` | a present list of each extension's outcome for this exchange |
 | `replacement_exclusions` | a present list of fields removed from extension replacement content |
@@ -78,14 +79,17 @@ and the decimal `evidence_offset` at or after that offset. Reasons are
 `ambiguous_framing`, `processing_limit`, `unsupported_message`, `unpaired_exchange`,
 `unparsed_suffix` or `connection_cut`. This evidence describes an incomplete suffix,
 independently of the connection's actual ending. The suffix begins after the
-last exchange released on the connection, so `offset` is the first byte of a
-direction no exchange line carries. `connection_cut` is a connection cut because it
-could not hold more unreleased work, for either of two causes: it reached its own
-bound on what one connection may hold, or the session's shared allowance for held
-work was full and refused the growth its processing needed. What it held unreleased
-was discarded, so the stop's `offset` is the first unreleased byte of that
-direction - `0` where nothing was released - and its `evidence_offset` is how far
-that direction's discarded input ran. Only complete pairs appear in exchange lines.
+last exchange the connection accounted for - written on an exchange line, or,
+in version 5, excluded alone and counted in `excluded_exchanges` - so `offset`
+is the first byte of a direction no exchange line carries and no count covers.
+A malformed `Content-Encoding` stops as `unsupported_message`.
+`connection_cut` is a connection cut because it could not hold more unreleased
+work, for either of two causes: it reached its own bound on what one connection
+may hold, or the session's shared allowance for held work was full and refused
+the growth its processing needed. What it held unreleased was discarded, so
+the stop's `offset` is the first byte of that direction not accounted for - `0`
+where nothing was - and its `evidence_offset` is how far that direction's
+discarded input ran. Only complete pairs appear in exchange lines.
 
 Ids are issued monotonically before delivery and never reused. The same exchange
 has the same id and connection index on every route and in every extension.
@@ -93,8 +97,12 @@ Indexes on one connection rise across releases, a line the output dropped
 included, and a dropped line never renumbers a later exchange. A connection
 line never repeats an exchange an exchange line carried, and a line once
 written is never changed. With `write_content` false, no exchange line is
-emitted and no exchange id is issued; the connection line remains. Version 4,
-like version 3, has no `exchange_ids` range.
+emitted and no exchange id is issued; the connection line remains. Versions 4
+and 5, like version 3, have no `exchange_ids` range.
+
+Version 4 has no `excluded_exchanges` and no decoded bodies: an exchange with a
+coded body was excluded with the truncation's suffix, as every exchange after
+it was.
 
 In version 3 no exchange line is released before its connection's retirement:
 every line carries the final record, an exchange line carries its connection's
@@ -109,6 +117,59 @@ have written a prefix, is never counted as written, and is not retried. The next
 record starts on a new line; a damaged record is malformed on inspection. Reader
 selection over several explicit files filters by session without claiming
 continuity between those files.
+
+### Exchanges excluded alone
+
+An exchange whose body cannot be decoded is excluded ALONE: it keeps its
+exchange id and connection index, no line carries it, and the exchanges after
+it are written as usual, so a connection's indexes run on past it. It is
+excluded for one of four reasons, which are never truncation reasons:
+
+| Reason | The body |
+|---|---|
+| `content_coding_unsupported` | its `Content-Encoding` names a coding other than `gzip`, `x-gzip`, `deflate`, `br` and `zstd`, or more than one |
+| `content_decoding_failed` | is not a valid stream of its codings: corrupt, truncated, failing a check, or with bytes after it |
+| `content_decoded_too_large` | would decode, at any stage, to more than the per-message body bound |
+| `content_decoding_too_costly` | would take more work to decode than the decoder's budget allows |
+
+An exchange has one reason. A stop described by a truncation outranks all four:
+an exchange excluded with a truncation's suffix is not excluded alone. Between
+the four, `content_coding_unsupported` outranks `content_decoding_failed`, which
+outranks `content_decoded_too_large`, which outranks
+`content_decoding_too_costly`, the request's reason on a tie. A message with no
+body - none by its framing, or a length of zero - encodes nothing, whatever its
+`Content-Encoding` says.
+
+A connection line's `excluded_exchanges` counts them:
+`{"content_coding_unsupported": "0", "content_decoding_failed": "1",
+"content_decoded_too_large": "0", "content_decoding_too_costly": "0"}`. Every
+reason is present, each a decimal string with no leading zero. Each exchange is
+counted once, under its reason, however many sides, routes or extensions it had,
+and a count made stays when the connection is later cut or loses capture. A
+reader refuses a connection line without it, and `excluded_exchanges` on any
+other line or in any version before 5.
+
+### Decoded bodies
+
+A message whose body was decoded is written as its content. Its `body` carries
+`content`: `state` `decoded`, the decoded content's `length`, a decimal string
+counted before processing policy removed any of it, and `codings`, a list naming
+the one coding undone - `gzip` (for `x-gzip` too), `deflate`, `br` or `zstd`. A
+message is decoded only where it names one coding once `identity` is set aside.
+Every other member of the body and the message keeps its captured meaning:
+`body.length` is the captured body's extent, and `holed`, `elided`, `framing`,
+the headers and the stream offsets are as captured. `body.kept` and `structure`
+are read from the decoded content: the structure is derived from the decoded
+bytes, never from the encoded ones.
+
+`codings` is present only where every captured `Content-Encoding` field of the
+message is written unchanged. Where processing policy removed, masked or
+truncated one, `codings` is absent and the record says only that the body was
+decoded. A reader refuses `content` before version 5, on a body with no
+captured bytes or with any `holed` or `elided`, and `codings` naming more than
+one, an unknown name, or - unless an extension's change of that message's
+headers is what is written - anything other than exactly the codings the
+written `Content-Encoding` fields name.
 
 ## Encoding
 
@@ -353,6 +414,7 @@ have ended, so an interval test over `valid` reads every such pair as overlappin
 | `framing` | uncertainty | `none`, `content_length`, `chunked`, `until_close`, `ambiguous` |
 | `body.length` | loss | the body's extent in the stream |
 | `body.kept` | content | the kept bytes, `base64` |
+| `body.content` | provenance | only in an `observer.approved/5` artifact: `body.kept` is the decoded content ([Decoded bodies](#decoded-bodies)) |
 | `body.holed` / `body.elided` | loss | bytes capture never had / bytes a bound dropped. Different facts |
 | `complete`, `framed` | uncertainty | every byte present / the end known |
 | `defect`, `detail` | uncertainty | `none`, `stream_ended`, `hole`, `malformed`, `ambiguous_framing`, `limit`, and one line that never carries body bytes |

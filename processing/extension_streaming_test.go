@@ -493,15 +493,15 @@ func TestARetirementBetweenReleasesKeepsOrderAndCounts(t *testing.T) {
 
 // An exchange the output will not write, and every one after it, is sent as
 // excluded as soon as nothing later can change the reason its connection's
-// line records for it: after a compressed response, at once while the
-// connection is open; a one-sided request, at the connection's end; and one
-// whose reason waits on later input in its direction, at a cut that comes
-// first, with connection_cut.
+// line records for it: after a response with an unsupported transfer coding,
+// at once while the connection is open; a one-sided request, at the
+// connection's end; and one whose reason waits on later input in its
+// direction, at a cut that comes first, with connection_cut.
 func TestTheExcludedTailIsSentOnceItsReasonIsDecidable(t *testing.T) {
-	gzipped := read("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 2\r\n\r\nzz")
+	transferCoded := read("HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n2\r\nOK\r\n0\r\n\r\n")
 	t.Run("as soon as decidable, and at the end", func(t *testing.T) {
 		s := newStreamed(t, streamedOptions{extensions: []streamedExtension{{name: "watching", mode: "unchanged"}}})
-		c := converse(t, 7, append(pairs("/a"), wrote("GET /b HTTP/1.1\r\nHost: a\r\n\r\n"), gzipped,
+		c := converse(t, 7, append(pairs("/a"), wrote("GET /b HTTP/1.1\r\nHost: a\r\n\r\n"), transferCoded,
 			wrote("GET /c HTTP/1.1\r\nHost: a\r\n\r\n"), read("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n/c"),
 			wrote("GET /d HTTP/1.1\r\nHost: a\r\n\r\n"))...)
 		s.give(c.fragments...)
@@ -778,17 +778,17 @@ func TestACaptureLossWithdrawsTheExchangesWaitingTheirTurn(t *testing.T) {
 	s.requireOneDone(0, 11, 3)
 }
 
-// A compressed response early on a long connection begins its excluded tail,
-// and with extensions configured each excluded exchange is sent and let go as
-// soon as its reason is decidable: the connection's held work plateaus, it is
-// not cut at its bound, and the extension receives every exchange while the
-// connection is open.
+// A response with an unsupported transfer coding early on a long connection
+// begins its excluded tail, and with extensions configured each excluded
+// exchange is sent and let go as soon as its reason is decidable: the
+// connection's held work plateaus, it is not cut at its bound, and the
+// extension receives every exchange while the connection is open.
 func TestAnExcludedTailDoesNotGrowOnALongConnection(t *testing.T) {
 	const later = 30
 	s := newStreamed(t, streamedOptions{connectionInput: 8, extensions: []streamedExtension{
 		{name: "watching", mode: "unchanged"}}})
-	gzipped := read("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 2\r\n\r\nzz")
-	calls := append(pairs("/a"), wrote("GET /b HTTP/1.1\r\nHost: a\r\n\r\n"), gzipped)
+	transferCoded := read("HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n2\r\nOK\r\n0\r\n\r\n")
+	calls := append(pairs("/a"), wrote("GET /b HTTP/1.1\r\nHost: a\r\n\r\n"), transferCoded)
 	for n := range later {
 		calls = append(calls, pair("/n"+strconv.Itoa(n))...)
 	}
@@ -809,7 +809,7 @@ func TestAnExcludedTailDoesNotGrowOnALongConnection(t *testing.T) {
 	}
 	got := s.received(0, "exchange")
 	if output := got[1]["output"].(map[string]any); output["state"] != "excluded" {
-		t.Fatalf("wiring, not the property: the compressed exchange was not excluded: %v", output)
+		t.Fatalf("wiring, not the property: the transfer-coded exchange was not excluded: %v", output)
 	}
 	early, late := slices.Max(held[2:12]), slices.Max(held[len(held)-10:])
 	if late > early {

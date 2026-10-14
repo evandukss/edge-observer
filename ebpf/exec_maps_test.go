@@ -13,10 +13,10 @@ import (
 	"github.com/evandukss/edge-observer/bpf"
 )
 
-// IndependentThreadCall reads the full pre-exec key. Offsets come from the
+// ThreadCall reads the full pre-exec key. Offsets come from the
 // compiled object's BTF so adding association fields cannot move the live bit
 // away from the assertion unnoticed. It neither deletes nor reconciles state.
-func IndependentThreadCall(s *Session, tgid, tid int32) (present, live bool, generation uint64, function uint32, err error) {
+func ThreadCall(s *Session, tgid, tid int32) (present, live bool, generation uint64, function uint32, err error) {
 	spec, err := cilium.LoadCollectionSpecFromReader(bytes.NewReader(bpf.Full().Object))
 	if err != nil {
 		return false, false, 0, 0, err

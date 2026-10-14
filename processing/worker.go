@@ -22,7 +22,14 @@
 //   - each exchange the pairing hands over, at the charge it is handed over
 //     with, until the worker lets it go: once its lines are written - after
 //     every extension, where the plan configures them - or it is excluded or
-//     not released, or the connection is let go.
+//     not released, or the connection is let go;
+//   - each decoding of a body an exchange is handed over with, as the decoder
+//     asks for it (contentcoding.Reserver): a stage's decoder workspace while
+//     the stage runs, and a stage's output from before it grows. The decoded
+//     content an exchange keeps stays charged, beside the encoded body it was
+//     handed over with, until the worker lets the exchange go; everything else
+//     is given back when the decoding ends. A charge the allowance refuses
+//     cuts the connection as any refused growth does.
 //
 // Policy (intake.Policy) charges each copy of an exchange a pipeline makes to
 // apply its slots, none or many, from before the copy is made until it is
@@ -115,6 +122,7 @@ import (
 
 	"github.com/evandukss/edge-observer/account"
 	"github.com/evandukss/edge-observer/connection"
+	"github.com/evandukss/edge-observer/contentcoding"
 	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/extension"
 	"github.com/evandukss/edge-observer/fragment"
@@ -194,6 +202,14 @@ type Options struct {
 	// submits, where set, is told of every extension call a worker is about to
 	// submit, on that worker's goroutine. Only a test sets it.
 	submits func(submission)
+	// decodeCharges, where set, is told of every charge a decoding asks the
+	// shared allowance for and every one it gives back, on the worker's
+	// goroutine. Only a test sets it.
+	decodeCharges func(decodeCharge)
+	// decoder, where set, decodes in place of contentcoding.Decode. Only a test
+	// sets it, to return a result no input produces, such as a contained
+	// decoder fault.
+	decoder func(contentcoding.List, []byte, contentcoding.Options) contentcoding.Result
 }
 
 // turnEntries is the most entries a worker takes from its queue in one turn
@@ -300,11 +316,12 @@ func (o releaseOutcome) worse(other releaseOutcome) releaseOutcome {
 // Withheld counts reconstruction exchanges refused before pipeline transforms.
 // It is known only when complete framed HTTP/1 request/response pairs establish
 // the count, without an unknown suffix or unmodelled pairing (CONNECT, Upgrade,
-// or informational responses). Fully framed unsupported encodings can be
-// counted. Invalid, incomplete or unplaced input makes it unknown, not one;
-// discarded unexamined input also makes it unknown, not zero. Pending input is
-// not yet refused. Unknown is cumulative and retains the first reason, with no
-// numeric value; subsequent known refusals cannot make the total known again.
+// or informational responses). An exchange excluded alone is not withheld; it
+// is counted in Excluded. Invalid, incomplete or unplaced input makes it
+// unknown, not one; discarded unexamined input also makes it unknown, not
+// zero. Pending input is not yet refused. Unknown is cumulative and retains
+// the first reason, with no numeric value; subsequent known refusals cannot
+// make the total known again.
 // This count excludes policy suppression, transform failures, gate refusals and
 // output failures, and does not multiply exchanges by the number of routes.
 // ProcessingFailures counts affected active durable routes for each batch's
@@ -321,6 +338,14 @@ func (o releaseOutcome) worse(other releaseOutcome) releaseOutcome {
 // counts the input entries discarded for those cuts: what each held when it
 // was cut, and what arrived for it afterwards. A cut connection's exchanges not
 // released before the cut are withheld as unknown.
+// Excluded counts the exchanges excluded alone, by reason, each once however
+// many sides, routes or extensions it had; a connection line carries its own
+// connection's share (ExcludedExchanges). Withheld, ProcessingFailures and
+// the cuts never count them. DecoderFaults counts the decodings whose decoder
+// library failed and was contained (contentcoding.Result.Fault): each one's
+// exchange is also counted in Excluded as ReasonContentDecodingFailed, and
+// this says how many of those were the decoder's own failure rather than the
+// body's. Nothing of the failure itself is kept.
 // Pending counts connection batches still holding charged intake entries.
 // GateReason reports the gate's capture-wide diagnostic state at return, even
 // when no complete candidate reached authorization. It is never permission;
@@ -336,6 +361,8 @@ type Outcome struct {
 	ConnectionsCut     uint64
 	AllowanceCut       uint64
 	InputCut           uint64
+	Excluded           Exclusions
+	DecoderFaults      uint64
 	Pending            int
 	GateReason         probe.GateReason
 	// ExchangeIDs is how many exchange ids the run issued: one per exchange a
@@ -347,6 +374,30 @@ type Outcome struct {
 	// Considered is ExchangeIDs, and Considered is Changed + Unchanged +
 	// Failed + Pending.
 	Extensions []account.ExtensionCounts
+}
+
+// Exclusions counts exchanges excluded alone, by reason
+// (ReasonContentCodingUnsupported, ReasonContentDecodingFailed,
+// ReasonContentDecodedTooLarge, ReasonContentDecodingTooCostly). Only counts
+// are kept, never a list.
+type Exclusions struct {
+	ContentCodingUnsupported uint64
+	ContentDecodingFailed    uint64
+	ContentDecodedTooLarge   uint64
+	ContentDecodingTooCostly uint64
+}
+
+// Total is the exchanges counted under every reason.
+func (e Exclusions) Total() uint64 {
+	return e.ContentCodingUnsupported + e.ContentDecodingFailed + e.ContentDecodedTooLarge + e.ContentDecodingTooCostly
+}
+
+func (e Exclusions) plus(other Exclusions) Exclusions {
+	e.ContentCodingUnsupported += other.ContentCodingUnsupported
+	e.ContentDecodingFailed += other.ContentDecodingFailed
+	e.ContentDecodedTooLarge += other.ContentDecodedTooLarge
+	e.ContentDecodingTooCostly += other.ContentDecodingTooCostly
+	return e
 }
 
 // Finalization is supplied only after capture authority has been withdrawn,
@@ -480,11 +531,14 @@ func newWorker(options Options, index int, from source, release *release, runnin
 // HTTP/1 messages; unsupported encodings and undecidable tails are withheld.
 // Complete exchanges preceding a bad tail are released. Capture end never
 // completes a close-delimited response. Supported versions are HTTP/1.0 and
-// HTTP/1.1; Content-Encoding must be absent or identity, and Transfer-Encoding
-// absent or solely chunked. CONNECT, Upgrade and informational responses are
-// withheld, because this parser does not model protocol switching or interim
-// pairing. Both request and response must be present and complete for an
-// exchange to be emitted. No source bytes or parser error text are logged.
+// HTTP/1.1, and Transfer-Encoding absent or solely chunked. A body whose
+// Content-Encoding names one coding this observer undoes is decoded (prepare);
+// one it cannot decode excludes its exchange alone, with or without
+// extensions, and the exchanges after it go on. CONNECT, Upgrade and
+// informational responses are withheld, because this parser does not model
+// protocol switching or interim pairing. Both request and response must be
+// present and complete for an exchange to be emitted. No source bytes or
+// parser error text are logged.
 //
 // Pipelines execute in compiled order on separate input copies, and slots in
 // their compiled order, including zero-slot pipelines. Connection inputs receive
@@ -749,6 +803,8 @@ func (o Outcome) plus(other Outcome) Outcome {
 	o.ConnectionsCut += other.ConnectionsCut
 	o.AllowanceCut += other.AllowanceCut
 	o.InputCut += other.InputCut
+	o.Excluded = o.Excluded.plus(other.Excluded)
+	o.DecoderFaults += other.DecoderFaults
 	o.Pending += other.Pending
 	if o.GateReason == "" {
 		o.GateReason = other.GateReason

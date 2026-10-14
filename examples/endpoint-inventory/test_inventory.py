@@ -33,7 +33,7 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(len(EXCHANGES), 3, "wiring: captured population changed")
         self.assertEqual([m["type"] for m in MESSAGES][-2:], ["session_ending", "shutdown"])
         output = replay(CAPTURE)
-        self.assertEqual(output[0], {"type": "ready", "protocol": "observer.extension/1"})
+        self.assertEqual(output[0], {"type": "ready", "protocol": "observer.extension/2"})
         results = [m for m in output if m["type"] == "result"]
         self.assertEqual(results, [{"type": "result", "id": m["id"], "outcome": "unchanged"} for m in EXCHANGES])
         batches = [m for m in output if m["type"] == "derived"]

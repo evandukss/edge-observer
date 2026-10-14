@@ -12,16 +12,16 @@ import (
 )
 
 func TestAnUnapprovedReturnCannotCountAnApprovedCallsTombstoneAsUnmatched(t *testing.T) {
-	port, received := independentPeer(t)
-	actor := independentActor(t, immediateForkSource(), port)
+	port, received := trafficPeer(t)
+	actor := trafficActor(t, immediateForkSource(), port)
 	parent := loaded(t, int32(actor.command.Process.Pid))
 	session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: points(t, parent), Admit: authorise(parent)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = session.Close() }()
-	independentParentControl(t, actor, session, received)
-	present, live, generation, function, err := ebpf.IndependentThreadCall(session, parent.PID, parent.PID)
+	trafficParentControl(t, actor, session, received)
+	present, live, generation, function, err := ebpf.ThreadCall(session, parent.PID, parent.PID)
 	if err != nil || !present || live || function != 1 {
 		t.Fatalf("completed approved read left no intact tombstone control: present=%t live=%t generation=%d function=%d err=%v", present, live, generation, function, err)
 	}
@@ -33,10 +33,10 @@ func TestAnUnapprovedReturnCannotCountAnApprovedCallsTombstoneAsUnmatched(t *tes
 	if err != nil || !withdrawal.Complete || withdrawal.Instances != 1 {
 		t.Fatalf("authority withdrawal was not established: %+v, %v", withdrawal, err)
 	}
-	if held, err := ebpf.IndependentKernelGrantPresent(session, parent.Instance()); err != nil || held {
+	if held, err := ebpf.KernelGrantPresent(session, parent.Instance()); err != nil || held {
 		t.Fatalf("withdrawn thread still holds a grant: %t, %v", held, err)
 	}
-	present, live, _, function, err = ebpf.IndependentThreadCall(session, parent.PID, parent.PID)
+	present, live, _, function, err = ebpf.ThreadCall(session, parent.PID, parent.PID)
 	if err != nil || !present || live || function != 1 {
 		t.Fatalf("withdrawal did not preserve the tombstone required for this state: present=%t live=%t function=%d err=%v", present, live, function, err)
 	}

@@ -1570,7 +1570,7 @@ var ErrRefused = errors.New("the kernel placed none of the probes it was asked f
 // stream. It keys on the needed probe being absent, not on confirmation: a
 // byte-moving function whose entry is placed but whose return is not is
 // measurable-only (its calls are gaps, which is sound). A symbol absent from the library is not placed and so is not
-// here (decision 477): only a present route whose probe failed leaves capture not
+// here: only a present route whose probe failed leaves capture not
 // live.
 func (s *Session) unprobedRequired() []string {
 	var unprobed []string

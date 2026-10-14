@@ -91,7 +91,35 @@ type Body struct {
 	Holed    string `json:"holed"`
 	Elided   string `json:"elided"`
 	Encoding string `json:"encoding"`
+	// Content is present where Kept is the body's content with its content
+	// codings undone, rather than the body as captured. Length, Holed and
+	// Elided stay the captured body's. It occurs only in an approved artifact
+	// of version observer.approved/5 or later, never in a record read from a
+	// spool.
+	Content *Content `json:"content,omitempty"`
 }
+
+// Content is a body written as its content: the content codings its captured
+// Content-Encoding fields named, undone.
+//
+// State is ContentDecoded. Length is the decoded content's length, a decimal
+// string, before any processing policy removed part of it, so it can exceed
+// what Kept holds.
+//
+// Codings names the coding undone, as a list of one: "gzip" (for "x-gzip"
+// too), "deflate", "br" or "zstd". A message is decoded only where it names
+// one coding. It is present only where every captured Content-Encoding field
+// of the message is written unchanged; where policy removed, masked or
+// truncated one, it is absent and the record says only that the body was
+// decoded.
+type Content struct {
+	State   string   `json:"state"`
+	Length  string   `json:"length"`
+	Codings []string `json:"codings,omitempty"`
+}
+
+// ContentDecoded is the state of a body written as its decoded content.
+const ContentDecoded = "decoded"
 
 // MessageRange is a message's place in its stream.
 type MessageRange struct {

@@ -42,6 +42,7 @@ func TestProcessingAggregatePreservesDistinctFactsAndCaptureLoss(t *testing.T) {
 					"gate_reason": reason, "processing_failures": 3, "output_failures": 2,
 					"connections_cut": 17, "input_cut": 19,
 					"authorized": 11, "written": 5, "delivery": map[string]any{"authorized": 11, "written": 5, "failed": 2, "dropped": 1, "pending": 3}, "exchange_ids": 13, "extensions": []observed.ExtensionCounts{counts},
+					"excluded_exchanges": map[string]any{"content_coding_unsupported": 23, "content_decoding_failed": 29, "content_decoded_too_large": 31, "content_decoding_too_costly": 37}, "decoder_faults": 41,
 				}
 				encoded, err := json.Marshal(facts)
 				if err != nil {
@@ -72,6 +73,7 @@ func TestProcessingAggregatePreservesDistinctFactsAndCaptureLoss(t *testing.T) {
 					"gate_reason": reason, "processing_failures": "3", "output_failures": "2",
 					"connections_cut": "17", "input_cut": "19",
 					"authorized": "11", "written": "5", "delivery": map[string]any{"authorized": "11", "written": "5", "failed": "2", "dropped": "1", "pending": "3", "discarded": "0", "bytes": "0", "pending_bytes": "0", "high_water_bytes": "0", "limit_bytes": "0"},
+					"excluded_exchanges": map[string]any{"content_coding_unsupported": "23", "content_decoding_failed": "29", "content_decoded_too_large": "31", "content_decoding_too_costly": "37"}, "decoder_faults": "41",
 				}
 				if got["state"] != string(Carried) || !reflect.DeepEqual(got["aggregate"], want) {
 					t.Fatalf("ruled aggregate missing or dispositions conflated: %s", encoded)
@@ -84,7 +86,7 @@ func TestProcessingAggregatePreservesDistinctFactsAndCaptureLoss(t *testing.T) {
 				if pipelines, ok := got["pipelines"].([]any); !ok || len(pipelines) != 0 {
 					t.Fatal("session aggregate fabricated per-pipeline attribution")
 				}
-				// The operational account must carry only the same eight facts;
+				// The operational account must carry only the same ten facts;
 				// no implementation snapshots survive under another name.
 				encoded, err = json.Marshal(source.Processing)
 				if err != nil {

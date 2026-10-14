@@ -24,6 +24,7 @@ var represented = map[string]string{
 	".floor.published": "provenance.observer.floor.published", ".floor.proved": "provenance.observer.floor.proved",
 	".floor.established":     "provenance.observer.floor.established",
 	".floor.would_establish": "provenance.observer.floor.would_establish",
+	".kernel.release":        "provenance.kernel.release", ".kernel.why": "provenance.kernel.why",
 
 	".targets[].number": "scope.targets[].number", ".targets[].name": "scope.targets[].name",
 	".targets[].mode":                 "scope.targets[].mode",
@@ -117,7 +118,13 @@ var represented = map[string]string{
 	".processing.input_cut":           "processing.aggregate.input_cut",
 	".processing.authorized":          "processing.aggregate.authorized",
 	".processing.written":             "processing.aggregate.written",
+	".processing.decoder_faults":      "processing.aggregate.decoder_faults",
 	".processing.exchange_ids":        "processing.exchange_ids",
+
+	".processing.excluded_exchanges.content_coding_unsupported":  "processing.aggregate.excluded_exchanges.content_coding_unsupported",
+	".processing.excluded_exchanges.content_decoding_failed":     "processing.aggregate.excluded_exchanges.content_decoding_failed",
+	".processing.excluded_exchanges.content_decoded_too_large":   "processing.aggregate.excluded_exchanges.content_decoded_too_large",
+	".processing.excluded_exchanges.content_decoding_too_costly": "processing.aggregate.excluded_exchanges.content_decoding_too_costly",
 
 	// An extension's name is the key of its entry.
 	".extensions[].name": "processing.extensions.*", ".extensions[].fields[]": "processing.extensions.*.fields[]",
@@ -282,7 +289,7 @@ func filled(t *testing.T, truth bool) observed.Account {
 		}
 	}
 	if truth {
-		a.Admissions.Unavailable, a.SealError = "", ""
+		a.Admissions.Unavailable, a.SealError, a.Kernel.Why = "", "", ""
 		a.Targets[0].Unresolved = ""
 	} else {
 		a.Seal = nil

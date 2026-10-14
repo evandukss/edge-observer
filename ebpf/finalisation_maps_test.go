@@ -9,10 +9,10 @@ import (
 	"github.com/evandukss/edge-observer/admission"
 )
 
-// IndependentFailRingReader closes the actual reader while the session is
+// FailRingReader closes the actual reader while the session is
 // still live. It does not close Session.done or replace the reading loop; that
 // loop must distinguish this failure from an orderly session shutdown.
-func IndependentFailRingReader(session *Session) error {
+func FailRingReader(session *Session) error {
 	if session.reader == nil {
 		return fmt.Errorf("fixture has no live ring reader")
 	}
@@ -23,8 +23,8 @@ func IndependentFailRingReader(session *Session) error {
 	return nil
 }
 
-// IndependentKernelGrantPresent observes the actual map without changing it.
-func IndependentKernelGrantPresent(session *Session, instance admission.Instance) (bool, error) {
+// KernelGrantPresent observes the actual map without changing it.
+func KernelGrantPresent(session *Session, instance admission.Instance) (bool, error) {
 	var value admissionValue
 	err := session.collection.Maps["allowed_processes"].Lookup(keyOf(instance), &value)
 	if errors.Is(err, cilium.ErrKeyNotExist) {

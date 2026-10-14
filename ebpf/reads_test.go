@@ -42,7 +42,7 @@ func savedRead(t *testing.T, session *ebpf.Session, pid int32, outparam bool) ad
 	tick := time.NewTicker(time.Millisecond)
 	defer tick.Stop()
 	for {
-		generation, function, found, err := ebpf.IndependentSavedCall(session, pid)
+		generation, function, found, err := ebpf.SavedCall(session, pid)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -80,7 +80,7 @@ func TestSavedReadRequiresItsOwnLiveGeneration(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				actor := independentActor(t, readActorSource(outparam), port)
+				actor := trafficActor(t, readActorSource(outparam), port)
 				process := loaded(t, int32(actor.command.Process.Pid))
 				session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: points(t, process), Admit: authorise(process)})
 				if err != nil {
@@ -100,7 +100,7 @@ func TestSavedReadRequiresItsOwnLiveGeneration(t *testing.T) {
 				if replace {
 					next = old + 100000
 				}
-				restore, err := ebpf.IndependentReplaceGrant(session, process.Instance(), next)
+				restore, err := ebpf.ReplaceGrant(session, process.Instance(), next)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -135,8 +135,8 @@ func TestSavedReadRequiresItsOwnLiveGeneration(t *testing.T) {
 }
 
 func TestReadEvidenceCannotSilentlyDisappearWhenHistoryIsFull(t *testing.T) {
-	port, received := independentPeer(t)
-	actor := independentActor(t, immediateForkSource(), port)
+	port, received := trafficPeer(t)
+	actor := trafficActor(t, immediateForkSource(), port)
 	process := loaded(t, int32(actor.command.Process.Pid))
 	session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: points(t, process), Admit: authorise(process)})
 	if err != nil {
@@ -162,11 +162,11 @@ func TestReadEvidenceCannotSilentlyDisappearWhenHistoryIsFull(t *testing.T) {
 			t.Fatal("control recorded zero reads")
 		}
 	}
-	if err := ebpf.IndependentFillReadHistory(session, old); err != nil {
+	if err := ebpf.FillReadHistory(session, old); err != nil {
 		t.Fatal(err)
 	}
 	next := old + 100000
-	if _, err := ebpf.IndependentReplaceGrant(session, process.Instance(), next); err != nil {
+	if _, err := ebpf.ReplaceGrant(session, process.Instance(), next); err != nil {
 		t.Fatal(err)
 	}
 	transfer()

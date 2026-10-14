@@ -31,12 +31,33 @@ and receives over TLS.
 - **HTTP/1.1 and HTTP/1.0 only**, with JSON bodies described by their shape. Other traffic, HTTP/2
   included, is captured and not reconstructed. Reconstruction runs while capturing, not when a session
   is read back.
-- **Compressed messages are not written.** A request or response with a `Content-Encoding` other than
-  `identity` - gzip, br, deflate - is not written, and neither is any later exchange on its connection.
+- **Compressed bodies are decoded before rules apply.** The observer decodes `gzip` (including
+  `x-gzip`), `deflate`, `br` and `zstd`, up to the per-message body bound of 8 MiB. The decoded content
+  is what rules process, extensions receive and approved output carries. JSON shape comes from that
+  content too. Captured lengths and stream offsets still describe the bytes transferred.
+- **One coding per message.** After ignoring `identity`, a body may have only one `Content-Encoding`
+  coding. An unknown coding or a list such as `br, gzip` skips the exchange alone as
+  `content_coding_unsupported`. A corrupt encoded body or a decoder fault skips it as
+  `content_decoding_failed`; output or a decoder window beyond the body bound skips it as
+  `content_decoded_too_large`. No partial body is written. The connection line and account count each
+  skipped exchange once under its reason, and later exchanges on that connection can still be written.
+  The account also counts decoder faults separately.
+- **Decoding has work limits.** Brotli decoding stops as `content_decoding_too_costly` before counted
+  work exceeds either `4194304 + 1024 * D`, where `D` is the bytes produced so far, or `1073741824`
+  in total. These are work units, not time limits. Some valid but unusual streams reach this limit;
+  for example, heavily flushed bodies, such as a flush every few dozen bytes, may reach it at a few
+  MiB. A zstd body whose frames require its history buffer to grow more than twice after its first
+  allocation is skipped alone under the same reason. Later exchanges continue.
+- **Framing and capture defects still stop output.** A malformed `Content-Encoding` stops the
+  connection's output as `unsupported_message`. Holes, elided input, incomplete or ambiguous framing,
+  CONNECT, Upgrade, informational responses, close-delimited bodies and transfer codings other than
+  chunked also stop it. Only complete, paired, certified exchanges can be decoded. A message whose
+  framing establishes no body needs no decoding, whatever well-formed content coding it names.
 - **A connection is cut when it holds too much it has not written.** It holds only what is not written
   yet - a request waiting for its response, a message still being read - so a long keep-alive
-  connection is not cut for its length. It is cut when that reaches half of `limits.events` messages
-  and transfers, as many requests left unanswered can, or when the allowance for held work ("How much
+  connection is not cut for its length. Its limit is half of `limits.events`, rounded down
+  with a minimum of one message or transfer. It is cut for reaching that limit, as many requests left
+  unanswered can, or when the allowance for held work ("How much
   it holds", below) is full as its reading needs more, as large bodies still incomplete can make it.
   The exchanges written before the cut stay; none after it is written, and its connection line says
   where it stopped. [docs/extensions.md](docs/extensions.md) says what a cut costs.
@@ -52,9 +73,9 @@ and receives over TLS.
 - **No stable release**: one pre-release, `v0.1.0-rc1`. The program reports no version; an archive
   names the commit it was built from in its `COMMIT` file.
 - **Every published format is a draft and not frozen**: the record (`observer.record/1-draft`), the
-  approved output (`observer.approved/4`), the account and bundle (`observer.account/2-draft`,
+  approved output (`observer.approved/5`), the account and bundle (`observer.account/2-draft`,
   `observer.bundle/1-draft`), the configuration (`observer.config/1`), and the extension protocol and
-  its derived records (`observer.extension/1`, `observer.derived/1`).
+  its derived records (`observer.extension/2`, `observer.derived/1`).
 
 ## Installing
 
@@ -139,12 +160,13 @@ which names one process as `{"pid": N, "start": S, "boot": B}`, where `start` is
 `existing` or `none`: which of the matched process's descendants are watched too - those running when
 the watch is resolved and every one created afterwards, only those running then, or none. A process
 stops being watched when it executes a new program, and one that replaces a watched process, such as
-a service its supervisor restarts, is watched only after the observer restarts. `ignore` takes entries
-with the same conditions: what one matches, and every descendant of it, is never watched, whatever a
+a service its supervisor restarts, is not automatically watched. Restart the observer to resolve its
+watches again, or add a matching `watch` entry through a permitted reload. `ignore` takes entries with
+the same conditions: what one matches, and every descendant of it, is never watched, whatever a
 `watch` entry says.
 
-**What it removes.** Without rules nothing is taken out: the exchanges written are as they crossed the
-TLS boundary. `remove` takes headers, query parameters, form fields, JSON members and whole
+**What it removes.** Without rules no fields are removed; supported compressed bodies are decoded.
+`remove` takes headers, query parameters, form fields, JSON members and whole
 bodies out before anything is written, and the observer refuses to start when it cannot enforce
 every one. `mask` replaces a value and `truncate` shortens a header's value. The example
 `contract/config/examples/credentials.config.json` removes the usual credential headers: copy its
@@ -153,16 +175,20 @@ every one. `mask` replaces a value and `truncate` shortens a header's value. The
 **Extensions.** `extensions` runs your own executables over the records, after every rule, to change
 exchanges or write records of their own - an endpoint inventory, a classification.
 [docs/extensions.md](docs/extensions.md) says how to configure one and what one can do: **extensions
-are trusted code, not sandboxed, and run as the observer's user**.
+are trusted code, not sandboxed, and run as the observer's user**. Existing extensions must be updated
+to `observer.extension/2` and its decoded and omitted body representations; another version is refused.
 
 **How much it holds.** `limits.events`, 16384 by default, bounds the work held at once: at most that
 many captured events, and an allowance for held work of that many times 4096 bytes (64 MiB by
-default), shared by the captured events and the copies processing makes of them, so large bodies hold
-fewer events at once. One connection may hold at most half of `limits.events` unwritten messages and
-transfers before it is cut (Limits, above). `limits.workers` is the number of processing workers, 1 by
-default. Changing a limit takes a restart. [contract/config/CONFIG.md](contract/config/CONFIG.md) has
-every key, and [docs/extensions.md](docs/extensions.md) says what a cut costs and what processing
-capacity was measured.
+default), shared by the captured events, processing copies, decoded output and decoder workspace, so
+large bodies hold fewer events at once. This bounds held work in the accounting units, not total
+allocation volume or the Go heap. Decoding allocates over time as it processes input; the work and
+history limits above constrain its cost. A connection is cut when its unwritten messages
+and transfers reach half of `limits.events`, rounded down with a minimum of one (Limits, above). `limits.workers` is the number of
+processing workers, 1 by default. Changing a limit takes a restart.
+[contract/config/CONFIG.md](contract/config/CONFIG.md) has every key, and
+[docs/extensions.md](docs/extensions.md) says what a cut costs and what processing capacity was
+measured.
 
 Check what it would select, attaching nothing:
 
@@ -176,9 +202,11 @@ Attaching needs root, or the capabilities [docs/compatibility.md](docs/compatibi
 
 **The observer runs only inside a memory envelope.** Its process must be in a cgroup (cgroup v2) that
 is a memory domain with a finite `memory.max` and no swap, and every process it watches must be
-outside that cgroup. `start` refuses anywhere else and names the condition. A login shell's
-cgroup has no memory limit and a service's own cgroup holds the service, so neither will do. Launch
-`preflight` and `start` the same way, so that preflight judges the envelope start will run in.
+outside that cgroup and its descendants. Enter the envelope before executing the observer and keep
+its membership and limits fixed throughout capture. `start` refuses a missing envelope condition and
+names it. A login shell with no memory limit and a service's own cgroup holding the service cannot
+supply this envelope. Launch `preflight` and `start` the same way, so that preflight judges the envelope
+start will run in.
 
 On a host with systemd, a transient scope is one:
 
@@ -191,8 +219,7 @@ equal, sharing the host's pid and cgroup namespaces, and the service it watches 
         --volume "$PWD:/observer" --workdir /observer <an image with a shell> \
         ./observer preflight observer.config.json --text
 
-The limit bounds what the observer and its extensions hold together; 512M is an example, not a measured
-need.
+The limit bounds what the observer and its extensions hold together; 512M is an example setting.
 
 Preflight answers `READY`, or `NOT READY` naming each requirement missing - each envelope condition
 start would refuse on among them, in start's own words - or `INDETERMINATE` naming what it could not
@@ -206,18 +233,18 @@ Launched the way preflight was:
 
 It runs in the foreground and prints one JSON record per line; its activation record, normally the
 first, says what it attached to. Now use the service you approved so traffic crosses it - nothing is
-observed on a quiet process. Each exchange reaches `approved.jsonl` once its request and its response
-have both been read whole, while its connection is still open, so the last one before a connection
-goes idle is not held back. The connection's own line, with its final facts, comes when the connection
-ends - its TLS handle released or its socket closed - or when the session stops.
+observed on a quiet process. Each eligible exchange reaches `approved.jsonl` once its request and
+its response have both been read whole, while its connection is still open, so the last one before a
+connection goes idle is not held back. The connection's own line, with its final facts, comes when
+the connection ends - its TLS handle released or its socket closed - or when the session stops.
 
 **How soon.** Under a light load an exchange is written within 100 ms of the last library call that
-carried it, with a healthy output file, complete supported messages, no capture loss, no extensions,
-and default limits with one worker. On one host, over a two-minute interval of a ten-minute run at
-about 20 exchanges a second, all 2381 exchanges were written within 100 ms, measured from the entry of
-that call to the successful write: median 6.6 ms, 99th percentile 14.1 ms, maximum 16.8 ms. At about
-135 exchanges a second the maximum was 22.9 ms, measured and not promised. Extensions add their own
-wait ([docs/extensions.md](docs/extensions.md)).
+carried it, with a healthy output file, complete supported messages with uncompressed bodies, no
+capture loss, no extensions, and default limits with one worker. On one host with that traffic, over
+a two-minute interval of a ten-minute run at about 20 exchanges a second, all 2381 exchanges were
+written within 100 ms, measured from the entry of that call to the successful write: median 6.6 ms,
+99th percentile 14.1 ms, maximum 16.8 ms. At about 135 exchanges a second the maximum was 22.9 ms,
+measured and not promised. Extensions add their own wait ([docs/extensions.md](docs/extensions.md)).
 
 From another terminal, `sudo ./observer inspect observer.config.json --text` shows the running
 session's account as it stands; add `--session <session>` to see its approved records too.
@@ -232,6 +259,15 @@ For supervised operation, adapt [examples/systemd/observer.service](examples/sys
 It runs the observer in its own finite memory domain with swap disabled and `Restart=on-failure`.
 Keep watched processes outside that unit. The 512M limit is an example; use the same envelope for preflight.
 The unit expects the binary in `/opt/observer` and the configuration in `/etc/observer`.
+
+To replace a session outside a supervisor, run `sudo ./observer restart observer.config.json` in the
+same memory envelope. It checks the configuration, processing rules, extension commands and detached
+logging before stopping the running session. A refusal, including `log: "stdout"`, names the reason,
+exits nonzero and leaves the original process, session and output untouched. Configure a log file for
+a detached replacement. The replacement uses the exact configuration bytes that passed the checks,
+even if the file changes afterwards. A failure discovered only while starting it, such as an attach
+or resource failure, can occur after the stop and does not roll back. Under a supervisor, restart
+through the supervisor.
 
 When the observer already holds `limits.events` captured events, or the allowance for held work is
 full, the next event is refused and counted (`input_limit`, `intake_exhausted`). The connection it
@@ -265,10 +301,15 @@ To inspect a copy or rotated files, name each file and optionally select a sessi
 
     ./observer inspect ./session --text --file ./approved.jsonl.1 --file ./approved.jsonl --session <session>
 
-No running observer or configuration is needed. The files are readable only
-by the user that ran the observer - root, above - so either inspect as that user, or copy the session
-directory and the approved files somewhere you can read them and name the files with `--file`, as
-above. Without `--text` it prints the account as JSON.
+No running observer or configuration is needed. The observer creates files with owner-only
+permissions, so either inspect as the user that ran it - root, above - or copy the session directory
+and the approved files somewhere you can read them and name the files with `--file`, as above.
+Without `--text` it prints the account as JSON.
+
+`inspect --text` shows the build's declared minimum kernel and the session's kernel release, recorded
+when it activated. A copied session keeps that release; inspection does not substitute the inspecting
+host's kernel. An older account says that the session's kernel was not recorded, and a failed read at
+activation is reported with its reason. A kernel at or above the minimum must still load the programs.
 
 The account says what was attached, what was seen, and what was lost. **Read what it says was lost
 before believing anything else in it**: a run that lost events is not evidence about what crossed the
@@ -289,10 +330,11 @@ local policy does not reinterpret it. Copy the account and explicitly name the o
 Named policy exclusions distinguish fields that were removed from fields absent in the retained
 messages. An empty exclusion array means none were excluded there; an absent or null array in an
 older artifact means that evidence is unavailable. Truncation evidence identifies an indeterminate
-suffix independently of the connection's actual ending. Missing, empty or unreadable approved
-output fails text inspection, even if the account was printed, and so does approved output holding no
-record of the session, as for a session that wrote nothing. A legacy raw spool is not used as a
-fallback. See [approved inspection](docs/approved-inspection.md) for the reader contract.
+suffix independently of the connection's actual ending. Isolated decoding exclusions are counted
+separately from that suffix. Missing, empty or unreadable approved output fails text inspection,
+even if the account was printed, and so does approved output holding no record of the session, as
+for a session that wrote nothing. A legacy raw spool is not used as a fallback. See [approved
+inspection](docs/approved-inspection.md) for the reader contract.
 
 **New capture sessions do not create raw spool files.** Both capture callbacks copy records into a
 bounded volatile intake. Reaching its limit refuses the next record whole and stops its connection;
@@ -339,7 +381,8 @@ privately, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) what is expected of ever
 ## Licence
 
 The observer is licensed under the Mozilla Public License 2.0, in [LICENSE](LICENSE). **The BPF
-component is the exception, and it is GPL-2.0-only**:
+component is GPL-2.0-only**, and the modified decoder in `internal/brotli/`, including the project's
+changes there, is MIT. The BPF files are:
 
     bpf/ssl.bpf.h  bpf/sslfull.bpf.c  bpf/sslmeta.bpf.c
         the BPF program sources: the GNU General Public License version 2 only, as each file's
@@ -359,9 +402,10 @@ The programs declare their licence to the kernel as "GPL". They need a GPL-compa
 because they call helpers the kernel offers only to GPL-compatible programs:
 `bpf_probe_read_kernel`, `bpf_probe_read_user` and `bpf_get_current_task`.
 
-**This arrangement is what Linux expressly permits**: a GPL BPF program runs alongside userspace
-software under a separate licence, so the observer's own code stays MPL-2.0 and only the BPF component
-listed above is GPL.
+[Linux's BPF licensing documentation](https://docs.kernel.org/bpf/bpf_licensing.html) permits this
+arrangement: a GPL BPF program runs alongside userspace software under a separate licence. Only the
+BPF component listed above is GPL; the observer's own code is MPL-2.0 except for its MIT
+contributions in `internal/brotli/`.
 
 [REUSE.toml](REUSE.toml) records every file's licence in a form tools can read. The licence texts it
 names are in [LICENSES](LICENSES), each copied unchanged from release v3.29.0 of the SPDX License List
@@ -372,4 +416,7 @@ data, https://github.com/spdx/license-list-data:
     LICENSES/MIT.txt             text/MIT.txt, sha256 b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5
 
 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) lists the third-party material in the program and in the
-compiled BPF programs, with each one's licence and notice.
+compiled BPF programs, with each one's licence and notice. The program links `github.com/cilium/ebpf`
+(MIT), `golang.org/x/sys` (BSD-3-Clause with a patent grant), and `github.com/klauspost/compress`
+(BSD-3-Clause, with the notices for its included material). Its brotli decoder is a modified internal
+copy of `github.com/andybalholm/brotli` v1.2.6 (MIT), recorded in `internal/brotli/PROVENANCE`.

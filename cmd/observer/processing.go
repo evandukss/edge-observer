@@ -108,6 +108,19 @@ func (r *processingRun) record(finished bool, err error) {
 	}
 }
 
+// exclusionsOf is what a run's outcome says of the exchanges it excluded
+// alone, by reason, and of its contained decoder faults, as the account
+// carries them.
+func exclusionsOf(outcome processing.Outcome) (*account.ExcludedExchanges, *uint64) {
+	faults := outcome.DecoderFaults
+	return &account.ExcludedExchanges{
+		ContentCodingUnsupported: outcome.Excluded.ContentCodingUnsupported,
+		ContentDecodingFailed:    outcome.Excluded.ContentDecodingFailed,
+		ContentDecodedTooLarge:   outcome.Excluded.ContentDecodedTooLarge,
+		ContentDecodingTooCostly: outcome.Excluded.ContentDecodingTooCostly,
+	}, &faults
+}
+
 func (d *daemon) processingSnapshot() *account.Processing {
 	if d.output == nil {
 		return nil
@@ -119,6 +132,7 @@ func (d *daemon) processingSnapshot() *account.Processing {
 		state.ConnectionsCut, state.InputCut = outcome.ConnectionsCut, outcome.InputCut
 		state.Authorized, state.Written = outcome.Authorized, outcome.Written
 		state.ExchangeIDs, state.Extensions = outcome.ExchangeIDs, outcome.Extensions
+		state.ExcludedExchanges, state.DecoderFaults = exclusionsOf(outcome)
 	}
 	delivery := d.output.DeliveryStats()
 	state.Authorized, state.Written, state.OutputFailures = delivery.Authorized, delivery.Written, delivery.Failed

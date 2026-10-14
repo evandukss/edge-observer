@@ -17,35 +17,35 @@ import (
 	"github.com/evandukss/edge-observer/spool"
 )
 
-type independentLostReleaseSink struct {
-	*independentBindingSink
+type trafficLostReleaseSink struct {
+	*trafficBindingSink
 	removed chan probe.Connection
 	omitted bool
 }
 
-func (s *independentLostReleaseSink) Closed(one probe.Connection) {
+func (s *trafficLostReleaseSink) Closed(one probe.Connection) {
 	if !s.omitted {
 		s.omitted = true
 		s.removed <- one
 		return
 	}
-	s.independentBindingSink.Closed(one)
+	s.trafficBindingSink.Closed(one)
 }
 
 // Lose an ACTUAL decoded ending at the delivery boundary. No observation,
 // production stamp or kernel loss count is fabricated. The ring-reservation
 // tests separately exercise the path that loses observations in the kernel.
 func TestALostReleaseCannotSpliceTheNextOccupantOfTheSameHandle(t *testing.T) {
-	port, written := independentGreetingPeer(t)
-	actor := independentActor(t, independentHandleReuseSource, port)
+	port, written := trafficGreetingPeer(t)
+	actor := trafficActor(t, trafficHandleReuseSource, port)
 	parent := loaded(t, int32(actor.command.Process.Pid))
 	disk, err := spool.Open(t.TempDir(), 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = disk.Close() })
-	base := &independentBindingSink{recording: capture.Recording(disk, disk), transfers: make(chan probe.Transfer, 8)}
-	sink := &independentLostReleaseSink{independentBindingSink: base, removed: make(chan probe.Connection, 1)}
+	base := &trafficBindingSink{recording: capture.Recording(disk, disk), transfers: make(chan probe.Transfer, 8)}
+	sink := &trafficLostReleaseSink{trafficBindingSink: base, removed: make(chan probe.Connection, 1)}
 	live, err := attach.NeweBPF(process.Approval{}).Attach(probe.Request{Processes: []process.Process{parent}, Admit: authorise(parent)}, sink)
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +65,7 @@ func TestALostReleaseCannotSpliceTheNextOccupantOfTheSameHandle(t *testing.T) {
 		t.Fatalf("control identity: %q: %v, %v", line, err, scanErr)
 	}
 	peerReceived(t, written, "peer-control-socket")
-	control := independentBindingTransfer(t, base, "peer-control-socket")
+	control := trafficBindingTransfer(t, base, "peer-control-socket")
 	if control.Endpoint != original || control.Bound != probe.BoundTo || control.Descriptor != first || control.Stamp == 0 {
 		t.Fatalf("socket read did not establish the stamped live-handle control: %+v", control)
 	}
@@ -90,7 +90,7 @@ func TestALostReleaseCannotSpliceTheNextOccupantOfTheSameHandle(t *testing.T) {
 	peerReceived(t, written, "peer-reused-socket")
 	command("R")
 	actorLine(t, actor, fmt.Sprintf("read-without-socket-io %d\n", pending))
-	after := independentBindingTransfer(t, base, "peer-reused-socket")
+	after := trafficBindingTransfer(t, base, "peer-reused-socket")
 	if after.Endpoint != original || after.Stamp != ending.Stamp+1 || !after.Instance.Same(control.Instance) {
 		t.Fatalf("successor did not bracket exactly the omitted release at the same handle: %+v", after)
 	}
@@ -99,8 +99,8 @@ func TestALostReleaseCannotSpliceTheNextOccupantOfTheSameHandle(t *testing.T) {
 	}
 	command("F")
 	actorLine(t, actor, "freed\n")
-	waitIndependentLifecycleConnections(t, disk, 2)
-	records := independentLifecycleConnections(t, disk.ConnectionsPath())
+	waitTrafficLifecycleConnections(t, disk, 2)
+	records := trafficLifecycleConnections(t, disk.ConnectionsPath())
 	if len(records) != 2 || records[0].ID == records[1].ID {
 		t.Fatalf("missing release spliced two occupancies of one address: %+v", records)
 	}

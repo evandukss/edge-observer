@@ -340,7 +340,7 @@ func TestProducerEntryNumberSurvivesMissingReturn(t *testing.T) {
 	if sent.Length != 512 || !bytes.Equal(wire[0], certificationPayload(0, 1)) {
 		t.Fatal("wiring, not the property: initial write did not reach producer and peer")
 	}
-	removed, err := ebpf.IndependentRemoveReturn(r.session, "SSL_read")
+	removed, err := ebpf.RemoveReturnLink(r.session, "SSL_read")
 	if err != nil || removed != 1 {
 		t.Fatalf("wiring, not the property: removed return links=%d: %v", removed, err)
 	}
@@ -746,7 +746,7 @@ func TestProducerPreCoverageBirthCannotBecomeOrigin(t *testing.T) {
 	if !bytes.Equal(wire[0], certificationPayload(0, 1)) || len(later) == 0 {
 		t.Fatal("wiring, not the property: pre-coverage byte movement absent")
 	}
-	if err := ebpf.IndependentPlace(r.session, later); err != nil {
+	if err := ebpf.PlaceDataProbes(r.session, later); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.session.MarkCaptureLive(); err != nil {

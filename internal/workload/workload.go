@@ -35,8 +35,9 @@ const (
 	DefectHole = "hole"
 	// DefectMalformed is a request whose start line is not HTTP.
 	DefectMalformed = "malformed"
-	// DefectUnsupported is a response with a content encoding processing does
-	// not decode.
+	// DefectUnsupported is a response framed by a transfer coding other than
+	// chunked alone, which processing does not read: framed, so the exchanges
+	// before and after it stay countable, and a stop.
 	DefectUnsupported = "unsupported"
 	// DefectIncomplete is a connection that ends halfway through a response.
 	// No exchange follows it.
@@ -345,8 +346,10 @@ func (g *generator) split(s *script, direction fragment.Direction, message []byt
 	}
 }
 
-// message is one request or response of exchange n on connection c.
-func (g *generator) message(c, n int, request, malformed, encoded bool) []byte {
+// message is one request or response of exchange n on connection c. An
+// unsupported one is a response in a transfer coding other than chunked
+// alone, its body sent as one chunk.
+func (g *generator) message(c, n int, request, malformed, unsupported bool) []byte {
 	size := g.shape.ResponseBodyBytes
 	if request {
 		size = g.shape.RequestBodyBytes
@@ -375,8 +378,13 @@ func (g *generator) message(c, n int, request, malformed, encoded bool) []byte {
 			b.WriteString("Content-Type: text/plain\r\n")
 		}
 	}
-	if encoded {
-		b.WriteString("Content-Encoding: gzip\r\n")
+	if unsupported {
+		b.WriteString("Transfer-Encoding: gzip, chunked\r\n\r\n")
+		if size > 0 {
+			fmt.Fprintf(&b, "%x\r\n%s\r\n", size, body)
+		}
+		b.WriteString("0\r\n\r\n")
+		return []byte(b.String())
 	}
 	if size > 0 || !request {
 		b.WriteString("Content-Length: " + strconv.Itoa(size) + "\r\n")

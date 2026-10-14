@@ -186,8 +186,8 @@ type Terminal struct {
 
 	// Dropped is how many of this direction's numbers were lost to a refused ring
 	// reservation (a byte-moving call whose event did not fit). It is the only part
-	// of an open connection's undelivered tail that settles as a located loss
-	// (decision 476): the rest - a call still in flight, an event submitted but not
+	// of an open connection's undelivered tail that settles as a located loss:
+	// the rest - a call still in flight, an event submitted but not
 	// drained, a return refused for a lost grant, a nested call nothing numbers -
 	// is an explicitly incomplete tail, counted on its own counter, not here.
 	Dropped uint64

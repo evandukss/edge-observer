@@ -65,12 +65,14 @@ func withheldControl(t *testing.T) (*processing.Worker, *intake.Store, *outputLo
 	return w, store, out
 }
 
-const encodedResponse = "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 2\r\n\r\nOK"
+// transferCodedResponse is framed and countable, and a stop: a transfer
+// coding other than chunked.
+const transferCodedResponse = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n2\r\nOK\r\n0\r\n\r\n"
 
 func TestWithheldCountsWholeFramedExchangesExactly(t *testing.T) {
 	w, store, out := withheldControl(t)
 	for index, amount := range []int{2, 1} {
-		enqueue(t, store, batch(t, fragment.ConnectionID(index+2), strings.Repeat(goodRequest, amount), strings.Repeat(encodedResponse, amount)))
+		enqueue(t, store, batch(t, fragment.ConnectionID(index+2), strings.Repeat(goodRequest, amount), strings.Repeat(transferCodedResponse, amount)))
 		o := drain(t, w)
 		if o.Batches != uint64(index+2) || o.ProcessingFailures != uint64(index+1) || o.Pending != 0 {
 			t.Fatalf("framed unsupported exchanges did not reach refusal: %+v", o)
@@ -150,7 +152,7 @@ func TestWithheldUnknownInputNeverBecomesAnExchangeCount(t *testing.T) {
 			if name != "unsettled-finalization" {
 				// Later exact refusals cannot turn an unknown cumulative total
 				// back into a numeric answer or a nonzero guessed value.
-				enqueue(t, store, batch(t, 3, strings.Repeat(goodRequest, 2), strings.Repeat(encodedResponse, 2)))
+				enqueue(t, store, batch(t, 3, strings.Repeat(goodRequest, 2), strings.Repeat(transferCodedResponse, 2)))
 				o = drain(t, w)
 				if o.Batches != wantBatches+1 || o.ProcessingFailures != wantFailures+1 {
 					t.Fatalf("later known refusal did not reach processing: %+v", o)

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -190,13 +191,26 @@ func TestAnApprovedProcessIsReportedWithWhatWouldObserveIt(t *testing.T) {
 func TestTheReportCarriesNoProcessArguments(t *testing.T) {
 	secret := "preflight-must-not-carry-this-9d31"
 
-	// A shell holding a child keeps its command line as given.
-	command := exec.Command("/bin/sh", "-c", "sleep 600", secret)
-	if err := command.Start(); err != nil {
-		t.Fatalf("start /bin/sh: %v", err)
+	// A shell holding a child keeps its command line as given. It runs from a
+	// copy of its own, so the rule names this shell alone: a rule naming the
+	// host's shell names every shell on the host, and Take refuses the whole
+	// report when any of them execs or exits while it is read.
+	shell := filepath.Join(t.TempDir(), "sh")
+	program, err := os.ReadFile("/bin/sh")
+	if err != nil {
+		t.Fatalf("read /bin/sh: %v", err)
 	}
+	if err := os.WriteFile(shell, program, 0o755); err != nil {
+		t.Fatalf("write %s: %v", shell, err)
+	}
+	command := exec.Command(shell, "-c", "sleep 600", secret)
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := command.Start(); err != nil {
+		t.Fatalf("start %s: %v", shell, err)
+	}
+	// Killing the group stops the shell's sleep too, which outlives the shell.
 	t.Cleanup(func() {
-		_ = command.Process.Kill()
+		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 		_ = command.Wait()
 	})
 
@@ -215,6 +229,27 @@ func TestTheReportCarriesNoProcessArguments(t *testing.T) {
 	}
 	if rule.Executable == "" {
 		t.Fatalf("pid %d does not report the arguments it was started with after two seconds", pid)
+	}
+
+	// Until the shell's child execs sleep it runs the copy with the shell's
+	// arguments, so the rule names it as well, and read across that exec it
+	// refuses the report. The report is taken once the child runs sleep.
+	forked := false
+	for range 200 {
+		table, err := process.Read("/proc")
+		if err != nil {
+			t.Fatalf("Read(/proc): %v", err)
+		}
+		forked = slices.ContainsFunc(table.All(), func(p process.Process) bool {
+			return p.PPID == pid && p.Executable != rule.Executable
+		})
+		if forked {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !forked {
+		t.Fatalf("wiring, not the property: the child of pid %d is not running sleep after two seconds", pid)
 	}
 
 	report := take(t, process.Approval{Rules: []process.Rule{rule}})

@@ -4,7 +4,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/evandukss/edge-observer/admission"
@@ -645,6 +647,12 @@ func side(m *reconstruct.Message, role reconstruct.Role, request bool) (Side, er
 		status := m.Status
 		out.Status = &status
 	}
+	if c := m.Content; c != nil {
+		out.Body.Content = &Content{State: ContentDecoded, Length: decimal(c.Length)}
+		if slices.Equal(contentEncodings(m.Headers), c.Fields) {
+			out.Body.Content.Codings = slices.Clone(c.Codings)
+		}
+	}
 	switch {
 	case m.Shape != nil:
 		shape, err := fromShape(*m.Shape)
@@ -658,6 +666,18 @@ func side(m *reconstruct.Message, role reconstruct.Role, request bool) (Side, er
 		out.Structure = Structure{State: StructureNone}
 	}
 	return Side{State: Present, Message: &out}, nil
+}
+
+// contentEncodings is the values of the Content-Encoding fields among
+// headers, in order.
+func contentEncodings(headers []http1.Header) []string {
+	var out []string
+	for _, h := range headers {
+		if strings.EqualFold(h.Name, "content-encoding") {
+			out = append(out, h.Value)
+		}
+	}
+	return out
 }
 
 func fields(headers []http1.Header) []Field {

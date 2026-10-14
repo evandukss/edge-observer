@@ -18,7 +18,7 @@ import (
 )
 
 func heldFamilySource() string {
-	return independentTransferSource + `
+	return trafficTransferSource + `
 static pid_t held_child(int moves) {
     pid_t child = fork();
     if (child != 0) return child;
@@ -74,13 +74,13 @@ func waitActorState(t *testing.T, pid int32, want string) {
 func TestFutureDescendantsRequireFollow(t *testing.T) {
 	for _, mode := range []admission.Mode{admission.ModeNone, admission.ModeExisting, admission.ModeFollow} {
 		t.Run(fmt.Sprint(mode), func(t *testing.T) {
-			port, received := independentPeer(t)
-			actor := independentActor(t, heldFamilySource(), port)
+			port, received := trafficPeer(t)
+			actor := trafficActor(t, heldFamilySource(), port)
 			parent := loaded(t, int32(actor.command.Process.Pid))
 			selected := admit(parent)
 			selected.Mode = mode
 			session, err := ebpf.Attach(ebpf.Options{
-				Program: bpf.Full(), Points: append(points(t, parent), independentForkPoint(t, parent)), Admit: []admission.Selection{selected},
+				Program: bpf.Full(), Points: append(points(t, parent), trafficForkPoint(t, parent)), Admit: []admission.Selection{selected},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -147,8 +147,8 @@ func TestCgroupMovementDoesNotChangeActivatedGrants(t *testing.T) {
 }
 
 func TestOverlappingTargetsKeepProvenanceAcrossSeparateRestarts(t *testing.T) {
-	port, received := independentPeer(t)
-	actor := independentActor(t, immediateForkSource(), port)
+	port, received := trafficPeer(t)
+	actor := trafficActor(t, immediateForkSource(), port)
 	parent := loaded(t, int32(actor.command.Process.Pid))
 	moveToCgroup(t, fmt.Sprintf("independent-overlap-%d", parent.PID), parent.PID)
 	parent = loaded(t, parent.PID)

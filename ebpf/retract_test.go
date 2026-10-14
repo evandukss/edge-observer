@@ -17,8 +17,8 @@ import (
 // unfiled, and every read taken is accounted as reclaimed.
 func TestRetractedAdmissionsLeaveNoReadCountersBehind(t *testing.T) {
 	const cycles = 40
-	port, received := independentPeer(t)
-	actor := independentActor(t, recycleSource, port)
+	port, received := trafficPeer(t)
+	actor := trafficActor(t, recycleSource, port)
 	process := loaded(t, int32(actor.command.Process.Pid))
 	session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: points(t, process), Admit: authorise(process),
 		Resize: map[string]uint32{"reads": 4}})

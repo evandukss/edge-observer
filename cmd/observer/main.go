@@ -75,7 +75,9 @@ func usage() string {
   ` + name + ` restart <configuration>
       end the running session, sealing it, and start a new one detached. Its
       activation record says which session it follows and how long nothing was
-      observed in between
+      observed in between. A configuration a detached session would refuse is
+      refused before anything is stopped, and the new session runs the
+      configuration as it was checked, whatever the file holds by then
   ` + name + ` stop <configuration>
       end the running session, sealing its account under sessions/<session>
   ` + name + ` reload <configuration>
@@ -498,6 +500,11 @@ func stop(path string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	return stopIn(directory, stdout)
+}
+
+// stopIn ends the session running over directory and waits for it to seal.
+func stopIn(directory string, stdout io.Writer) error {
 	pid, session, err := holder(directory)
 	if err != nil {
 		return err
@@ -540,7 +547,7 @@ func start(path string, stdout io.Writer) (err error) {
 			report(reporting, "failed %v", err)
 		}
 	}()
-	read, err := loadProcessing(path)
+	read, err := configurationFor(path, handedOver())
 	if err != nil {
 		return err
 	}
@@ -713,6 +720,7 @@ func begin(read policy.Policy, session string) (*daemon, error) {
 	plan := account.Plan(time.Now(), account.Policy{Revision: read.Revision, Generation: 1}, resolution,
 		attach.Built(), catalog.Inspect)
 	plan.Extensions = account.ExtensionsOf(read.Processing.Extensions())
+	plan.Kernel = kernelOf(procfs)
 	if err := selectedAnything(resolution); err != nil {
 		return nil, err
 	}
@@ -792,6 +800,22 @@ func (d *daemon) abandon() {
 // boot refuses those pid targets by name.
 func resolve(approval process.Approval) (process.Resolution, process.Table, error) {
 	return resolveFrom(procfs, approval)
+}
+
+// kernelOf is the release of the kernel under root, as the session's account
+// records it. It is read at activation and carried, because inspection may run
+// on another host, whose kernel says nothing about this session's.
+func kernelOf(root string) *account.Kernel {
+	path := filepath.Join(root, "sys/kernel/osrelease")
+	content, err := os.ReadFile(path)
+	release := strings.TrimSpace(string(content))
+	switch {
+	case err != nil:
+		return &account.Kernel{Why: err.Error()}
+	case release == "":
+		return &account.Kernel{Why: path + " is empty"}
+	}
+	return &account.Kernel{Release: release}
 }
 
 func resolveFrom(root string, approval process.Approval) (process.Resolution, process.Table, error) {

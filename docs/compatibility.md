@@ -17,7 +17,6 @@ to fail.
                        arm64                                             observed, NOT declared:
                                                                          preflight refuses it
     kernel             5.15 or newer, publishing its BTF                 declared
-                       5.15 itself                                       never observed
                        6.11.11-linuxkit (arm64), 7.0.12-linuxkit (arm64) observed
                        6.17.0-1022-azure (x86-64)                        observed
     TLS library        OpenSSL 3.x, loaded as a shared library           declared
@@ -25,7 +24,7 @@ to fail.
     execution envelope a cgroup of its own, a memory domain with a       declared
                        finite memory.max and no swap, every watched
                        process outside it
-    protocol           HTTP/1.1, with JSON bodies described by shape     reconstructed
+    protocol           HTTP/1.1 and HTTP/1.0, JSON bodies by shape        reconstructed
                        anything else                                     captured, not reconstructed
 
 ## Checking a host
@@ -46,10 +45,10 @@ instructions, which three of their allocators need and which the kernel's verifi
 The ring buffer (5.8) and the helper that reads a pid inside a named pid namespace (5.7) are older. 5.15
 is the published floor, above the 5.12 the compiled programs force.
 
-**No run on 5.15 is recorded**, so the floor is the oldest kernel the observer is believed to run on,
-not the oldest it is known to. Every account the observer writes says so. What would settle it is one
-run on a 5.15 x86-64 host with no tracefs mounted: load the program and keep the verifier's answer,
-place every probe before the capabilities are dropped, then put traffic through an approved process.
+`inspect --text` shows the build's declared minimum and the kernel release recorded when the session
+activated. Inspecting a copied session shows its recorded kernel, not the inspecting host's. An older
+account says that its kernel was not recorded; a read failure at activation is shown with its reason.
+The declared minimum alone does not guarantee that the kernel can load the programs.
 
 **Observed**, each on one host, both under Docker Desktop:
 
@@ -108,10 +107,9 @@ They are needed to load the programs and place the probes, and `CAP_SYS_PTRACE` 
 processes' threads before and after placement, which is how a call already under way when the probes
 are placed is counted. The observer drops every capability once the probes are placed.
 
-**In a container**, whether the observer needs the host's pid namespace is not established. Its tests
-need it: in one run without it, 27 of their 182 failed. Two of those failures name a cause, the tests
-comparing the pids they see with the host pids the kernel reports; the cause of the other 25 is not
-established.
+**In a container**, give the observer the host's pid namespace: with Docker, `--pid=host`, beside root
+or the capabilities above. That is the tested configuration: the tests start the observer in a container
+run with `--privileged` and `--pid=host`.
 
 ## TLS libraries
 
@@ -142,8 +140,8 @@ a second one from attaching.
 
 ## Protocols
 
-**HTTP/1.1** is reconstructed into requests and responses: start line, headers by name, and each body by
-its size. A JSON body is also described by its shape - field names, nesting and each value's kind - and a
+**HTTP/1.1 and HTTP/1.0** are reconstructed into requests and responses: start line, headers by name,
+and each body by its size. A JSON body is also described by its shape - field names, nesting and each value's kind - and a
 body that is not JSON is reported without a shape, with the reason. The parser is strict: where two
 endpoints could read a message differently, it refuses the message and says why rather than choosing.
 
@@ -161,7 +159,7 @@ nobody prepared:
   kernel's own BTF is what makes them portable.
 - **No mounted tracefs.** Kernel probes attach through the performance-event interface. The observer
   never mounts tracefs and never falls back to it.
-- **No cgroup attachment**, and no requirement on which cgroup an observed process is in.
+- **No cgroup attachment.** Each observed process must be outside the observer's memory domain.
 - **No change to the observed application**: no library, no environment variable, no code change, no
   recompile.
 - **No restart of the observed processes.** The observer attaches to processes that are already

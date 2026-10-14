@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A bounded endpoint inventory for observer.extension/1; standard library only."""
+"""A bounded endpoint inventory for observer.extension/2; standard library only."""
 
 import json
 import re
@@ -7,7 +7,7 @@ import sys
 from urllib.parse import urlsplit
 
 
-PROTOCOL = "observer.extension/1"
+PROTOCOL = "observer.extension/2"
 MAX_ENDPOINTS = 64
 MAX_SOURCES = 256
 MAX_PATH = 4096

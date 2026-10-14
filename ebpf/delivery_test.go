@@ -22,7 +22,7 @@ import (
 
 // Only the observer's delivery is held. The actor and peer continue without
 // tracing or a stop signal while events wait behind this sink boundary.
-type independentHeldSink struct {
+type trafficHeldSink struct {
 	capture *capture.Session
 	armed   atomic.Bool
 	entered chan struct{}
@@ -30,17 +30,17 @@ type independentHeldSink struct {
 	once    sync.Once
 }
 
-func (s *independentHeldSink) unblock() { s.once.Do(func() { close(s.release) }) }
-func (s *independentHeldSink) Transfer(transfer probe.Transfer) {
+func (s *trafficHeldSink) unblock() { s.once.Do(func() { close(s.release) }) }
+func (s *trafficHeldSink) Transfer(transfer probe.Transfer) {
 	if s.armed.CompareAndSwap(true, false) {
 		close(s.entered)
 		<-s.release
 	}
 	s.capture.Transfer(transfer)
 }
-func (s *independentHeldSink) Closed(ending probe.Connection) { s.capture.Closed(ending) }
+func (s *trafficHeldSink) Closed(ending probe.Connection) { s.capture.Closed(ending) }
 
-func independentConnections(t *testing.T, path string) []connection.Record {
+func trafficConnections(t *testing.T, path string) []connection.Record {
 	t.Helper()
 	file, err := os.Open(path)
 	if err != nil {
@@ -62,7 +62,7 @@ func independentConnections(t *testing.T, path string) []connection.Record {
 	}
 }
 
-func waitIndependentConnections(t *testing.T, disk *spool.Spool, want int64) {
+func waitTrafficConnections(t *testing.T, disk *spool.Spool, want int64) {
 	t.Helper()
 	deadline := time.NewTimer(3 * time.Second)
 	defer deadline.Stop()
@@ -78,8 +78,8 @@ func waitIndependentConnections(t *testing.T, disk *spool.Spool, want int64) {
 }
 
 func TestExitedChildIsIdentifiedAfterItsGrantAndProcEntryAreGone(t *testing.T) {
-	port, received := independentPeer(t)
-	actor := independentActor(t, heldFamilySource(), port)
+	port, received := trafficPeer(t)
+	actor := trafficActor(t, heldFamilySource(), port)
 	parent := loaded(t, int32(actor.command.Process.Pid))
 	disk, err := spool.Open(t.TempDir(), 8<<20)
 	if err != nil {
@@ -87,7 +87,7 @@ func TestExitedChildIsIdentifiedAfterItsGrantAndProcEntryAreGone(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = disk.Close() })
 	recording := capture.Recording(disk, disk)
-	sink := &independentHeldSink{capture: recording, entered: make(chan struct{}), release: make(chan struct{})}
+	sink := &trafficHeldSink{capture: recording, entered: make(chan struct{}), release: make(chan struct{})}
 	backend := attach.NeweBPF(process.Approval{})
 	live, err := backend.Attach(probe.Request{Processes: []process.Process{parent}, Admit: authorise(parent)}, sink)
 	if err != nil {
@@ -104,8 +104,8 @@ func TestExitedChildIsIdentifiedAfterItsGrantAndProcEntryAreGone(t *testing.T) {
 	}
 	actorLine(t, actor, "parent 0\n")
 	peerReceived(t, received, "/independent-parent")
-	waitIndependentConnections(t, disk, 1)
-	control := independentConnections(t, disk.ConnectionsPath())
+	waitTrafficConnections(t, disk, 1)
+	control := trafficConnections(t, disk.ConnectionsPath())
 	if len(control) != 1 || control[0].Instance.PID != parent.NamespacePID || control[0].Instance.Generation == 0 || !control[0].Instance.Start.Determined {
 		t.Fatalf("live root did not establish a persisted instance control: %+v", control)
 	}
@@ -139,12 +139,12 @@ func TestExitedChildIsIdentifiedAfterItsGrantAndProcEntryAreGone(t *testing.T) {
 	}
 	// No child identity has reached the sink, and no live map or /proc entry
 	// can now supply it. The production adapter must use the queued event.
-	if got := len(independentConnections(t, disk.ConnectionsPath())); got != 1 {
+	if got := len(trafficConnections(t, disk.ConnectionsPath())); got != 1 {
 		t.Fatalf("delivery escaped the hold: %d persisted connections before release", got)
 	}
 	sink.unblock()
-	waitIndependentConnections(t, disk, 3)
-	records := independentConnections(t, disk.ConnectionsPath())
+	waitTrafficConnections(t, disk, 3)
+	records := trafficConnections(t, disk.ConnectionsPath())
 	var found []connection.Record
 	for _, record := range records {
 		if record.Instance.Namespace == child.Namespace && record.Instance.PID == child.NamespacePID {
@@ -170,8 +170,8 @@ func TestExitedChildIsIdentifiedAfterItsGrantAndProcEntryAreGone(t *testing.T) {
 }
 
 func TestSealAccountsForAnEventAlreadyDecodedButNotPersisted(t *testing.T) {
-	port, received := independentPeer(t)
-	actor := independentActor(t, immediateForkSource(), port)
+	port, received := trafficPeer(t)
+	actor := trafficActor(t, immediateForkSource(), port)
 	parent := loaded(t, int32(actor.command.Process.Pid))
 	disk, err := spool.Open(t.TempDir(), 8<<20)
 	if err != nil {
@@ -179,7 +179,7 @@ func TestSealAccountsForAnEventAlreadyDecodedButNotPersisted(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = disk.Close() })
 	recording := capture.Recording(disk, disk)
-	sink := &independentHeldSink{capture: recording, entered: make(chan struct{}), release: make(chan struct{})}
+	sink := &trafficHeldSink{capture: recording, entered: make(chan struct{}), release: make(chan struct{})}
 	live, err := attach.NeweBPF(process.Approval{}).Attach(probe.Request{Processes: []process.Process{parent}, Admit: authorise(parent)}, sink)
 	if err != nil {
 		t.Fatal(err)
@@ -198,8 +198,8 @@ func TestSealAccountsForAnEventAlreadyDecodedButNotPersisted(t *testing.T) {
 		peerReceived(t, received, "/independent-parent")
 	}
 	transfer()
-	waitIndependentConnections(t, disk, 1)
-	control := independentConnections(t, disk.ConnectionsPath())
+	waitTrafficConnections(t, disk, 1)
+	control := trafficConnections(t, disk.ConnectionsPath())
 	if len(control) != 1 || !control[0].Fragments.Known || control[0].Fragments.Value < 2 {
 		t.Fatalf("complete persisted exchange control is absent: %+v", control)
 	}
@@ -225,5 +225,5 @@ func TestSealAccountsForAnEventAlreadyDecodedButNotPersisted(t *testing.T) {
 		t.Errorf("decoded transfer held before persistence vanished from finalisation: %+v", seal)
 	}
 	sink.unblock()
-	waitIndependentConnections(t, disk, 2)
+	waitTrafficConnections(t, disk, 2)
 }

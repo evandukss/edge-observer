@@ -59,8 +59,8 @@ func TestExecEndsTheGrantAndFailedExecPreservesIt(t *testing.T) {
 			execl(`+target+`, argv[0], argv[1], NULL);
 			printf("exec-failed\n");
 		} else if (command[0] == 'P') {`, 1)
-			port, received := independentPeer(t)
-			actor := independentActor(t, source, port)
+			port, received := trafficPeer(t)
+			actor := trafficActor(t, source, port)
 			parent := loaded(t, int32(actor.command.Process.Pid))
 			session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: points(t, parent), Admit: authorise(parent)})
 			if err != nil {
@@ -140,8 +140,8 @@ int main(int argc, char **argv) {
 	pthread_exit(NULL);
 }
 `
-	port, received := independentPeer(t)
-	actor := independentActor(t, source, port)
+	port, received := trafficPeer(t)
+	actor := trafficActor(t, source, port)
 	parent := loaded(t, int32(actor.command.Process.Pid))
 	session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: points(t, parent), Admit: authorise(parent)})
 	if err != nil {
@@ -157,7 +157,7 @@ int main(int argc, char **argv) {
 	if control == nil {
 		t.Fatal("leader's approved control was not captured")
 	}
-	admitted := independentAdmittedIdentity(t, session, parent)
+	admitted := trafficAdmittedIdentity(t, session, parent)
 	if control.Generation != admitted.Generation {
 		t.Fatalf("pre-exit transfer generation %d differs from admitted generation %d", control.Generation, admitted.Generation)
 	}
@@ -197,5 +197,5 @@ int main(int argc, char **argv) {
 	if count != 0 {
 		t.Errorf("reported-limit state captured %d surviving-thread transfers, want 0; revisit the placed limit if the policy repair has landed", count)
 	}
-	independentWithdrawal(t, session, admitted, ebpf.GrantEndedWhileRunning)
+	trafficWithdrawal(t, session, admitted, ebpf.GrantEndedWhileRunning)
 }

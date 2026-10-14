@@ -17,13 +17,13 @@ import (
 )
 
 func TestSubtreeDenialOverridesDirectIncludesAndSurvivesExec(t *testing.T) {
-	port, received := independentPeer(t)
-	controlActor := independentActor(t, immediateForkSource(), port)
+	port, received := trafficPeer(t)
+	controlActor := trafficActor(t, immediateForkSource(), port)
 	control := loaded(t, int32(controlActor.command.Process.Pid))
 	source := strings.Replace(heldFamilySource(), "if (command[0] == 'P') {", `if (command[0] == 'X') {
   execl(argv[0],argv[0],argv[1],NULL); return 40;
  } else if (command[0] == 'P') {`, 1)
-	family := independentActor(t, source, port)
+	family := trafficActor(t, source, port)
 	root := loaded(t, int32(family.command.Process.Pid))
 	childPID, err := family.child('L', "live")
 	if err != nil {
@@ -44,12 +44,12 @@ func TestSubtreeDenialOverridesDirectIncludesAndSurvivesExec(t *testing.T) {
 	if !found[root.PID] || !found[child.PID] || found[control.PID] {
 		t.Fatalf("exclusion resolver did not establish the intended subtree: %+v", denials)
 	}
-	session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: append(points(t, root), independentForkPoint(t, root)), Admit: []admission.Selection{admit(control), admit(root), admit(child)}, Deny: denials})
+	session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: append(points(t, root), trafficForkPoint(t, root)), Admit: []admission.Selection{admit(control), admit(root), admit(child)}, Deny: denials})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = session.Close() }()
-	independentParentControl(t, controlActor, session, received)
+	trafficParentControl(t, controlActor, session, received)
 	if _, err := io.WriteString(family.input, "P\n"); err != nil {
 		t.Fatal(err)
 	}
@@ -107,19 +107,19 @@ func TestSubtreeDenialOverridesDirectIncludesAndSurvivesExec(t *testing.T) {
 	if got := attribution(drain(session, 100*time.Millisecond), "/independent-held-child"); got != nil {
 		t.Errorf("future child escaped the denial after its parent's exec: %+v", got)
 	}
-	independentParentControl(t, controlActor, session, received)
+	trafficParentControl(t, controlActor, session, received)
 	t.Logf("excluded root %d and directly included existing child %d; post-exec child %d; outside control %d", root.PID, child.PID, futurePID, control.PID)
 }
 
 func TestExcludedImageAppearingAfterActivationCannotEscapeOnRestart(t *testing.T) {
-	port, received := independentPeer(t)
-	controlActor := independentActor(t, immediateForkSource(), port)
+	port, received := trafficPeer(t)
+	controlActor := trafficActor(t, immediateForkSource(), port)
 	control := loaded(t, int32(controlActor.command.Process.Pid))
 	source := strings.Replace(heldFamilySource(), "if (command[0] == 'P') {", `if (command[0] == 'X') {
   char next[4096]; snprintf(next,sizeof(next),"%s.next",argv[0]);
   execl(next,next,argv[1],NULL); return 40;
  } else if (command[0] == 'P') {`, 1)
-	actor := independentActor(t, source, port)
+	actor := trafficActor(t, source, port)
 	original := loaded(t, int32(actor.command.Process.Pid))
 	nextPath := actor.command.Path + ".next"
 	image, err := os.ReadFile(actor.command.Path)
@@ -143,7 +143,7 @@ func TestExcludedImageAppearingAfterActivationCannotEscapeOnRestart(t *testing.T
 		t.Fatal(err)
 	}
 	defer func() { _ = session.Close() }()
-	independentParentControl(t, actor, session, received)
+	trafficParentControl(t, actor, session, received)
 	if _, err := io.WriteString(actor.input, "X\n"); err != nil {
 		t.Fatal(err)
 	}
@@ -180,6 +180,6 @@ func TestExcludedImageAppearingAfterActivationCannotEscapeOnRestart(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	independentParentControl(t, controlActor, session, received)
+	trafficParentControl(t, controlActor, session, received)
 	negative()
 }

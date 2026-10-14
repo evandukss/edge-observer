@@ -891,7 +891,7 @@ struct occupancy {
 	// reservation (the event did not fit). This is the located loss at the tail of an
 	// open connection: settle counts it, less what capture already located mid-stream,
 	// so a drop that sits below a later submitted-but-abandoned event is still counted
-	// and an abandoned event is not (decision 476; settleLocked, package capture). A
+	// and an abandoned event is not (settleLocked, package capture). A
 	// return refused for a lost grant and a nested call nothing numbers are gaps too,
 	// but not reservation failures, so they are the uncounted incomplete tail, not
 	// this.

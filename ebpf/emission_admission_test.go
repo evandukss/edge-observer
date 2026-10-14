@@ -18,7 +18,7 @@ import (
 func queuedAdmission(t *testing.T) (*ebpf.Session, *armingProcess, process.Process, ebpf.Event, func()) {
 	t.Helper()
 	port := sequencePeer(t, nil)
-	actor := independentActor(t, sequenceActorSource, port)
+	actor := trafficActor(t, sequenceActorSource, port)
 	p := loaded(t, int32(actor.command.Process.Pid))
 	arrived, release := make(chan ebpf.Event, 1), make(chan struct{})
 	var held, released sync.Once

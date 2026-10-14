@@ -20,7 +20,7 @@ import (
 	"github.com/evandukss/edge-observer/spool"
 )
 
-const independentHandleReuseSource = independentTransferSource + `
+const trafficHandleReuseSource = trafficTransferSource + `
 #include <stddef.h>
 #include <stdint.h>
 #include <linux/filter.h>
@@ -127,7 +127,7 @@ int main(int argc, char **argv) {
 // The peer writes application bytes immediately after each TLS handshake. The
 // new handle therefore needs no SSL_write to solicit them; SSL_peek primes its
 // read buffer without a transfer observed by the OpenSSL adapter.
-func independentGreetingPeer(t *testing.T) (int, <-chan string) {
+func trafficGreetingPeer(t *testing.T) (int, <-chan string) {
 	t.Helper()
 	certificate := httptest.NewTLSServer(nil)
 	t.Cleanup(certificate.Close)
@@ -166,19 +166,19 @@ func independentGreetingPeer(t *testing.T) (int, <-chan string) {
 	return listener.Addr().(*net.TCPAddr).Port, written
 }
 
-type independentBindingSink struct {
+type trafficBindingSink struct {
 	recording *capture.Session
 	transfers chan probe.Transfer
 }
 
-func (s *independentBindingSink) Transfer(one probe.Transfer) {
+func (s *trafficBindingSink) Transfer(one probe.Transfer) {
 	s.recording.Transfer(one)
 	s.transfers <- one
 }
 
-func (s *independentBindingSink) Closed(one probe.Connection) { s.recording.Closed(one) }
+func (s *trafficBindingSink) Closed(one probe.Connection) { s.recording.Closed(one) }
 
-func independentBindingTransfer(t *testing.T, sink *independentBindingSink, payload string) probe.Transfer {
+func trafficBindingTransfer(t *testing.T, sink *trafficBindingSink, payload string) probe.Transfer {
 	t.Helper()
 	select {
 	case one := <-sink.transfers:
@@ -193,15 +193,15 @@ func independentBindingTransfer(t *testing.T, sink *independentBindingSink, payl
 }
 
 func TestReleasedHandleCannotLendItsBindingToABufferedReadAtTheSameAddress(t *testing.T) {
-	port, written := independentGreetingPeer(t)
-	actor := independentActor(t, independentHandleReuseSource, port)
+	port, written := trafficGreetingPeer(t)
+	actor := trafficActor(t, trafficHandleReuseSource, port)
 	parent := loaded(t, int32(actor.command.Process.Pid))
 	disk, err := spool.Open(t.TempDir(), 8<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = disk.Close() })
-	sink := &independentBindingSink{recording: capture.Recording(disk, disk), transfers: make(chan probe.Transfer, 8)}
+	sink := &trafficBindingSink{recording: capture.Recording(disk, disk), transfers: make(chan probe.Transfer, 8)}
 	live, err := attach.NeweBPF(process.Approval{}).Attach(probe.Request{Processes: []process.Process{parent}, Admit: authorise(parent)}, sink)
 	if err != nil {
 		t.Fatal(err)
@@ -221,14 +221,14 @@ func TestReleasedHandleCannotLendItsBindingToABufferedReadAtTheSameAddress(t *te
 		t.Fatalf("control identity: %q: %v, %v", line, err, scanErr)
 	}
 	peerReceived(t, written, "peer-control-socket")
-	control := independentBindingTransfer(t, sink, "peer-control-socket")
+	control := trafficBindingTransfer(t, sink, "peer-control-socket")
 	if control.Endpoint != original || control.Bound != probe.BoundTo || control.Descriptor != first || control.Binding == 0 {
 		t.Fatalf("socket read did not establish the live handle's binding control: %+v", control)
 	}
 	command("F")
 	actorLine(t, actor, "freed\n")
-	waitIndependentLifecycleConnections(t, disk, 1)
-	before := independentLifecycleConnections(t, disk.ConnectionsPath())
+	waitTrafficLifecycleConnections(t, disk, 1)
+	before := trafficLifecycleConnections(t, disk.ConnectionsPath())
 	if len(before) != 1 {
 		t.Fatalf("released control did not persist exactly once: %d", len(before))
 	}
@@ -247,14 +247,14 @@ func TestReleasedHandleCannotLendItsBindingToABufferedReadAtTheSameAddress(t *te
 	peerReceived(t, written, "peer-reused-socket")
 	command("R")
 	actorLine(t, actor, fmt.Sprintf("read-without-socket-io %d\n", pending))
-	after := independentBindingTransfer(t, sink, "peer-reused-socket")
+	after := trafficBindingTransfer(t, sink, "peer-reused-socket")
 	if after.Endpoint != original || after.Instance.Key() != control.Instance.Key() {
 		t.Fatalf("buffered transfer did not use the reused handle in the same admitted execution: %+v", after)
 	}
 	command("F")
 	actorLine(t, actor, "freed\n")
-	waitIndependentLifecycleConnections(t, disk, 2)
-	records := independentLifecycleConnections(t, disk.ConnectionsPath())
+	waitTrafficLifecycleConnections(t, disk, 2)
+	records := trafficLifecycleConnections(t, disk.ConnectionsPath())
 	if len(records) != 2 || records[1].ID == records[0].ID {
 		t.Fatalf("handle reuse did not produce two distinct persisted connections: %+v", records)
 	}

@@ -31,6 +31,7 @@ func formLines(t *testing.T) (processing.Artifact, processing.Artifact) {
 	}
 	exchange, retirement := out.artifacts[0], out.artifacts[1]
 	exchange.Version, retirement.Version = processing.ArtifactVersion4, processing.ArtifactVersion4
+	retirement.ExcludedExchanges = nil
 	exchange.Connection = exchange.Connection.Identified()
 	reconstruction := *exchange.Reconstruction
 	total := reconstruction.Unplaced

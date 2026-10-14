@@ -18,7 +18,7 @@ import (
 // /proc cannot supply an admission generation. Use its independently read
 // identity only to locate the admission BEFORE the transition, then keep the
 // full stamped identity for every subsequent grant/withdrawal comparison.
-func independentAdmittedIdentity(t *testing.T, session *ebpf.Session, p process.Process) admission.Instance {
+func trafficAdmittedIdentity(t *testing.T, session *ebpf.Session, p process.Process) admission.Instance {
 	t.Helper()
 	expected := p.Instance()
 	if !expected.Namespace.Known() || !expected.Start.Determined {
@@ -27,7 +27,7 @@ func independentAdmittedIdentity(t *testing.T, session *ebpf.Session, p process.
 	var admitted []admission.Instance
 	for _, one := range session.Inventory() {
 		if one.ObserverPID == p.PID {
-			if !independentSameExecution(one.Instance, expected) {
+			if !trafficSameExecution(one.Instance, expected) {
 				t.Fatalf("admitted identity differs from the pre-transition process reading: got %+v, want %+v", one.Instance, expected)
 			}
 			admitted = append(admitted, one.Instance)
@@ -40,7 +40,7 @@ func independentAdmittedIdentity(t *testing.T, session *ebpf.Session, p process.
 	if instance.Generation == 0 {
 		t.Fatal("the admission has no stamped generation")
 	}
-	if held, err := ebpf.IndependentKernelGrantPresent(session, instance); err != nil || !held {
+	if held, err := ebpf.KernelGrantPresent(session, instance); err != nil || !held {
 		t.Fatalf("pre-transition grant is not established: held=%t err=%v", held, err)
 	}
 	return instance
@@ -48,12 +48,12 @@ func independentAdmittedIdentity(t *testing.T, session *ebpf.Session, p process.
 
 // This is a comparison with an independent /proc reading, not an equality of
 // admissions. It deliberately cannot decide whether two grants are the same.
-func independentSameExecution(a, b admission.Instance) bool {
+func trafficSameExecution(a, b admission.Instance) bool {
 	return a.Namespace == b.Namespace && a.PID == b.PID &&
 		a.Start.Determined && b.Start.Determined && a.Start == b.Start
 }
 
-func independentWithdrawal(t *testing.T, session *ebpf.Session, instance admission.Instance, want ebpf.Ended) {
+func trafficWithdrawal(t *testing.T, session *ebpf.Session, instance admission.Instance, want ebpf.Ended) {
 	t.Helper()
 	known := 0
 	for _, one := range session.Inventory() {
@@ -64,7 +64,7 @@ func independentWithdrawal(t *testing.T, session *ebpf.Session, instance admissi
 	if known != 1 {
 		t.Fatalf("withdrawal control: admitted instance appears %d times in inventory, want 1", known)
 	}
-	if held, err := ebpf.IndependentKernelGrantPresent(session, instance); err != nil || held {
+	if held, err := ebpf.KernelGrantPresent(session, instance); err != nil || held {
 		t.Fatalf("withdrawal control: grant absence was not established: held=%t err=%v", held, err)
 	}
 	gone, err := session.Withdrawn()
@@ -86,11 +86,11 @@ func independentWithdrawal(t *testing.T, session *ebpf.Session, instance admissi
 	}
 }
 
-// independentLetGo is the session once an admitted execution has ended: it no
+// trafficLetGo is the session once an admitted execution has ended: it no
 // longer holds or reports the admission, and counts it as ended under its
 // target. The end reaches the session through the ring, so the ring is drained
 // until it has.
-func independentLetGo(t *testing.T, session *ebpf.Session, instance admission.Instance) {
+func trafficLetGo(t *testing.T, session *ebpf.Session, instance admission.Instance) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
@@ -135,9 +135,9 @@ func TestAnExecingChildKeepsRunningWhileItsWithdrawalIsReported(t *testing.T) {
 		} else if (command[0] == 'Q') {
 			return 0;
 		} else if (command[0] == 'P') {`, 1)
-	port, received := independentPeer(t)
-	child := independentActor(t, source, port)
-	never := independentActor(t, source, port)
+	port, received := trafficPeer(t)
+	child := trafficActor(t, source, port)
+	never := trafficActor(t, source, port)
 	selected := loaded(t, int32(child.command.Process.Pid))
 	unselected := loaded(t, int32(never.command.Process.Pid))
 	session, err := ebpf.Attach(ebpf.Options{Program: bpf.Full(), Points: points(t, selected), Admit: authorise(selected)})
@@ -145,8 +145,8 @@ func TestAnExecingChildKeepsRunningWhileItsWithdrawalIsReported(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = session.Close() }()
-	independentParentControl(t, child, session, received)
-	admitted := independentAdmittedIdentity(t, session, selected)
+	trafficParentControl(t, child, session, received)
+	admitted := trafficAdmittedIdentity(t, session, selected)
 	if _, err := io.WriteString(child.input, "X\n"); err != nil {
 		t.Fatal(err)
 	}
@@ -168,9 +168,9 @@ func TestAnExecingChildKeepsRunningWhileItsWithdrawalIsReported(t *testing.T) {
 	if err := syscall.Kill(child.command.Process.Pid, 0); err != nil {
 		t.Fatalf("execing child did not remain alive for the reading: %v", err)
 	}
-	independentWithdrawal(t, session, admitted, ebpf.GrantEndedWhileRunning)
+	trafficWithdrawal(t, session, admitted, ebpf.GrantEndedWhileRunning)
 	for _, one := range session.Inventory() {
-		if one.ObserverPID == unselected.PID || independentSameExecution(one.Instance, unselected.Instance()) {
+		if one.ObserverPID == unselected.PID || trafficSameExecution(one.Instance, unselected.Instance()) {
 			t.Error("never-approved peer-confirmed actor entered the admitted inventory")
 		}
 	}
@@ -179,7 +179,7 @@ func TestAnExecingChildKeepsRunningWhileItsWithdrawalIsReported(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, one := range gone {
-		if one.Selection.ObserverPID == unselected.PID || independentSameExecution(one.Selection.Instance, unselected.Instance()) {
+		if one.Selection.ObserverPID == unselected.PID || trafficSameExecution(one.Selection.Instance, unselected.Instance()) {
 			t.Error("never-approved actor was reported as a withdrawn admission")
 		}
 	}
@@ -189,5 +189,5 @@ func TestAnExecingChildKeepsRunningWhileItsWithdrawalIsReported(t *testing.T) {
 	if err := child.command.Wait(); err != nil {
 		t.Fatalf("whole-process exit control: %v", err)
 	}
-	independentLetGo(t, session, admitted)
+	trafficLetGo(t, session, admitted)
 }

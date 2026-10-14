@@ -193,6 +193,7 @@ func Project(source observed.Account, supply Supply) (Account, error) {
 		Configuration: Configuration{Block: Block{State: Carried}, References: []ConfigurationReference{{
 			Document: "policy", Revision: source.Policy.Revision, Generation: strconv.Itoa(source.Policy.Generation),
 		}}},
+		Kernel: kernelOf(a.Moment, source.Kernel),
 	}
 
 	scope, err := scopeOf(source)
@@ -240,11 +241,35 @@ func Project(source observed.Account, supply Supply) (Account, error) {
 				OutputFailures: decimalOf(p.OutputFailures), ConnectionsCut: decimalOf(p.ConnectionsCut),
 				InputCut: decimalOf(p.InputCut), Authorized: decimalOf(p.Authorized),
 				Written: decimalOf(p.Written), Delivery: deliveryOf(p.Delivery),
+				ExcludedExchanges: excludedOf(p.ExcludedExchanges), DecoderFaults: faultsOf(p.DecoderFaults),
 			},
 			ExchangeIDs: decimalOf(p.ExchangeIDs), Extensions: extensions,
 		}
 	}
 	return a, nil
+}
+
+// excludedOf is the published form of the exchanges excluded alone: absent
+// where the operational account did not count them.
+func excludedOf(counted *observed.ExcludedExchanges) *ExcludedExchanges {
+	if counted == nil {
+		return nil
+	}
+	return &ExcludedExchanges{
+		ContentCodingUnsupported: decimalOf(counted.ContentCodingUnsupported),
+		ContentDecodingFailed:    decimalOf(counted.ContentDecodingFailed),
+		ContentDecodedTooLarge:   decimalOf(counted.ContentDecodedTooLarge),
+		ContentDecodingTooCostly: decimalOf(counted.ContentDecodingTooCostly),
+	}
+}
+
+// faultsOf is the published form of the decoder faults: absent where the
+// operational account did not count them.
+func faultsOf(counted *uint64) string {
+	if counted == nil {
+		return ""
+	}
+	return decimalOf(*counted)
 }
 
 // extensionsOf is one entry per configured extension, each from the counts the
@@ -301,6 +326,21 @@ func text(value string) record.Text {
 		return record.Text{State: record.Undetermined}
 	}
 	return record.Text{State: record.Determined, Value: value}
+}
+
+// kernelOf is the session's kernel as the block its reading allows. A dry run
+// has no session, and an operational account without the record was written
+// before sessions recorded one.
+func kernelOf(moment Moment, kernel *observed.Kernel) *Kernel {
+	switch {
+	case moment == Planned:
+		return &Kernel{Block: Block{State: NotReached}}
+	case kernel == nil:
+		return &Kernel{Block: Block{State: NotCarried}}
+	case kernel.Why != "":
+		return &Kernel{Block: Block{State: Unavailable, Why: kernel.Why}}
+	}
+	return &Kernel{Block: Block{State: Carried}, Release: kernel.Release}
 }
 
 func factsOf(c probe.Capability) Facts {

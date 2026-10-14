@@ -99,7 +99,7 @@ func TestAdoptionRefusesUndeterminedArgumentsWithoutClaimingDeath(t *testing.T) 
 		t.Fatalf("wiring: only %d masked cmdline opens; adoption's second table read was not reached", opens)
 	}
 	t.Logf("wiring: adoption reached live descendant's zero-byte cmdline; %d opens including readBefore", opens)
-	present, err := ebpf.IndependentKernelGrantPresent(session, child.Instance())
+	present, err := ebpf.KernelGrantPresent(session, child.Instance())
 	if err != nil {
 		t.Fatal(err)
 	}

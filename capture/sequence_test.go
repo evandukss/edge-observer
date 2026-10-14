@@ -212,9 +212,9 @@ func TestAConnectionOpenWhenProductionStopsIsSettledByWhatTheProducerHolds(t *te
 		"a call in flight when production stopped": {settlers: []probe.Settler{settler{held: probe.Settlement{Occupancy: 7,
 			Final: probe.Final{Known: true, Sent: probe.Terminal{Last: 3, InFlight: true}}}}},
 			want: connection.PositionsEstablished},
-		// An open connection at session end whose producer numbered a transfer that
-		// never arrived: an undelivered tail, unsettled and uncounted (decision 475),
-		// not a located loss.
+		// An open connection at session end whose producer numbered a transfer
+		// that never arrived: an undelivered tail, unsettled and uncounted, not
+		// a located loss.
 		"the producer took a number that never arrived": {settlers: []probe.Settler{settler{held: probe.Settlement{Occupancy: 7,
 			Final: probe.Final{Known: true, Sent: probe.Terminal{Last: 3}}}}},
 			want: connection.PositionsUnknownFrom, because: connection.TerminalUnsettled, lost: -1},
@@ -263,10 +263,10 @@ func TestAConnectionOpenWhenProductionStopsIsSettledByWhatTheProducerHolds(t *te
 }
 
 // An open connection's undelivered tail counts exactly the producer's refused
-// ring reservations (decision 476) and nothing else. A drop is counted even
-// where it sits below a later event the producer submitted and the stop
-// abandoned - the case the "highest submitted number" form misses; an abandoned
-// tail with no drop is not counted.
+// ring reservations and nothing else. A drop is counted even where it sits
+// below a later event the producer submitted and the stop abandoned - the case
+// the "highest submitted number" form misses; an abandoned tail with no drop is
+// not counted.
 func TestAnOpenTailCountsItsDroppedReservationsAndNotItsAbandonedEvents(t *testing.T) {
 	// drop is what a producer holds for an open connection: its last number taken,
 	// and how many of that direction's reservations the ring refused.
@@ -348,11 +348,11 @@ func TestADropLocatedMidStreamIsNotCountedAgainAtTheTail(t *testing.T) {
 	}
 }
 
-// The mixed case T8's re-check found: a NON-DROP gap below a dropped tail (an
-// SSL_sendfile number, an unmeasurable return, a nested call) must not hide a
-// tail drop. The tail subtracts the drops BELOW the last number seen, carried on
-// its event, not every gap, so the non-drop gap is counted mid-stream and the
-// tail drops are counted in full.
+// A mixed case: a NON-DROP gap below a dropped tail (an SSL_sendfile number,
+// an unmeasurable return, a nested call) must not hide a tail drop. The tail
+// subtracts the drops BELOW the last number seen, carried on its event, not
+// every gap, so the non-drop gap is counted mid-stream and the tail drops are
+// counted in full.
 func TestANonDropGapBelowADroppedTailCountsTheTailExactly(t *testing.T) {
 	s := recording(&collected{}, capture.Settles(settler{held: probe.Settlement{Occupancy: 7,
 		Final: probe.Final{Known: true, Sent: probe.Terminal{Last: 5, Dropped: 2}}}}))

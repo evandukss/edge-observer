@@ -137,8 +137,9 @@ Beside the blocks, every other member named below is required where its block is
 absent is refused with `required_member_absent`; the only optional members are a block's `why` - required when
 it is `unavailable` - and the reasons that exist only for some values: a placed process's `reason`, a probe's
 `through` and `refusal`, an admission's `why`, an instance coverage's `why`, a cgroup's `why`, a withheld claim's `reason`, and a withdrawal's and a drain's
-`because`. A list is `[]`, and `null` is
-absent. A count is a decimal string, and a value outside its vocabulary, or a count that is not decimal, is
+`because`. One block is optional, `provenance.kernel`, because an account written before sessions recorded their
+kernel does not have it; such an account says nothing about the kernel its session ran on. A list is `[]`, and
+`null` is absent. A count is a decimal string, and a value outside its vocabulary, or a count that is not decimal, is
 `value_not_in_contract`. A member the contract does not name, anywhere, is refused with
 `member_not_in_contract`.
 
@@ -149,6 +150,7 @@ absent. A count is a decimal string, and a value outside its vocabulary, or a co
 | `observer` | block: the capability facts of the BUILD (below) and `floor` `{published, proved, established, would_establish}` - claims about the build and not about this session |
 | `contracts[]` | the contract versions this account and its records are written at |
 | `configuration` | block: `references[]` `{document, revision, generation}` - the configuration the session ran under BY REFERENCE: its content revision and the generation the session activated. **Never its content and never a credential** |
+| `kernel` | block: `release`, the release of the kernel the SESSION ran on, read when it activated - a fact about this session, beside `observer.floor`, which is about the build. `unavailable` with `why` where the release could not be read, `not_carried` where the operational account does not record it, and `not_reached` in a planned account, which has no session. Optional (above) |
 
 ### scope
 
@@ -252,8 +254,8 @@ accounted, not silent**: a record a predicate removed is counted under the compo
 it.
 
 An optional `aggregate` carries session totals when per-pipeline attribution was not measured:
-`{gate_reason, processing_failures, output_failures, connections_cut, input_cut, authorized, written}`.
-The six counts are decimal strings. `authorized` and `written` count route records separately;
+`{gate_reason, processing_failures, output_failures, connections_cut, input_cut, authorized, written}`
+and an optional `excluded_exchanges` and `decoder_faults`. The six counts are decimal strings. `authorized` and `written` count route records separately;
 permission does not assert write completion or durable flush. For each batch's processing refusals,
 `processing_failures` counts each affected durable route once: every route for a batch refusal, or
 the affected pipeline's routes for a pipeline refusal. This is not a count of unique routes, batches or exchanges; a route can write a useful
@@ -282,6 +284,22 @@ process is established as still running. Ordinary process exit is not this refus
 carries its admission generation and process birth from emission and is delivered in either case;
 an absent grant never lets a late event recreate a withdrawn inventory row. An indeterminate
 process reading establishes no live withdrawal and is not counted as one.
+The aggregate's `excluded_exchanges` is `{content_coding_unsupported, content_decoding_failed,
+content_decoded_too_large, content_decoding_too_costly}`, four decimal strings: the exchanges the
+session excluded alone, by the reason each was excluded for - a body in a coding the observer does not
+undo or in more than one, a body that did not decode, a body that decoded to more than the per-message
+body bound, and a body whose decoding would take more work than the decoder's budget allows. Each
+exchange is counted once, under one reason, however many sides, routes or extensions it had, and a count
+stays when its connection is later cut. An exchange excluded alone keeps its exchange id and index, is
+written on no line, and is neither a processing failure nor a cut; an exchange excluded with a
+connection's truncated suffix is not counted here. Each connection's own counts are on its connection
+line ([record contract](../record/record.md#exchanges-excluded-alone)). The member is absent from an
+account whose observer did not count these, which is not a count of zero.
+The aggregate's `decoder_faults` is a decimal string: the decodings whose decoder library failed and was
+contained. Each one's exchange was excluded alone and is counted under `content_decoding_failed` in
+`excluded_exchanges` too, so this count says how many of those were the decoder's own failure rather
+than the body's. Nothing of the failure itself reaches the account, a line, a log or an extension. The
+member is absent from an account whose observer did not count these, which is not a count of zero.
 When only this aggregate is supplied, `pipelines` is empty because attribution was not supplied;
 that is not a per-pipeline zero. Aggregate counts must never be copied onto a synthetic pipeline
 or onto every pipeline.
@@ -530,7 +548,8 @@ forms described above that would reach outside by location.
 `Project` writes an operational account in this contract. It refuses (`ErrUnrepresentable`) an operational
 account at any version but 1, and a live or sealed one missing its capability, seen, loss, admitted or refused
 block. What the operational account at version 1 does not hold is written `not_carried` and never filled: the
-`write_content` control, the traffic filters and processing. Where
+`write_content` control, the traffic filters and processing, and the session's kernel where the operational account
+was written before sessions recorded it. Where
 it could not read a block it says why, and the block is `unavailable` with that reason.
 
 The operational account does not hold the reconstruction either, and what `Project` writes for it is what its

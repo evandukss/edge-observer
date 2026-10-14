@@ -3,7 +3,8 @@ version = 1
 # Every file is the project's own and under the Mozilla Public License 2.0,
 # unless the file states otherwise itself, as the BPF sources do -
 # bpf/sslfull.bpf.c, bpf/sslmeta.bpf.c, bpf/readbarrier.bpf.c and bpf/ssl.bpf.h:
-# they are GPL-2.0-only, which is the exception this default is read against.
+# they are GPL-2.0-only, which is the exception this default is read against -
+# or an annotation below says otherwise.
 [[annotations]]
 path = "**"
 precedence = "closest"
@@ -45,3 +46,16 @@ SPDX-FileCopyrightText = [
 	"2019 Authors of Cilium",
 ]
 SPDX-License-Identifier = "GPL-2.0-only AND MIT"
+
+# internal/brotli: the decoder of github.com/andybalholm/brotli v1.2.6, copied
+# and modified there; its PROVENANCE lists every file and change. MIT, as
+# upstream is, for the whole directory: the upstream files, and this project's
+# changes and additions to them.
+[[annotations]]
+path = "internal/brotli/**"
+precedence = "override"
+SPDX-FileCopyrightText = [
+	"2009, 2010, 2013-2016 the Brotli Authors",
+	"The Edge Observer contributors",
+]
+SPDX-License-Identifier = "MIT"

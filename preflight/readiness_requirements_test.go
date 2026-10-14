@@ -49,12 +49,12 @@ import (
 
 // Literal requirements and capability numbers: the oracle is the
 // documentation, not Assess or the implementation's capability set.
-var independentNames = []string{
+var readinessNames = []string{
 	"operating system", "architecture", "kernel release", "kernel BTF",
 	"capabilities", "BPF program", "TLS library",
 }
 
-var independentCaps = []struct {
+var readinessCaps = []struct {
 	name string
 	bit  uint
 }{
@@ -66,22 +66,22 @@ var independentCaps = []struct {
 	{"CAP_BPF", 39},
 }
 
-const independentMask uint64 = 1<<2 | 1<<19 | 1<<21 | 1<<24 | 1<<38 | 1<<39
+const readinessMask uint64 = 1<<2 | 1<<19 | 1<<21 | 1<<24 | 1<<38 | 1<<39
 
-type independentLibraries struct {
+type readinessLibraries struct {
 	maps, ssl, crypto string
 }
 
 // approved only starts an idle openssl process and waits for its mappings; no
 // preflight result feeds the expectations.
-func independentCaptureLibraries(t *testing.T) independentLibraries {
+func readinessCaptureLibraries(t *testing.T) readinessLibraries {
 	t.Helper()
 	_, pid := approved(t)
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/maps", pid))
 	if err != nil {
 		t.Fatalf("fixture wiring: capture real maps: %v", err)
 	}
-	libs := independentLibraries{maps: string(data)}
+	libs := readinessLibraries{maps: string(data)}
 	for _, line := range strings.Split(libs.maps, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 6 || !strings.Contains(fields[1], "x") {
@@ -100,18 +100,18 @@ func independentCaptureLibraries(t *testing.T) independentLibraries {
 	return libs
 }
 
-type independentHost struct {
+type readinessHost struct {
 	host     preflight.Host
 	selected []process.Process
 	catalog  probe.Catalog
-	libs     independentLibraries
+	libs     readinessLibraries
 	loads    int
 }
 
-func independentFixture(t *testing.T, libs independentLibraries) *independentHost {
+func readinessFixture(t *testing.T, libs readinessLibraries) *readinessHost {
 	t.Helper()
 	root := t.TempDir()
-	f := &independentHost{libs: libs}
+	f := &readinessHost{libs: libs}
 	f.host = preflight.Host{
 		ProcFS:  filepath.Join(root, "proc"),
 		SysFS:   filepath.Join(root, "sys"),
@@ -126,8 +126,8 @@ func independentFixture(t *testing.T, libs independentLibraries) *independentHos
 	f.host.Envelope = metEnvelope
 	f.write(t, "sys/kernel/arch", "x86_64\n")
 	f.write(t, "sys/kernel/osrelease", "5.15.0-independent\n")
-	f.capabilities(t, independentMask)
-	independentWrite(t, filepath.Join(f.host.SysFS, "kernel/btf/vmlinux"), "presence only; BTF contents are not modelled\n")
+	f.capabilities(t, readinessMask)
+	readinessWrite(t, filepath.Join(f.host.SysFS, "kernel/btf/vmlinux"), "presence only; BTF contents are not modelled\n")
 	var err error
 	f.catalog, err = probe.NewCatalog(openssl.Adapter{ProcFS: f.host.ProcFS, Runtime: probe.OpenSSL})
 	if err != nil {
@@ -141,7 +141,7 @@ func independentFixture(t *testing.T, libs independentLibraries) *independentHos
 	return f
 }
 
-func independentWrite(t *testing.T, path, data string) {
+func readinessWrite(t *testing.T, path, data string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		t.Fatal(err)
@@ -151,18 +151,18 @@ func independentWrite(t *testing.T, path, data string) {
 	}
 }
 
-func (f *independentHost) write(t *testing.T, path, data string) {
+func (f *readinessHost) write(t *testing.T, path, data string) {
 	t.Helper()
-	independentWrite(t, filepath.Join(f.host.ProcFS, path), data)
+	readinessWrite(t, filepath.Join(f.host.ProcFS, path), data)
 }
 
-func (f *independentHost) capabilities(t *testing.T, mask uint64) {
+func (f *readinessHost) capabilities(t *testing.T, mask uint64) {
 	t.Helper()
 	// Permitted and bounding stay complete: only EFFECTIVE may clear the gate.
-	f.write(t, "self/status", fmt.Sprintf("Name:\tobserver\nCapPrm:\t%016x\nCapEff:\t%016x\nCapBnd:\t%016x\n", independentMask, mask, independentMask))
+	f.write(t, "self/status", fmt.Sprintf("Name:\tobserver\nCapPrm:\t%016x\nCapEff:\t%016x\nCapBnd:\t%016x\n", readinessMask, mask, readinessMask))
 }
 
-func independentRemove(t *testing.T, path string) {
+func readinessRemove(t *testing.T, path string) {
 	t.Helper()
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
@@ -170,9 +170,9 @@ func independentRemove(t *testing.T, path string) {
 }
 
 // ELOOP is deterministic even as root; chmod(000) would not be.
-func independentUnreadable(t *testing.T, path string) {
+func readinessUnreadable(t *testing.T, path string) {
 	t.Helper()
-	independentRemove(t, path)
+	readinessRemove(t, path)
 	if err := os.Symlink(filepath.Base(path), path); err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func independentUnreadable(t *testing.T, path string) {
 	}
 }
 
-func (f *independentHost) process(t *testing.T, pid int32, sslName, sslSource string, code, crypto bool) {
+func (f *readinessHost) process(t *testing.T, pid int32, sslName, sslSource string, code, crypto bool) {
 	t.Helper()
 	base := filepath.Join(f.host.ProcFS, strconv.Itoa(int(pid)))
 	sslPath := "/independent/" + sslName
@@ -211,7 +211,7 @@ func (f *independentHost) process(t *testing.T, pid int32, sslName, sslSource st
 	if len(lines) == 0 {
 		t.Fatal("fixture wiring: no captured mapping rows were retained")
 	}
-	independentWrite(t, filepath.Join(base, "maps"), strings.Join(lines, "\n")+"\n")
+	readinessWrite(t, filepath.Join(base, "maps"), strings.Join(lines, "\n")+"\n")
 	for name, source := range map[string]string{sslPath: sslSource, cryptoPath: f.libs.crypto} {
 		path := filepath.Join(base, "root", name)
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -226,7 +226,7 @@ func (f *independentHost) process(t *testing.T, pid int32, sslName, sslSource st
 	}
 }
 
-func independentCheck(t *testing.T, got preflight.Readiness, verdict preflight.Verdict, pids []int32, statuses map[string]preflight.Status) {
+func readinessCheck(t *testing.T, got preflight.Readiness, verdict preflight.Verdict, pids []int32, statuses map[string]preflight.Status) {
 	t.Helper()
 	if got.Verdict != verdict {
 		t.Errorf("verdict = %q, want %q", got.Verdict, verdict)
@@ -239,7 +239,7 @@ func independentCheck(t *testing.T, got preflight.Readiness, verdict preflight.V
 		t.Errorf("requirement population = %d, want %d (six host requirements plus every selected PID)", len(got.Requirements), wantCount)
 	}
 	for i := 0; i < wantCount; i++ {
-		name, pid := independentNames[min(i, 6)], int32(0)
+		name, pid := readinessNames[min(i, 6)], int32(0)
 		if i >= 6 {
 			pid = pids[i-6]
 		}
@@ -262,7 +262,7 @@ func independentCheck(t *testing.T, got preflight.Readiness, verdict preflight.V
 	}
 }
 
-func independentEvidence(t *testing.T, got preflight.Readiness, name string, pid int32, needles ...string) {
+func readinessEvidence(t *testing.T, got preflight.Readiness, name string, pid int32, needles ...string) {
 	t.Helper()
 	for _, r := range got.Requirements {
 		if r.Name != name || r.PID != pid {
@@ -279,71 +279,71 @@ func independentEvidence(t *testing.T, got preflight.Readiness, name string, pid
 }
 
 func TestReadinessReady(t *testing.T) {
-	f := independentFixture(t, independentCaptureLibraries(t))
+	f := readinessFixture(t, readinessCaptureLibraries(t))
 	got := preflight.Assess(f.host, f.selected, f.catalog)
-	independentCheck(t, got, preflight.Ready, []int32{3101}, nil)
+	readinessCheck(t, got, preflight.Ready, []int32{3101}, nil)
 	if f.loads == 0 {
 		t.Error("READY requires actually asking Loads; it was never called")
 	}
 }
 
 func TestReadinessEachMissingHostRequirement(t *testing.T) {
-	libs := independentCaptureLibraries(t)
+	libs := readinessCaptureLibraries(t)
 	cases := []struct {
 		name, requirement, evidence string
-		change                      func(*testing.T, *independentHost)
+		change                      func(*testing.T, *readinessHost)
 	}{
-		{"operating-system", "operating system", "darwin", func(t *testing.T, f *independentHost) { f.host.OS = "darwin" }},
-		{"architecture", "architecture", "aarch64", func(t *testing.T, f *independentHost) {
+		{"operating-system", "operating system", "darwin", func(t *testing.T, f *readinessHost) { f.host.OS = "darwin" }},
+		{"architecture", "architecture", "aarch64", func(t *testing.T, f *readinessHost) {
 			f.write(t, "sys/kernel/arch", "aarch64\n")
 			f.host.Machine = func() (string, error) { return "aarch64", nil }
 		}},
-		{"kernel", "kernel release", "5.14", func(t *testing.T, f *independentHost) { f.write(t, "sys/kernel/osrelease", "5.14.99\n") }},
-		{"btf", "kernel BTF", "", func(t *testing.T, f *independentHost) {
-			independentRemove(t, filepath.Join(f.host.SysFS, "kernel/btf/vmlinux"))
+		{"kernel", "kernel release", "5.14", func(t *testing.T, f *readinessHost) { f.write(t, "sys/kernel/osrelease", "5.14.99\n") }},
+		{"btf", "kernel BTF", "", func(t *testing.T, f *readinessHost) {
+			readinessRemove(t, filepath.Join(f.host.SysFS, "kernel/btf/vmlinux"))
 		}},
-		{"program-load", "BPF program", "independent verifier rejection", func(t *testing.T, f *independentHost) {
+		{"program-load", "BPF program", "independent verifier rejection", func(t *testing.T, f *readinessHost) {
 			f.host.Loads = func() error { f.loads++; return errors.New("independent verifier rejection") }
 		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := independentFixture(t, libs)
+			f := readinessFixture(t, libs)
 			tc.change(t, f)
 			got := preflight.Assess(f.host, f.selected, f.catalog)
-			independentCheck(t, got, preflight.NotReady, []int32{3101}, map[string]preflight.Status{tc.requirement + "/0": preflight.Missing})
+			readinessCheck(t, got, preflight.NotReady, []int32{3101}, map[string]preflight.Status{tc.requirement + "/0": preflight.Missing})
 			if tc.evidence != "" {
-				independentEvidence(t, got, tc.requirement, 0, tc.evidence)
+				readinessEvidence(t, got, tc.requirement, 0, tc.evidence)
 			}
 		})
 	}
 }
 
 func TestReadinessCapabilitiesMustBeEffective(t *testing.T) {
-	libs := independentCaptureLibraries(t)
-	for _, capability := range independentCaps {
+	libs := readinessCaptureLibraries(t)
+	for _, capability := range readinessCaps {
 		t.Run(capability.name, func(t *testing.T) {
-			f := independentFixture(t, libs)
-			f.capabilities(t, independentMask&^(1<<capability.bit))
+			f := readinessFixture(t, libs)
+			f.capabilities(t, readinessMask&^(1<<capability.bit))
 			got := preflight.Assess(f.host, f.selected, f.catalog)
-			independentCheck(t, got, preflight.NotReady, []int32{3101}, map[string]preflight.Status{
+			readinessCheck(t, got, preflight.NotReady, []int32{3101}, map[string]preflight.Status{
 				"capabilities/0": preflight.Missing, "BPF program/0": preflight.Indeterminate,
 			})
-			independentEvidence(t, got, "capabilities", 0, capability.name)
+			readinessEvidence(t, got, "capabilities", 0, capability.name)
 			if f.loads != 0 {
 				t.Errorf("Loads called %d times without effective %s", f.loads, capability.name)
 			}
 		})
 	}
 	t.Run("all-missing", func(t *testing.T) {
-		f := independentFixture(t, libs)
+		f := readinessFixture(t, libs)
 		f.capabilities(t, 0)
 		got := preflight.Assess(f.host, f.selected, f.catalog)
-		independentCheck(t, got, preflight.NotReady, []int32{3101}, map[string]preflight.Status{
+		readinessCheck(t, got, preflight.NotReady, []int32{3101}, map[string]preflight.Status{
 			"capabilities/0": preflight.Missing, "BPF program/0": preflight.Indeterminate,
 		})
-		for _, capability := range independentCaps {
-			independentEvidence(t, got, "capabilities", 0, capability.name)
+		for _, capability := range readinessCaps {
+			readinessEvidence(t, got, "capabilities", 0, capability.name)
 		}
 		if f.loads != 0 {
 			t.Errorf("Loads called %d times with no effective capabilities", f.loads)
@@ -352,50 +352,50 @@ func TestReadinessCapabilitiesMustBeEffective(t *testing.T) {
 }
 
 func TestReadinessUnreadableHostRequirements(t *testing.T) {
-	libs := independentCaptureLibraries(t)
+	libs := readinessCaptureLibraries(t)
 	cases := []struct {
 		name, requirement string
-		change            func(*testing.T, *independentHost)
+		change            func(*testing.T, *readinessHost)
 	}{
-		{"zero-os", "operating system", func(t *testing.T, f *independentHost) { f.host.OS = "" }},
-		{"zero-machine-no-kernel-reading", "architecture", func(t *testing.T, f *independentHost) {
-			independentRemove(t, filepath.Join(f.host.ProcFS, "sys/kernel/arch"))
+		{"zero-os", "operating system", func(t *testing.T, f *readinessHost) { f.host.OS = "" }},
+		{"zero-machine-no-kernel-reading", "architecture", func(t *testing.T, f *readinessHost) {
+			readinessRemove(t, filepath.Join(f.host.ProcFS, "sys/kernel/arch"))
 			f.host.Machine = nil
 		}},
-		{"uname-error-no-kernel-reading", "architecture", func(t *testing.T, f *independentHost) {
-			independentRemove(t, filepath.Join(f.host.ProcFS, "sys/kernel/arch"))
+		{"uname-error-no-kernel-reading", "architecture", func(t *testing.T, f *readinessHost) {
+			readinessRemove(t, filepath.Join(f.host.ProcFS, "sys/kernel/arch"))
 			f.host.Machine = func() (string, error) { return "", errors.New("uname unavailable") }
 		}},
-		{"absent-release", "kernel release", func(t *testing.T, f *independentHost) {
-			independentRemove(t, filepath.Join(f.host.ProcFS, "sys/kernel/osrelease"))
+		{"absent-release", "kernel release", func(t *testing.T, f *readinessHost) {
+			readinessRemove(t, filepath.Join(f.host.ProcFS, "sys/kernel/osrelease"))
 		}},
-		{"unreadable-release", "kernel release", func(t *testing.T, f *independentHost) {
-			independentUnreadable(t, filepath.Join(f.host.ProcFS, "sys/kernel/osrelease"))
+		{"unreadable-release", "kernel release", func(t *testing.T, f *readinessHost) {
+			readinessUnreadable(t, filepath.Join(f.host.ProcFS, "sys/kernel/osrelease"))
 		}},
-		{"unreadable-btf", "kernel BTF", func(t *testing.T, f *independentHost) {
-			independentUnreadable(t, filepath.Join(f.host.SysFS, "kernel/btf/vmlinux"))
+		{"unreadable-btf", "kernel BTF", func(t *testing.T, f *readinessHost) {
+			readinessUnreadable(t, filepath.Join(f.host.SysFS, "kernel/btf/vmlinux"))
 		}},
-		{"absent-status", "capabilities", func(t *testing.T, f *independentHost) {
-			independentRemove(t, filepath.Join(f.host.ProcFS, "self/status"))
+		{"absent-status", "capabilities", func(t *testing.T, f *readinessHost) {
+			readinessRemove(t, filepath.Join(f.host.ProcFS, "self/status"))
 		}},
-		{"unreadable-status", "capabilities", func(t *testing.T, f *independentHost) {
-			independentUnreadable(t, filepath.Join(f.host.ProcFS, "self/status"))
+		{"unreadable-status", "capabilities", func(t *testing.T, f *readinessHost) {
+			readinessUnreadable(t, filepath.Join(f.host.ProcFS, "self/status"))
 		}},
-		{"absent-cap-eff", "capabilities", func(t *testing.T, f *independentHost) { f.write(t, "self/status", "CapPrm:\tffffffffffffffff\n") }},
-		{"malformed-cap-eff", "capabilities", func(t *testing.T, f *independentHost) { f.write(t, "self/status", "CapEff:\tnot-hex\n") }},
-		{"overflow-cap-eff", "capabilities", func(t *testing.T, f *independentHost) { f.write(t, "self/status", "CapEff:\t1ffffffffffffffff\n") }},
-		{"nil-loads", "BPF program", func(t *testing.T, f *independentHost) { f.host.Loads = nil }},
+		{"absent-cap-eff", "capabilities", func(t *testing.T, f *readinessHost) { f.write(t, "self/status", "CapPrm:\tffffffffffffffff\n") }},
+		{"malformed-cap-eff", "capabilities", func(t *testing.T, f *readinessHost) { f.write(t, "self/status", "CapEff:\tnot-hex\n") }},
+		{"overflow-cap-eff", "capabilities", func(t *testing.T, f *readinessHost) { f.write(t, "self/status", "CapEff:\t1ffffffffffffffff\n") }},
+		{"nil-loads", "BPF program", func(t *testing.T, f *readinessHost) { f.host.Loads = nil }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := independentFixture(t, libs)
+			f := readinessFixture(t, libs)
 			tc.change(t, f)
 			statuses := map[string]preflight.Status{tc.requirement + "/0": preflight.Indeterminate}
 			if tc.requirement == "capabilities" {
 				statuses["BPF program/0"] = preflight.Indeterminate
 			}
 			got := preflight.Assess(f.host, f.selected, f.catalog)
-			independentCheck(t, got, preflight.Undetermined, []int32{3101}, statuses)
+			readinessCheck(t, got, preflight.Undetermined, []int32{3101}, statuses)
 			if tc.requirement == "capabilities" && f.loads != 0 {
 				t.Errorf("Loads called %d times while capabilities could not be established", f.loads)
 			}
@@ -407,14 +407,14 @@ func TestReadinessUnreadableHostRequirements(t *testing.T) {
 // Indeterminate is reserved for neither being readable: qemu-user fakes uname
 // while /proc/sys/kernel/arch reports the real kernel.
 func TestReadinessNilMachineWithAReadableKernelIsMet(t *testing.T) {
-	libs := independentCaptureLibraries(t)
-	f := independentFixture(t, libs)
+	libs := readinessCaptureLibraries(t)
+	f := readinessFixture(t, libs)
 	f.host.Machine = nil
-	independentCheck(t, preflight.Assess(f.host, f.selected, f.catalog), preflight.Ready, []int32{3101}, map[string]preflight.Status{"architecture/0": preflight.Met})
+	readinessCheck(t, preflight.Assess(f.host, f.selected, f.catalog), preflight.Ready, []int32{3101}, map[string]preflight.Status{"architecture/0": preflight.Met})
 }
 
 func TestReadinessKernelFloor(t *testing.T) {
-	libs := independentCaptureLibraries(t)
+	libs := readinessCaptureLibraries(t)
 	for _, tc := range []struct {
 		release string
 		status  preflight.Status
@@ -432,15 +432,15 @@ func TestReadinessKernelFloor(t *testing.T) {
 		{"5.x.0", preflight.Indeterminate, preflight.Undetermined},
 	} {
 		t.Run(strconv.Quote(tc.release), func(t *testing.T) {
-			f := independentFixture(t, libs)
+			f := readinessFixture(t, libs)
 			f.write(t, "sys/kernel/osrelease", tc.release+"\n")
-			independentCheck(t, preflight.Assess(f.host, f.selected, f.catalog), tc.verdict, []int32{3101}, map[string]preflight.Status{"kernel release/0": tc.status})
+			readinessCheck(t, preflight.Assess(f.host, f.selected, f.catalog), tc.verdict, []int32{3101}, map[string]preflight.Status{"kernel release/0": tc.status})
 		})
 	}
 }
 
 func TestReadinessArchitectureFallbackAndDisagreement(t *testing.T) {
-	libs := independentCaptureLibraries(t)
+	libs := readinessCaptureLibraries(t)
 	for _, tc := range []struct {
 		kernel, machine string
 		status          preflight.Status
@@ -452,49 +452,49 @@ func TestReadinessArchitectureFallbackAndDisagreement(t *testing.T) {
 		{"x86_64", "aarch64", preflight.Missing, preflight.NotReady},
 	} {
 		t.Run(tc.kernel+"-"+tc.machine, func(t *testing.T) {
-			f := independentFixture(t, libs)
+			f := readinessFixture(t, libs)
 			if tc.kernel == "" {
-				independentRemove(t, filepath.Join(f.host.ProcFS, "sys/kernel/arch"))
+				readinessRemove(t, filepath.Join(f.host.ProcFS, "sys/kernel/arch"))
 			} else {
 				f.write(t, "sys/kernel/arch", tc.kernel+"\n")
 			}
 			f.host.Machine = func() (string, error) { return tc.machine, nil }
 			got := preflight.Assess(f.host, f.selected, f.catalog)
-			independentCheck(t, got, tc.verdict, []int32{3101}, map[string]preflight.Status{"architecture/0": tc.status})
+			readinessCheck(t, got, tc.verdict, []int32{3101}, map[string]preflight.Status{"architecture/0": tc.status})
 			if tc.kernel != "" {
-				independentEvidence(t, got, "architecture", 0, tc.kernel, tc.machine)
+				readinessEvidence(t, got, "architecture", 0, tc.kernel, tc.machine)
 			}
 		})
 	}
 }
 
 func TestReadinessTLSStates(t *testing.T) {
-	libs := independentCaptureLibraries(t)
+	libs := readinessCaptureLibraries(t)
 	cases := []struct {
 		name    string
 		status  preflight.Status
 		verdict preflight.Verdict
-		change  func(*testing.T, *independentHost)
+		change  func(*testing.T, *readinessHost)
 	}{
-		{"unversioned-with-crypto-version", preflight.Met, preflight.Ready, func(t *testing.T, f *independentHost) { f.process(t, 3101, "libssl.so", libs.ssl, true, true) }},
-		{"other-major", preflight.Missing, preflight.NotReady, func(t *testing.T, f *independentHost) { f.process(t, 3101, "libssl.so.1.1", libs.ssl, true, true) }},
-		{"not-executable", preflight.Missing, preflight.NotReady, func(t *testing.T, f *independentHost) { f.process(t, 3101, "libssl.so.3", libs.ssl, false, true) }},
-		{"empty-maps", preflight.Missing, preflight.NotReady, func(t *testing.T, f *independentHost) { f.write(t, "3101/maps", "") }},
-		{"absent-maps", preflight.Indeterminate, preflight.Undetermined, func(t *testing.T, f *independentHost) {
-			independentRemove(t, filepath.Join(f.host.ProcFS, "3101/maps"))
+		{"unversioned-with-crypto-version", preflight.Met, preflight.Ready, func(t *testing.T, f *readinessHost) { f.process(t, 3101, "libssl.so", libs.ssl, true, true) }},
+		{"other-major", preflight.Missing, preflight.NotReady, func(t *testing.T, f *readinessHost) { f.process(t, 3101, "libssl.so.1.1", libs.ssl, true, true) }},
+		{"not-executable", preflight.Missing, preflight.NotReady, func(t *testing.T, f *readinessHost) { f.process(t, 3101, "libssl.so.3", libs.ssl, false, true) }},
+		{"empty-maps", preflight.Missing, preflight.NotReady, func(t *testing.T, f *readinessHost) { f.write(t, "3101/maps", "") }},
+		{"absent-maps", preflight.Indeterminate, preflight.Undetermined, func(t *testing.T, f *readinessHost) {
+			readinessRemove(t, filepath.Join(f.host.ProcFS, "3101/maps"))
 		}},
-		{"unreadable-maps", preflight.Indeterminate, preflight.Undetermined, func(t *testing.T, f *independentHost) {
-			independentUnreadable(t, filepath.Join(f.host.ProcFS, "3101/maps"))
+		{"unreadable-maps", preflight.Indeterminate, preflight.Undetermined, func(t *testing.T, f *readinessHost) {
+			readinessUnreadable(t, filepath.Join(f.host.ProcFS, "3101/maps"))
 		}},
-		{"unknown-major", preflight.Indeterminate, preflight.Undetermined, func(t *testing.T, f *independentHost) { f.process(t, 3101, "libssl.so", libs.ssl, true, false) }},
-		{"catalog-cannot-read-library", preflight.Indeterminate, preflight.Undetermined, func(t *testing.T, f *independentHost) {
+		{"unknown-major", preflight.Indeterminate, preflight.Undetermined, func(t *testing.T, f *readinessHost) { f.process(t, 3101, "libssl.so", libs.ssl, true, false) }},
+		{"catalog-cannot-read-library", preflight.Indeterminate, preflight.Undetermined, func(t *testing.T, f *readinessHost) {
 			f.process(t, 3101, "libssl.so.3", filepath.Join(t.TempDir(), "absent-library"), true, true)
 			r := f.catalog.Inspect(f.selected[0])
 			if r.Supported || len(r.Support) != 1 || r.Support[0].Error == "" {
 				t.Fatalf("fixture wiring: need an unknown catalog reading: %+v", r)
 			}
 		}},
-		{"catalog-refuses-readable-library", preflight.Missing, preflight.NotReady, func(t *testing.T, f *independentHost) {
+		{"catalog-refuses-readable-library", preflight.Missing, preflight.NotReady, func(t *testing.T, f *readinessHost) {
 			f.process(t, 3101, "libssl.so.3", libs.crypto, true, true)
 			r := f.catalog.Inspect(f.selected[0])
 			if r.Supported || len(r.Support) != 1 || r.Support[0].Error != "" {
@@ -504,40 +504,40 @@ func TestReadinessTLSStates(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := independentFixture(t, libs)
+			f := readinessFixture(t, libs)
 			tc.change(t, f)
-			independentCheck(t, preflight.Assess(f.host, f.selected, f.catalog), tc.verdict, []int32{3101}, map[string]preflight.Status{"TLS library/3101": tc.status})
+			readinessCheck(t, preflight.Assess(f.host, f.selected, f.catalog), tc.verdict, []int32{3101}, map[string]preflight.Status{"TLS library/3101": tc.status})
 		})
 	}
 }
 
 func TestReadinessSelectionPopulation(t *testing.T) {
-	libs := independentCaptureLibraries(t)
+	libs := readinessCaptureLibraries(t)
 	t.Run("no-selected-process", func(t *testing.T) {
-		f := independentFixture(t, libs)
+		f := readinessFixture(t, libs)
 		// A supported process exists in procfs, but the caller did not select it.
-		independentCheck(t, preflight.Assess(f.host, nil, f.catalog), preflight.Undetermined, nil, map[string]preflight.Status{"TLS library/0": preflight.Indeterminate})
+		readinessCheck(t, preflight.Assess(f.host, nil, f.catalog), preflight.Undetermined, nil, map[string]preflight.Status{"TLS library/0": preflight.Indeterminate})
 	})
 	t.Run("caller-order-and-every-pid", func(t *testing.T) {
-		f := independentFixture(t, libs)
+		f := readinessFixture(t, libs)
 		f.process(t, 19, "libssl.so.3", libs.ssl, true, true)
 		f.write(t, "19/maps", "")
 		// 404 has no maps at all; it must survive in the result as unknown.
 		selected := []process.Process{{PID: 404}, {PID: 3101}, {PID: 19}}
-		independentCheck(t, preflight.Assess(f.host, selected, f.catalog), preflight.NotReady, []int32{404, 3101, 19}, map[string]preflight.Status{
+		readinessCheck(t, preflight.Assess(f.host, selected, f.catalog), preflight.NotReady, []int32{404, 3101, 19}, map[string]preflight.Status{
 			"TLS library/404": preflight.Indeterminate, "TLS library/19": preflight.Missing,
 		})
 	})
 }
 
 func TestReadinessVerdictFold(t *testing.T) {
-	libs := independentCaptureLibraries(t)
+	libs := readinessCaptureLibraries(t)
 	states := []preflight.Status{preflight.Met, preflight.Missing, preflight.Indeterminate}
 	for _, osStatus := range states {
 		for _, kernelStatus := range states {
 			for _, tlsStatus := range states {
 				t.Run(string(osStatus)+"-"+string(kernelStatus)+"-"+string(tlsStatus), func(t *testing.T) {
-					f := independentFixture(t, libs)
+					f := readinessFixture(t, libs)
 					if osStatus == preflight.Missing {
 						f.host.OS = "freebsd"
 					}
@@ -554,7 +554,7 @@ func TestReadinessVerdictFold(t *testing.T) {
 						f.write(t, "3101/maps", "")
 					}
 					if tlsStatus == preflight.Indeterminate {
-						independentRemove(t, filepath.Join(f.host.ProcFS, "3101/maps"))
+						readinessRemove(t, filepath.Join(f.host.ProcFS, "3101/maps"))
 					}
 					want := preflight.Ready
 					if osStatus == preflight.Indeterminate || kernelStatus == preflight.Indeterminate || tlsStatus == preflight.Indeterminate {
@@ -563,7 +563,7 @@ func TestReadinessVerdictFold(t *testing.T) {
 					if osStatus == preflight.Missing || kernelStatus == preflight.Missing || tlsStatus == preflight.Missing {
 						want = preflight.NotReady
 					}
-					independentCheck(t, preflight.Assess(f.host, f.selected, f.catalog), want, []int32{3101}, map[string]preflight.Status{
+					readinessCheck(t, preflight.Assess(f.host, f.selected, f.catalog), want, []int32{3101}, map[string]preflight.Status{
 						"operating system/0": osStatus, "kernel release/0": kernelStatus, "TLS library/3101": tlsStatus,
 					})
 				})

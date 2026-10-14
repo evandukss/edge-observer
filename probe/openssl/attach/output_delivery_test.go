@@ -21,7 +21,7 @@ import (
 // inject open failure; real TLS traffic establishes monitoring before recovery.
 func TestUnavailableOutputActivatesAndControlReopenRotatesFiles(t *testing.T) {
 	binary := built(t)
-	port := t18Serving(t)
+	port := liveServing(t)
 	clients := []conversation{speaking(t, port), speaking(t, port), speaking(t, port)}
 	c := configuring(t, target("clients", clients[0].process))
 	approved := filepath.Join(c.directory, processing.ArtifactName)
@@ -97,8 +97,8 @@ func TestUnavailableOutputActivatesAndControlReopenRotatesFiles(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
-	t18Ask(t, clients[0], "/unavailable")
-	t18Hangup(clients[0])
+	liveAsk(t, clients[0], "/unavailable")
+	liveHangup(clients[0])
 	failed := settled(2, 0, 2)
 	if failed.Processing.GateReason != "" || failed.LogDelivery == nil || failed.LogDelivery.Failed == 0 {
 		t.Fatalf("failure invalidated monitoring or log failure absent: processing %+v log %+v", failed.Processing, failed.LogDelivery)
@@ -109,8 +109,8 @@ func TestUnavailableOutputActivatesAndControlReopenRotatesFiles(t *testing.T) {
 		}
 	}
 	command("reopen")
-	t18Ask(t, clients[1], "/before-rotation")
-	t18Hangup(clients[1])
+	liveAsk(t, clients[1], "/before-rotation")
+	liveHangup(clients[1])
 	settled(4, 2, 2)
 	for _, path := range []string{approved, c.log} {
 		if err := os.Rename(path, path+".1"); err != nil {
@@ -118,8 +118,8 @@ func TestUnavailableOutputActivatesAndControlReopenRotatesFiles(t *testing.T) {
 		}
 	}
 	command("reopen")
-	t18Ask(t, clients[2], "/after-rotation")
-	t18Hangup(clients[2])
+	liveAsk(t, clients[2], "/after-rotation")
+	liveHangup(clients[2])
 	settled(6, 4, 2)
 	command("stop")
 	stopped = true

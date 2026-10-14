@@ -16,8 +16,8 @@ import (
 	"github.com/evandukss/edge-observer/fragment"
 )
 
-func independentRetiringWorkerSource() string {
-	return "#define _GNU_SOURCE\n" + independentTransferSource + `
+func trafficRetiringWorkerSource() string {
+	return "#define _GNU_SOURCE\n" + trafficTransferSource + `
 #include <sys/syscall.h>
 
 static int retire_commands[2], survivor_commands[2], identities[2], answers[2];
@@ -84,7 +84,7 @@ int main(int argc, char **argv) {
 `
 }
 
-func independentLiveTask(t *testing.T, pid, tid int32) {
+func trafficLiveTask(t *testing.T, pid, tid int32) {
 	t.Helper()
 	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%d/stat", pid, tid))
 	if err != nil {
@@ -96,7 +96,7 @@ func independentLiveTask(t *testing.T, pid, tid int32) {
 	}
 }
 
-func independentRetiredTask(t *testing.T, pid, tid int32) {
+func trafficRetiredTask(t *testing.T, pid, tid int32) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
@@ -117,8 +117,8 @@ func independentRetiredTask(t *testing.T, pid, tid int32) {
 func TestWorkerExitPreservesTheLeaderAndAnotherWorkersCapture(t *testing.T) {
 	for _, beforeAttach := range []bool{true, false} {
 		t.Run(fmt.Sprintf("workers-before-attach=%t", beforeAttach), func(t *testing.T) {
-			port, received := independentPeer(t)
-			actor := independentActor(t, independentRetiringWorkerSource(), port)
+			port, received := trafficPeer(t)
+			actor := trafficActor(t, trafficRetiringWorkerSource(), port)
 			parent := loaded(t, int32(actor.command.Process.Pid))
 			var retired, survivor int32
 			startWorkers := func() {
@@ -129,8 +129,8 @@ func TestWorkerExitPreservesTheLeaderAndAnotherWorkersCapture(t *testing.T) {
 				if _, scanErr := fmt.Sscanf(line, "workers %d %d", &retired, &survivor); err != nil || scanErr != nil || retired <= 0 || survivor <= 0 || retired == survivor || retired == parent.PID || survivor == parent.PID {
 					t.Fatalf("two distinct non-leader workers were not established: %q: %v, %v", line, err, scanErr)
 				}
-				independentLiveTask(t, parent.PID, retired)
-				independentLiveTask(t, parent.PID, survivor)
+				trafficLiveTask(t, parent.PID, retired)
+				trafficLiveTask(t, parent.PID, survivor)
 			}
 			if beforeAttach {
 				startWorkers()
@@ -158,9 +158,9 @@ func TestWorkerExitPreservesTheLeaderAndAnotherWorkersCapture(t *testing.T) {
 				t.Fatal(err)
 			}
 			actorLine(t, actor, fmt.Sprintf("retired %d\n", retired))
-			independentRetiredTask(t, parent.PID, retired)
-			independentLiveTask(t, parent.PID, parent.PID)
-			independentLiveTask(t, parent.PID, survivor)
+			trafficRetiredTask(t, parent.PID, retired)
+			trafficLiveTask(t, parent.PID, parent.PID)
+			trafficLiveTask(t, parent.PID, survivor)
 			check := func(path string, tid int32, generation admission.Generation) {
 				count := 0
 				for _, event := range drain(session, 100*time.Millisecond).events {
@@ -188,8 +188,8 @@ func TestWorkerExitPreservesTheLeaderAndAnotherWorkersCapture(t *testing.T) {
 			actorLine(t, actor, "parent 0\n")
 			peerReceived(t, received, "/independent-parent")
 			check("/independent-parent", parent.PID, control.Generation)
-			independentLiveTask(t, parent.PID, parent.PID)
-			independentLiveTask(t, parent.PID, survivor)
+			trafficLiveTask(t, parent.PID, parent.PID)
+			trafficLiveTask(t, parent.PID, survivor)
 		})
 	}
 }

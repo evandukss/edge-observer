@@ -14,7 +14,7 @@ import (
 	"github.com/evandukss/edge-observer/spool"
 )
 
-func independentLifecycleConnections(t *testing.T, path string) []connection.Record {
+func trafficLifecycleConnections(t *testing.T, path string) []connection.Record {
 	t.Helper()
 	file, err := os.Open(path)
 	if err != nil {
@@ -36,7 +36,7 @@ func independentLifecycleConnections(t *testing.T, path string) []connection.Rec
 	}
 }
 
-func waitIndependentLifecycleConnections(t *testing.T, disk *spool.Spool, want int64) {
+func waitTrafficLifecycleConnections(t *testing.T, disk *spool.Spool, want int64) {
 	t.Helper()
 	deadline := time.NewTimer(3 * time.Second)
 	defer deadline.Stop()

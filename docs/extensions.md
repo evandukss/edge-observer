@@ -9,6 +9,11 @@ This page is for the person who configures one. The person who writes one reads 
 [contract/extension/PROTOCOL.md](../contract/extension/PROTOCOL.md), which is everything needed to write
 one in any language with no library from the observer.
 
+**The protocol is `observer.extension/2`.** An extension written for `observer.extension/1` answers
+`ready` with that version, and the observer retires it as `protocol` at every start: update it to name
+`observer.extension/2`, and to read decoded bodies, the reasons of exchanges excluded alone and omitted
+bodies (the protocol's "Decoded and omitted bodies").
+
 The [endpoint inventory example](../examples/endpoint-inventory/README.md) is a
 Python program using only the standard library. It answers exchanges unchanged
 and emits bounded summaries of methods, path templates and status classes.
@@ -109,8 +114,9 @@ burst.
 **Exchanges reach an extension as they are released, while their connection is open**: once both its
 messages are read whole and the exchange before it on its connection is done, and at the latest when the
 connection or the session ends. **An exchange's line is written once every extension has answered or
-skipped it.** An exchange the output will not write - incomplete, one-sided, or unsupported, such as a
-compressed body - is sent marked excluded as soon as that is decidable, and then let go. Each exchange
+skipped it.** An exchange the output will not write - incomplete, one-sided, unsupported, or with a body
+that cannot be decoded - is sent marked excluded as soon as that is decidable, and then let go. One
+excluded alone for its body is sent at once, and the exchanges after it go on. Each exchange
 waits at most `timeout_ms` at one extension, including the time to queue and write it, and at most the
 sum of the `timeout_ms` of all your extensions in total. Earlier exchanges of its connection, processing
 and output can add to that. While one connection waits on an extension, other connections are processed
@@ -119,9 +125,10 @@ and written; **the application you watch never waits on an extension.**
 **A connection that holds too much unreleased work is cut.** A connection holds only what it has not
 released: a request waiting for its response, a message still being read, an exchange waiting on an
 extension. A released exchange is no longer held, so a long keep-alive connection is not cut for its
-length. **It is cut when what it holds reaches half of `limits.events` messages and transfers** (8192 at
-the default 16384) - many requests left unanswered can reach that - **or when the observer's allowance
-for held work is full as its reading needs more**. That allowance, `limits.events` times 4096 bytes, is
+length. **Its limit is half of `limits.events`, rounded down with a minimum of one message or
+transfer** (8192 at the default 16384). It is cut for reaching that limit - many requests left
+unanswered can reach that - **or when the observer's allowance for held work is full as its reading
+needs more**. That allowance, `limits.events` times 4096 bytes, is
 shared by the captured events and the copies processing makes of them, so large bodies hold fewer
 events at once, and large bodies still incomplete can fill it. An extension's replacement that finds it
 full fails as `no_room`, and its connection is cut too. What a cut connection held unreleased is

@@ -497,6 +497,16 @@ func (h *heldDelivery) seal(t *testing.T) []connection.Record {
 	if err != nil || !drained.Complete {
 		t.Fatalf("the ring did not drain: %+v, %v", drained, err)
 	}
+	// An empty ring says nothing about the delivery loop, which can still hold an
+	// event it read; sealed before the loop places it, a case moving one transfer
+	// has no record. So reading stops and the loop finishes first, as the
+	// attachment's drain does.
+	h.session.StopReading()
+	select {
+	case <-h.finished:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the delivery loop did not finish after the drain, so capture would be sealed without what it still held")
+	}
 	h.recording.Finish(time.Now())
 	return h.records.all()
 }
@@ -563,7 +573,7 @@ func TestRingLossIsLocatedToTheConnectionsThatLostAndCountedThere(t *testing.T) 
 	} {
 		t.Run(name, func(t *testing.T) {
 			port := sequencePeer(t, nil)
-			actor := independentActor(t, sequenceActorSource, port)
+			actor := trafficActor(t, sequenceActorSource, port)
 			run := deliverHeld(t, actor, map[string]uint32{"events": one.ring}, 1)
 
 			command(t, actor, fmt.Sprintf("O %d", one.handles), "O 0")
@@ -669,7 +679,7 @@ func TestRingLossIsLocatedToTheConnectionsThatLostAndCountedThere(t *testing.T) 
 func TestOverlappingReadsOnOneHandleAreMarkedAndRefused(t *testing.T) {
 	send := make(chan struct{})
 	port := sequencePeer(t, send)
-	actor := independentActor(t, sequenceActorSource, port)
+	actor := trafficActor(t, sequenceActorSource, port)
 	run := deliverHeld(t, actor, nil, 0)
 
 	command(t, actor, "O 1", "O 0")
@@ -712,7 +722,7 @@ func TestOverlappingReadsOnOneHandleAreMarkedAndRefused(t *testing.T) {
 // its own handle is a wrapper, whose bytes the outer call reports.
 func TestCallsNestedInsideAnotherHandlesCallAreNumberedAsLost(t *testing.T) {
 	port := nestedPeer(t)
-	actor := independentActor(t, nestedActorSource, port)
+	actor := trafficActor(t, nestedActorSource, port)
 	run := deliverHeld(t, actor, nil, 0)
 
 	if _, err := io.WriteString(actor.input, "I\n"); err != nil {
@@ -757,7 +767,7 @@ func TestCallsNestedInsideAnotherHandlesCallAreNumberedAsLost(t *testing.T) {
 			cut++
 			// The nested calls took numbers nothing delivered, at the tail of a connection
 			// still open at the seal. A nested call is not a refused ring reservation, so
-			// its tail is explicitly incomplete, not a located loss (decision 476); the
+			// its tail is explicitly incomplete, not a located loss; the
 			// loss is counted once, on the nested-elsewhere counter (the precondition
 			// above), and not a second time here.
 			if placement.Because != connection.TerminalUnsettled || placement.Lost.Known {
@@ -776,7 +786,7 @@ func TestCallsNestedInsideAnotherHandlesCallAreNumberedAsLost(t *testing.T) {
 // retires the old connection with its tail unsettled and the new one is whole.
 func TestAHandleReusedAfterALostEndingIsANewOccupancy(t *testing.T) {
 	port := sequencePeer(t, nil)
-	actor := independentActor(t, sequenceActorSource, port)
+	actor := trafficActor(t, sequenceActorSource, port)
 	run := deliverHeld(t, actor, map[string]uint32{"events": 16384}, 1)
 
 	command(t, actor, "O 2", "O 0")
@@ -872,7 +882,7 @@ func connectionCarrying(t *testing.T, fragments []fragment.Record, text string) 
 // begun before that loss and one with an observed birth keep their evidence.
 func TestAFullOccupancyTablePreservesProvenOccupancyOrigins(t *testing.T) {
 	port := sequencePeer(t, nil)
-	actor := independentActor(t, sequenceActorSource, port)
+	actor := trafficActor(t, sequenceActorSource, port)
 	run := deliverHeld(t, actor, map[string]uint32{"occupancies": 2}, 0)
 
 	command(t, actor, "O 2", "O 0")
@@ -948,7 +958,7 @@ func TestAFullOccupancyTablePreservesProvenOccupancyOrigins(t *testing.T) {
 // the deterministic seam. The received direction, untouched, stays whole.
 func TestAnUncataloguedRouteShowsAsAGapInTheSentDirection(t *testing.T) {
 	port := sequencePeer(t, nil)
-	actor := independentActor(t, sequenceActorSource, port)
+	actor := trafficActor(t, sequenceActorSource, port)
 	run := deliverHeld(t, actor, nil, 0)
 
 	placed := false
@@ -1010,11 +1020,11 @@ func TestAnUncataloguedRouteShowsAsAGapInTheSentDirection(t *testing.T) {
 // direction is cut. Nothing received is ever delivered, so the gap is at the tail
 // of a connection open at the seal; a return that never fires is not a refused
 // ring reservation, so the tail is explicitly incomplete and counted on the
-// unmeasurable counter, not as a located loss (decision 476). The sent direction,
+// unmeasurable counter, not as a located loss. The sent direction,
 // whose return fires, stays whole.
 func TestAReturnThatNeverFiresShowsAsAGap(t *testing.T) {
 	port := sequencePeer(t, nil)
-	actor := independentActor(t, sequenceActorSource, port)
+	actor := trafficActor(t, sequenceActorSource, port)
 	run := deliverHeldWith(t, actor, ebpf.Options{SkipReturn: []string{"SSL_read"}})
 
 	command(t, actor, "O 1", "O 0")
@@ -1044,7 +1054,7 @@ func TestAReturnThatNeverFiresShowsAsAGap(t *testing.T) {
 // move. The control, a handle born after the flag is set, is Born and whole.
 func TestABirthBeforeCaptureIsLiveFormsNoOccupancy(t *testing.T) {
 	port := sequencePeer(t, nil)
-	actor := independentActor(t, sequenceActorSource, port)
+	actor := trafficActor(t, sequenceActorSource, port)
 	run := deliverHeldWith(t, actor, ebpf.Options{DeferCaptureLive: true})
 
 	// Pre-live: handle 0 is born and transfers before any data probe is trusted.
@@ -1077,6 +1087,14 @@ func TestABirthBeforeCaptureIsLiveFormsNoOccupancy(t *testing.T) {
 
 	prelive := connectionCarrying(t, run.fragments.all(), "/prelive-0")
 	postlive := connectionCarrying(t, run.fragments.all(), "/postlive-1")
+	for _, id := range []fragment.ConnectionID{prelive, postlive} {
+		if !slices.ContainsFunc(records, func(record connection.Record) bool {
+			_, ok := record.Placement(fragment.Sent)
+			return record.ID == id && ok
+		}) {
+			t.Fatalf("wiring, not the property: connection %d has no %s placement", id, fragment.Sent)
+		}
+	}
 	for _, record := range records {
 		placement, ok := record.Placement(fragment.Sent)
 		if !ok {
@@ -1096,13 +1114,12 @@ func TestABirthBeforeCaptureIsLiveFormsNoOccupancy(t *testing.T) {
 	}
 }
 
-// C9 repair (decision 473): a byte-moving entry point whose probe the attachment
-// could not place leaves capture not live, so no occupancy forms and no exchange
-// is ever certified across bytes those invisible calls move. The session still
-// attaches and runs. This is T8's case: SSL_write unplaced, then a held
-// SSL_write_ex2, must not leave the sent direction whole. The seam forces the
-// probe unplaced (FailEntry), as the kernel would; the control, nothing forced,
-// is capture-live and whole.
+// A byte-moving entry point whose probe the attachment could not place leaves
+// capture not live, so no occupancy forms and no exchange is ever certified
+// across bytes those invisible calls move. The session still attaches and runs.
+// SSL_write unplaced, then a held SSL_write_ex2, must not leave the sent
+// direction whole. The seam forces the probe unplaced (FailEntry), as the
+// kernel would; the control, nothing forced, is capture-live and whole.
 func TestAnUnplacedByteMoverLeavesCaptureNotLiveAndCertifiesNothing(t *testing.T) {
 	for name, symbol := range map[string]string{
 		"a transfer function unplaced":    "SSL_write",
@@ -1110,7 +1127,7 @@ func TestAnUnplacedByteMoverLeavesCaptureNotLiveAndCertifiesNothing(t *testing.T
 	} {
 		t.Run(name, func(t *testing.T) {
 			port := sequencePeer(t, nil)
-			actor := independentActor(t, sequenceActorSource, port)
+			actor := trafficActor(t, sequenceActorSource, port)
 			run := deliverHeldWith(t, actor, ebpf.Options{FailEntry: []string{symbol}})
 
 			if named := run.session.Unprobed(); len(named) == 0 {
@@ -1145,7 +1162,7 @@ func TestAnUnplacedByteMoverLeavesCaptureNotLiveAndCertifiesNothing(t *testing.T
 	}
 	t.Run("the control, nothing forced, is whole", func(t *testing.T) {
 		port := sequencePeer(t, nil)
-		actor := independentActor(t, sequenceActorSource, port)
+		actor := trafficActor(t, sequenceActorSource, port)
 		run := deliverHeld(t, actor, nil, 0)
 		if named := run.session.Unprobed(); len(named) != 0 {
 			t.Fatalf("the control has unplaced byte movers %v", named)
@@ -1168,11 +1185,11 @@ func TestAnUnplacedByteMoverLeavesCaptureNotLiveAndCertifiesNothing(t *testing.T
 	})
 }
 
-// Third C9 repair (decision 475 class, a lifecycle probe in place of a byte
-// mover): a refused SSL_new or SSL_free probe leaves capture not live, so a
-// reused handle address cannot join two connections into one stream. Decision
-// 477: only a PRESENT probe that failed does this. The control, the lifecycle
-// probes held, gives the same reuse two occupancies, both whole.
+// A lifecycle probe in place of a byte mover: a refused SSL_new or SSL_free
+// probe leaves capture not live, so a reused handle address cannot join two
+// connections into one stream. Only a PRESENT probe that failed does this. The
+// control, the lifecycle probes held, gives the same reuse two occupancies, both
+// whole.
 func TestARefusedLifecycleProbeKeepsAReusedHandleFromJoiningTwoConnections(t *testing.T) {
 	for name, forced := range map[string]bool{
 		"the lifecycle probes refused": true,
@@ -1184,7 +1201,7 @@ func TestARefusedLifecycleProbeKeepsAReusedHandleFromJoiningTwoConnections(t *te
 				opts.FailEntry = []string{"SSL_new", "SSL_free"}
 			}
 			port := sequencePeer(t, nil)
-			actor := independentActor(t, sequenceActorSource, port)
+			actor := trafficActor(t, sequenceActorSource, port)
 			run := deliverHeldWith(t, actor, opts)
 
 			if forced {
@@ -1230,6 +1247,14 @@ func TestARefusedLifecycleProbeKeepsAReusedHandleFromJoiningTwoConnections(t *te
 			t.Logf("precondition: handle address %#x reused across two connections", freed)
 
 			if forced {
+				if !slices.ContainsFunc(records, func(record connection.Record) bool {
+					_, sent := record.Placement(fragment.Sent)
+					_, received := record.Placement(fragment.Received)
+					return sent || received
+				}) {
+					t.Fatalf("wiring, not the property: %d records over the reused handle, none with a placement",
+						len(records))
+				}
 				for _, record := range records {
 					for _, direction := range []fragment.Direction{fragment.Sent, fragment.Received} {
 						if placement, ok := record.Placement(direction); ok && placement.Whole() {

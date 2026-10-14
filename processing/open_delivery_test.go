@@ -213,7 +213,7 @@ func openDeliveryPair(t *testing.T, a processing.Artifact, id fragment.Connectio
 	if responseIndex != strconv.Itoa(index) {
 		t.Errorf("response at index %d belongs to %q", index, responseIndex)
 	}
-	if a.Version != processing.ArtifactVersion4 || !a.Connection.Provisional {
+	if a.Version != processing.ArtifactVersion5 || !a.Connection.Provisional {
 		t.Errorf("early pair has version %q provisional %t", a.Version, a.Connection.Provisional)
 	}
 	for _, present := range a.Connection.Lifecycle() {
@@ -406,8 +406,8 @@ func TestOpenDeliveryReaderRejectsContradictoryForms(t *testing.T) {
 		t.Fatalf("fixture's exchange and final line missing: %d", len(out.lines))
 	}
 	artifacts := openDeliveryRead(t, out.lines)
-	if artifacts[0].Version != processing.ArtifactVersion4 || artifacts[1].Version != processing.ArtifactVersion4 {
-		t.Fatalf("producer emitted %s and %s, need version 4 before testing its forms", artifacts[0].Version, artifacts[1].Version)
+	if artifacts[0].Version != processing.ArtifactVersion5 || artifacts[1].Version != processing.ArtifactVersion5 {
+		t.Fatalf("producer emitted %s and %s, need version 5 before testing its forms", artifacts[0].Version, artifacts[1].Version)
 	}
 	for _, tc := range []struct {
 		name   string
@@ -472,6 +472,7 @@ func TestOpenDeliveryReaderRejectsContradictoryForms(t *testing.T) {
 			}
 			if tc.legacy {
 				value["version"] = processing.ArtifactVersion3
+				delete(value, "excluded_exchanges")
 			}
 			data, err := json.Marshal(value)
 			if err != nil {

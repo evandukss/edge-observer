@@ -57,6 +57,44 @@ type Message struct {
 	// ShapeRefused says why a body with bytes has no shape; empty for a message
 	// with no body.
 	ShapeRefused string
+	// Content is set on a message whose Body is its content: the body as
+	// captured with its content codings undone (Decoded). Nil where Body is
+	// the body as captured.
+	Content *Content
+}
+
+// Content is what undoing a message body's content codings found.
+type Content struct {
+	// Codings names the codings undone, in the order they were applied.
+	Codings []string
+	// Fields is the message's Content-Encoding field values as they were
+	// captured, in order. Where the message's fields are no longer these, a
+	// processing policy removed, masked or truncated one, and a record of the
+	// message does not name the codings.
+	Fields []string
+	// Length is the content's length.
+	Length uint64
+}
+
+// Decoded is m with its body read as content: Body is content, and the shape
+// is derived from content, the one derived from the captured bytes discarded.
+// Every other fact is m's as captured - the body's length, holes and elision,
+// its framing, the headers and the offsets. An empty content has no shape and
+// no refusal, as a message with no body has. m is not changed, and content is
+// not copied.
+func Decoded(m *Message, content []byte, decoding Content, limits jsonshape.Limits) *Message {
+	out := &Message{Message: m.Message, Content: &decoding}
+	out.Body = content
+	if len(content) == 0 {
+		return out
+	}
+	shape, err := jsonshape.Extract(content, limits)
+	if err != nil {
+		out.ShapeRefused = err.Error()
+		return out
+	}
+	out.Shape = &shape
+	return out
 }
 
 // Exchange is a request and the response to it, either of which may be absent.
