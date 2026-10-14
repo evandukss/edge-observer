@@ -14,8 +14,7 @@ A report the maintainer can act on says:
 
 ## Supported versions
 
-One pre-release, `v0.1.0-rc1`, has been published, and there is no stable release. Fixes are made on
-`main`, and the latest commit on `main` is the only supported version.
+Fixes are made on `main`, and the latest commit on `main` is the only supported version.
 
 ## What counts as a vulnerability
 
