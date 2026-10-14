@@ -388,6 +388,36 @@ Legacy `fragments.jsonl` files contain header values and body bytes base64-encod
 credentials and personal data the traffic carried. Reading such a file does not sanitize it or remove
 it from disk.
 
+### Example output
+
+A [source-built run on Ubuntu 24.04 x64](https://github.com/evandukss/edge-observer/actions/runs/38653654398)
+used OpenSSL 3.0.13 and kernel 6.17.0-1022-azure. It captured one new TLS request to a local
+HTTP/1.1 service after activation, with output configured at `/var/lib/observer-readme-usage/output`.
+These commands exited zero. The selected stdout lines below are verbatim; markers identify omitted
+spans. The stop output retains the uncertainty about calls made during probe placement.
+
+`sudo systemd-run --scope -p MemoryMax=512M -p MemorySwapMax=0 ./observer preflight observer.config.json --text`:
+
+```text
+verdict        READY
+[... remaining output omitted ...]
+```
+
+`sudo ./observer stop observer.config.json`:
+
+```text
+stopped    session f132183ec57796b7, sealed complete (LOST 1 threads NOT KNOWN, having run while the probes were placed), account /var/lib/observer-readme-usage/output/sessions/f132183ec57796b7/account.json
+```
+
+`sudo ./observer inspect /var/lib/observer-readme-usage/output/sessions/f132183ec57796b7 --text`:
+
+```text
+account    sealed, f132183ec57796b7, version 1, at 2026-10-14T23:22:51.127476918Z
+[... intervening output omitted ...]
+retained body  exchange=0 message="response" direction="sent" offset="0" end="210" structure="derived" bytes="{\"path\": \"/readme-usage-38653654398\", \"message\": \"observer usage\"}"
+[... remaining output omitted ...]
+```
+
 ## Rotation and delivery
 
 Rotation and retention are external. The [logrotate example](docs/observer.logrotate)
