@@ -2,6 +2,7 @@ package processing
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"sort"
 	"sync"
@@ -30,11 +31,13 @@ type Run struct {
 	failed     chan struct{}
 	stopped    sync.WaitGroup
 
-	mutex    sync.Mutex
-	outcomes []Outcome
-	err      error
-	ended    bool
-	closed   bool
+	snapshotMutex  sync.Mutex
+	frozenSnapshot *Outcome
+	mutex          sync.Mutex
+	outcomes       []Outcome
+	err            error
+	ended          bool
+	closed         bool
 	// retained is each worker's stores as it last left them, and unrouted the
 	// router's spans and routing the capacity of the per-worker routing slices
 	// as Route last left them (Retained).
@@ -87,6 +90,7 @@ func Start(options Options) (*Run, error) {
 	if err != nil {
 		return nil, err
 	}
+	shared.extensions = supervised
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &Run{options: options, release: shared, extensions: supervised, pending: make([][]routed, n),
 		ctx: ctx, cancel: cancel, failed: make(chan struct{}), outcomes: make([]Outcome, n)}
@@ -195,6 +199,15 @@ func (r *Run) Retained() ([]held.Occupancy, error) {
 // Snapshot is the workers' last returned outcomes, summed, with the gate's
 // reason where it has one. It never waits on a worker or on writer I/O.
 func (r *Run) Snapshot() Outcome {
+	r.snapshotMutex.Lock()
+	defer r.snapshotMutex.Unlock()
+	if r.frozenSnapshot != nil {
+		return cloneOutcome(*r.frozenSnapshot)
+	}
+	return r.snapshot()
+}
+
+func (r *Run) snapshot() Outcome {
 	r.mutex.Lock()
 	o := r.sumLocked()
 	r.mutex.Unlock()
@@ -214,6 +227,12 @@ func (r *Run) Failed() <-chan struct{} { return r.failed }
 // does, concurrently, and the Run ends. It returns the summed outcome and the
 // first error any worker stopped on.
 func (r *Run) Finish(ctx context.Context, final Finalization) (Outcome, error) {
+	return r.FinishStages(ctx, final, nil)
+}
+
+// FinishStages exposes the two joins to the session's deadline owner. before
+// runs outside owner locks and is nil outside finalization instrumentation.
+func (r *Run) FinishStages(ctx context.Context, final Finalization, before func(context.Context, string) error) (Outcome, error) {
 	if r == nil {
 		return Outcome{}, ErrFinished
 	}
@@ -227,10 +246,45 @@ func (r *Run) Finish(ctx context.Context, final Finalization) (Outcome, error) {
 	for _, one := range r.workers {
 		one.end <- ending{ctx: ctx, final: final}
 	}
-	r.stopped.Wait()
+	join := func(stage string, fn func()) error {
+		done := make(chan error, 1)
+		go func() {
+			if before != nil {
+				if err := before(ctx, stage); err != nil {
+					done <- err
+					return
+				}
+			}
+			if err := ctx.Err(); err != nil {
+				done <- err
+				return
+			}
+			fn()
+			done <- nil
+		}()
+		select {
+		case err := <-done:
+			if ctx.Err() != nil {
+				err = ctx.Err()
+			}
+			if err != nil {
+				return fmt.Errorf("%s: %w", stage, err)
+			}
+			return nil
+		case <-ctx.Done():
+			return fmt.Errorf("%s: %w", stage, ctx.Err())
+		}
+	}
+	if err := join("processing workers", r.stopped.Wait); err != nil {
+		r.cancel()
+		return r.Snapshot(), err
+	}
 	// Every batch is written; the extensions are ended in order, so their
 	// last derived records are taken before the counts are read.
-	r.extensions.end()
+	if err := join("extension shutdown", r.extensions.end); err != nil {
+		r.cancel()
+		return r.Snapshot(), err
+	}
 	r.cancel()
 	r.mutex.Lock()
 	o, err := r.sumLocked(), r.err

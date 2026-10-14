@@ -350,9 +350,14 @@ func (w *Worker) chain(ctx context.Context, b *batch, x reconstruct.Exchange, ro
 	default:
 		d.index = p.exchanges
 		p.exchanges++
-		d.id = w.release.issued.Add(1)
+		d.id = w.release.nextID()
 	}
-	w.extensions.issue(1)
+	if d.id == 0 {
+		w.returnPolicy(b, d.policy)
+		w.releaseContent(b, &d.decoded)
+		p.reserver.Release(x.Charge)
+		return nil
+	}
 	switch prep.verdict {
 	case verdictStop:
 		if !p.excluded {
@@ -1171,6 +1176,12 @@ func (r *release) writeDerived(w *Writer, f *derivedFile, line []byte) string {
 		return extension.DerivedStopped
 	}
 	result := extension.DerivedStopped
-	r.gate.AuthorizeEnqueue(releaseEvidence, func() { result = w.writeDerived(f, line) })
+	r.gate.AuthorizeEnqueue(releaseEvidence, func() {
+		r.admission.Lock()
+		defer r.admission.Unlock()
+		if !r.closed {
+			result = w.writeDerived(f, line)
+		}
+	})
 	return result
 }

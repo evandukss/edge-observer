@@ -667,6 +667,8 @@ func inspectionController(t *testing.T, configuration []byte) (*processingContro
 		intake: store, gate: gate, output: output, attached: f.producer,
 		plan: account.Account{Version: account.Version, Session: "condition2", Policy: account.Policy{Revision: read.Revision, Generation: 1}},
 	}
+	f.d.plan.Attached(account.Live, f.d.session, nil, f.d.attached.Capability())
+	f.d.plan.Extensions = account.ExtensionsOf(read.Processing.Extensions())
 	go func() { f.d.serveUntilStop(f.stop, nil, nil, nil, nil, account.Account{}); close(f.done) }()
 	t.Cleanup(func() {
 		if !f.ended {

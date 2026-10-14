@@ -68,7 +68,7 @@ func TestRetractedAdmissionsLeaveNoReadCountersBehind(t *testing.T) {
 				i, fresh, reads)
 		}
 
-		session.Retract(authorise(process))
+		session.Retract(session.Inventory())
 		left, err = session.Reads()
 		if err != nil || len(left) != 0 {
 			t.Errorf("cycle %d: with the grant taken back the reads table holds %v (%v), want nothing", i, left, err)

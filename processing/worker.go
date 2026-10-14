@@ -351,6 +351,7 @@ func (o releaseOutcome) worse(other releaseOutcome) releaseOutcome {
 // when no complete candidate reached authorization. It is never permission;
 // an incomplete input can also have an independently counted processing failure.
 type Outcome struct {
+	StdoutDelivery     *sink.Stats
 	Delivery           sink.Stats
 	Batches            uint64
 	Authorized         uint64
@@ -959,6 +960,7 @@ func (w *Worker) retire(ctx context.Context, key batchKey, b *batch, final bool)
 func deliveryOutcome(o Outcome, output Output) Outcome {
 	if writer, ok := output.(*Writer); ok {
 		o.Delivery = writer.DeliveryStats()
+		o.StdoutDelivery = writer.StdoutDeliveryStats()
 		o.Authorized, o.Written, o.OutputFailures = o.Delivery.Authorized, o.Delivery.Written, o.Delivery.Failed
 	}
 	return o

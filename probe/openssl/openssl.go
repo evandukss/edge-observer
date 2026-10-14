@@ -167,7 +167,7 @@ func (a Adapter) Inspect(p process.Process) probe.Support {
 		}
 	}
 	// Lifecycle entry points are resolved with the plaintext ones, since the
-	// attach policy, preflight.Take and the attachment all read this list. A
+	// attach policy, preflight and the attachment all read this list. A
 	// missing connection-ending probe is invisible: a reused SSL address continues
 	// the previous connection's stream.
 	for _, function := range a.Runtime.Lifecycle {

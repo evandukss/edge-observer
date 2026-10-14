@@ -1,6 +1,6 @@
-//go:build linux && posturediagnostic
+//go:build linux && attach
 
-package activation
+package attach_test
 
 import (
 	"context"
@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/evandukss/edge-observer/activation"
 	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/policy"
 	"github.com/evandukss/edge-observer/probe"
@@ -23,29 +24,19 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// This diagnostic requires a prepared, dedicated cgroup-v2 container. The
-// runner occupies a leaf below a root with the memory controller enabled.
-// It records the observed classification; it does not assert the predicted
-// Check value or change production behavior to obtain a particular answer.
-func TestUnreadablePostureDiagnostic(t *testing.T) {
-	runPostureReadConstruction(t, false)
-}
-
-func runPostureReadConstruction(t *testing.T, classify bool) {
-	t.Helper()
+// The attach runner prepares a dedicated cgroup-v2 root with memory enabled
+// and places the runner in a populated leaf without child memory control.
+func TestPostureReadClassification(t *testing.T) {
 	if mode := os.Getenv("POSTURE_READ_MODE"); mode != "" {
-		postureReadDiagnosticChild(t, mode, classify)
+		postureReadClassificationChild(t, mode)
 		return
 	}
 	const root = "/sys/fs/cgroup"
-	parent, err := processState(os.Getpid())
-	if err != nil || parent.Cgroup == "/" {
-		t.Fatalf("setup: runner must occupy a leaf below the prepared root: state=%+v error=%v", parent, err)
+	parent := postureReadParticipant(t, os.Getpid())
+	if parent.Cgroup == "/" {
+		t.Fatalf("setup: runner must occupy a leaf below the prepared root: state=%+v", parent)
 	}
-	parentDir, err := cgroupDirectory(parent.Cgroup)
-	if err != nil {
-		t.Fatal(err)
-	}
+	parentDir := filepath.Join(root, strings.TrimPrefix(parent.Cgroup, "/"))
 	read := func(name string) string {
 		t.Helper()
 		content, err := os.ReadFile(name)
@@ -64,10 +55,7 @@ func runPostureReadConstruction(t *testing.T, classify bool) {
 	}
 	t.Logf("CONSTRUCTION runner_pid=%d runner_cgroup=%q root_subtree_control=%q runner_subtree_control=%q runner_members=%q", os.Getpid(), parent.Cgroup, rootControl, parentControl, parentMembers)
 	testName := t.Name()
-	modes := []string{"compliant", "missing_memory_file"}
-	if classify {
-		modes = append(modes, "unlimited_memory", "missing_participant", "changed_participant")
-	}
+	modes := []string{"compliant", "missing_memory_file", "unlimited_memory", "missing_participant", "changed_participant"}
 	for _, mode := range modes {
 		t.Run(mode, func(t *testing.T) {
 			base := root
@@ -100,7 +88,11 @@ func runPostureReadConstruction(t *testing.T, classify bool) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer group.Close()
+			defer func() {
+				if err := group.Close(); err != nil {
+					t.Errorf("close cgroup handle: %v", err)
+				}
+			}()
 			executable, err := os.Executable()
 			if err != nil {
 				t.Fatal(err)
@@ -113,16 +105,16 @@ func runPostureReadConstruction(t *testing.T, classify bool) {
 			output, err := cmd.CombinedOutput()
 			t.Logf("CHILD mode=%s output:\n%s", mode, output)
 			if err != nil {
-				t.Fatalf("diagnostic child: %v", err)
+				t.Fatalf("classification child: %v", err)
 			}
 		})
 	}
 }
 
-func postureReadDiagnosticChild(t *testing.T, mode string, classify bool) {
+func postureReadClassificationChild(t *testing.T, mode string) {
 	t.Helper()
 	if !slices.Contains([]string{"compliant", "missing_memory_file", "unlimited_memory", "missing_participant", "changed_participant"}, mode) {
-		t.Fatalf("unknown diagnostic mode %q", mode)
+		t.Fatalf("unknown classification mode %q", mode)
 	}
 	group := os.Getenv("POSTURE_READ_GROUP")
 	membership, err := os.ReadFile("/proc/self/cgroup")
@@ -132,11 +124,8 @@ func postureReadDiagnosticChild(t *testing.T, mode string, classify bool) {
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
 		t.Fatalf("setup: establish holder dumpability: %v", err)
 	}
-	parent, err := processState(os.Getppid())
-	if err != nil {
-		t.Fatalf("setup: identify outside participant: %v", err)
-	}
-	if withinCgroup(parent.Cgroup, group) {
+	parent := postureReadParticipant(t, os.Getppid())
+	if parent.Cgroup == group || strings.HasPrefix(parent.Cgroup, group+"/") {
 		t.Fatalf("setup: participant %q is not outside %q", parent.Cgroup, group)
 	}
 	limitPath := filepath.Join("/sys/fs/cgroup", strings.TrimPrefix(group, "/"), "memory.max")
@@ -186,7 +175,7 @@ func postureReadDiagnosticChild(t *testing.T, mode string, classify bool) {
 	}
 	record := func(operation string, err error) {
 		t.Helper()
-		var refusal *Refusal
+		var refusal *activation.Refusal
 		typed := errors.As(err, &refusal)
 		result := map[string]any{"operation": operation, "mode": mode, "holder_pid": os.Getpid(), "accepted": err == nil, "typed_refusal": typed}
 		if err != nil {
@@ -207,29 +196,33 @@ func postureReadDiagnosticChild(t *testing.T, mode string, classify bool) {
 		if mode != "compliant" && (!typed || refusal.PID != os.Getpid() || refusal.Check == "" || refusal.Detail == "") {
 			t.Fatalf("fault did not produce an identified, named refusal: %v", err)
 		}
-		if classify && mode != "compliant" {
-			check, detail := ExecutionMemory, "memory.max"
+		if mode != "compliant" {
+			check, detail := activation.ExecutionMemory, "memory.max"
 			if mode == "missing_participant" || mode == "changed_participant" {
-				check, detail = NoParticipantRunning, "had exited"
+				check, detail = activation.NoParticipantRunning, "had exited"
 			}
 			unreadable := mode == "missing_memory_file"
 			if refusal.Check != check || refusal.Unreadable != unreadable || !strings.Contains(refusal.Detail, detail) {
 				t.Errorf("%s classification: Check=%s Unreadable=%t Detail=%q; want Check=%s Unreadable=%t detail containing %q", operation, refusal.Check, refusal.Unreadable, refusal.Detail, check, unreadable, detail)
 			}
-			if strings.Contains(refusal.Error(), string(PostureUnreadable)) != unreadable {
+			if strings.Contains(refusal.Error(), string(activation.PostureUnreadable)) != unreadable {
 				t.Errorf("%s error text lost classification: %v", operation, refusal)
 			}
 		}
 	}
-	posture, err := Verify(gate, participants)
+	posture, err := activation.Verify(gate, participants)
 	t.Logf("VERIFY_POSTURE %+v", posture)
 	record("Verify", err)
 	if state := gate.Snapshot(); state.Charged != 0 || state.Reason != "" {
 		t.Fatalf("verification changed gate state: %+v", state)
 	}
-	prepared, err := Prepare(read, participants, uint64(read.Settings.AdmittedEventLimit))
+	prepared, err := activation.Prepare(read, participants, uint64(read.Settings.AdmittedEventLimit))
 	if prepared != nil {
-		defer prepared.Intake.Close()
+		defer func() {
+			if err := prepared.Intake.Close(); err != nil {
+				t.Errorf("close prepared intake: %v", err)
+			}
+		}()
 	}
 	record("Prepare", err)
 	if mode == "compliant" && prepared == nil {
@@ -238,4 +231,23 @@ func postureReadDiagnosticChild(t *testing.T, mode string, classify bool) {
 	if mode != "compliant" && prepared != nil {
 		t.Fatal("refused Prepare returned a capture")
 	}
+}
+
+// Identify and cgroup membership are bracketed by birth readings so the fixture
+// never credits a parent's membership to a different process.
+func postureReadParticipant(t *testing.T, pid int) activation.ParticipantState {
+	t.Helper()
+	before, err := process.Identify("/proc", int32(pid))
+	if err != nil || before.StartTime == 0 {
+		t.Fatalf("setup: identify participant %d: %+v, %v", pid, before, err)
+	}
+	group := unifiedCgroup(t, int32(pid))
+	if !strings.HasPrefix(group, "/") || filepath.Clean(group) != group {
+		t.Fatalf("setup: participant has an unresolvable cgroup: %q", group)
+	}
+	after, err := process.Identify("/proc", int32(pid))
+	if err != nil || before.StartTime != after.StartTime {
+		t.Fatalf("setup: participant %d changed during membership read: %v", pid, err)
+	}
+	return activation.ParticipantState{PID: int32(pid), StartTime: before.StartTime, Cgroup: group}
 }

@@ -315,6 +315,7 @@ type Writer struct {
 	mutex     sync.Mutex
 	directory string
 	queue     *sink.Queue
+	stdout    *sink.Queue
 	factory   sink.Factory
 	closed    bool
 	derived   []string
@@ -336,6 +337,16 @@ func (w *Writer) WriteApproved(ctx context.Context, result Approved) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	if w.closed {
+		return ErrOutputClosed
+	}
+	// Each queue owns its immutable bytes and charges them independently. A
+	// file refusal must not suppress the mirror's attempt.
+	if w.stdout != nil {
+		_ = w.stdout.Enqueue(ArtifactName, result.Bytes())
+	}
 	return w.queue.Enqueue(ArtifactName, result.line)
 }
 
@@ -352,6 +363,17 @@ func (w *Writer) Retained() ([]held.Occupancy, error) {
 	queue, err := w.queue.Retained()
 	if err != nil {
 		return nil, err
+	}
+	mirror, err := w.stdout.Retained()
+	if err != nil {
+		return nil, err
+	}
+	for i := range queue {
+		for _, one := range mirror {
+			if queue[i].Store == one.Store {
+				queue[i].Held += one.Held
+			}
+		}
 	}
 	return append(out, queue...), nil
 }
@@ -391,6 +413,11 @@ func (w *Writer) openDerived(name string) (*derivedFile, error) {
 	return &derivedFile{writer: w, name: route}, nil
 }
 func (w *Writer) writeDerived(f *derivedFile, line []byte) string {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	if w.closed {
+		return extension.DerivedStopped
+	}
 	err := w.queue.Enqueue(f.name, line)
 	switch {
 	case err == nil:

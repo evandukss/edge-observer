@@ -57,7 +57,22 @@ func TestLiveAndSealedLogCountsDistinguishFileFromStdout(t *testing.T) {
 	if err := json.Unmarshal(encoded, &sealed); err != nil {
 		t.Fatal(err)
 	}
-	check(sealed, 2)
+	check(sealed, 1)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(data), []byte{'\n'})
+	if len(lines) != 2 {
+		t.Fatalf("terminal log delivery: got %d records, want activation and stopped", len(lines))
+	}
+	var terminal stopped
+	if err := json.Unmarshal(lines[1], &terminal); err != nil {
+		t.Fatal(err)
+	}
+	if terminal.Record != "stopped" || terminal.Session != sealed.Session || !terminal.Sealed || !terminal.Complete || terminal.Account != filepath.Join(f.d.directory, sealedName) || terminal.Contract == "" || terminal.ContractError != "" {
+		t.Fatalf("terminal record does not state the actual published outcome: %+v", terminal)
+	}
 }
 
 func TestUnavailableOperationalLogRecoversAfterReopen(t *testing.T) {
@@ -164,8 +179,29 @@ func TestOperationalLogMidSessionFailureDoesNotStopController(t *testing.T) {
 	if err := f.finish(log); err != nil {
 		t.Fatal(err)
 	}
-	if st := log.queue.Stats(); st.Authorized != 3 || st.Written != 2 || st.Failed != 1 {
+	// Activation and the failed state record are frozen into the account.
+	// The recovered destination receives stopped after publication, outside
+	// those counts (decision 618).
+	if st := log.queue.Stats(); st.Authorized != 2 || st.Written != 1 || st.Failed != 1 || st.Pending != 0 {
 		t.Fatalf("log outcomes: %+v", st)
+	}
+	sealed := it4Account(t, f.d.directory)
+	if st := sealed.LogDelivery; st == nil || st.Authorized != 2 || st.Written != 1 || st.Failed != 1 || st.Pending != 0 {
+		t.Fatalf("sealed log outcomes: %+v", st)
+	}
+	writer.mutex.Lock()
+	data := bytes.Clone(writer.buffer.Bytes())
+	writer.mutex.Unlock()
+	lines := bytes.Split(bytes.TrimSpace(data), []byte{'\n'})
+	if len(lines) != 2 {
+		t.Fatalf("recovered log: got %d records, want activation and stopped", len(lines))
+	}
+	var terminal stopped
+	if err := json.Unmarshal(lines[1], &terminal); err != nil {
+		t.Fatal(err)
+	}
+	if terminal.Record != "stopped" || terminal.Session != f.d.session || !terminal.Sealed || !terminal.Complete || terminal.Account != filepath.Join(f.d.directory, sealedName) || terminal.Contract == "" || terminal.ContractError != "" {
+		t.Fatalf("recovered log lost actual final outcome: %+v", terminal)
 	}
 	if reason := f.d.gate.Snapshot().Reason; reason != "" {
 		t.Fatalf("sink withdrew capture: %s", reason)

@@ -72,129 +72,11 @@ func approved(t *testing.T) (process.Approval, int32) {
 	return process.Approval{}, 0
 }
 
-func take(t *testing.T, approval process.Approval) preflight.Report {
-	t.Helper()
-
-	report, err := preflight.Take(preflight.Running(), approval, catalog(t))
-	if err != nil {
-		t.Fatalf("Take: %v", err)
-	}
-	return report
-}
-
-func TestTheReportNamesTheKernelItWasTakenOn(t *testing.T) {
-	approval, _ := approved(t)
-	report := take(t, approval)
-
-	if report.Kernel.Release == "" || strings.HasPrefix(report.Kernel.Release, "unknown") {
-		t.Errorf("Kernel.Release = %q", report.Kernel.Release)
-	}
-	if !strings.Contains(report.Kernel.Version, "Linux") {
-		t.Errorf("Kernel.Version = %q, which does not name a kernel", report.Kernel.Version)
-	}
-	if report.Binary.OS != "linux" || report.Binary.Arch == "" {
-		t.Errorf("Binary = %+v", report.Binary)
-	}
-	if report.TakenAt.IsZero() {
-		t.Error("the report says when it was taken nowhere")
-	}
-}
-
-// Each kernel piece a probe needs is reported found or not found, by path.
-func TestTheReportSaysWhereTheKernelExposesTracingAndWhetherItIsThere(t *testing.T) {
-	approval, _ := approved(t)
-	report := take(t, approval)
-
-	if report.Tracing.BTF.Path == "" {
-		t.Error("the report does not say where it looked for the kernel's type information")
-	}
-	if len(report.Tracing.UprobeEvents) < 2 {
-		t.Errorf("%d places checked for the uprobe interface, want both", len(report.Tracing.UprobeEvents))
-	}
-	for _, file := range report.Tracing.UprobeEvents {
-		if file.Path == "" {
-			t.Error("a place checked for the uprobe interface is not named")
-		}
-		if !file.Present && file.Error == "" && file.Size != 0 {
-			t.Errorf("%s is absent and has a size", file.Path)
-		}
-	}
-	for _, knob := range []string{report.Tracing.PerfEventParanoid, report.Tracing.PtraceScope, report.Tracing.UnprivilegedBPFDisabled} {
-		if knob == "" {
-			t.Error("a kernel knob is reported as an empty string, which is neither its value nor a reason it is missing")
-		}
-	}
-}
-
-func TestTheReportSaysWhichCapabilitiesAttachmentNeedsAreHeld(t *testing.T) {
-	approval, _ := approved(t)
-	report := take(t, approval)
-
-	privilege := report.Privilege
-	if privilege.Effective == "" || privilege.Permitted == "" || privilege.Bounding == "" {
-		t.Fatalf("Privilege = %+v, want the three masks", privilege)
-	}
-
-	held := append(append([]string{}, privilege.Holds...), privilege.Lacks...)
-	seen := make(map[string]int, len(held))
-	for _, name := range held {
-		seen[name]++
-	}
-	for _, name := range []string{"CAP_BPF", "CAP_PERFMON", "CAP_SYS_ADMIN", "CAP_SYS_PTRACE"} {
-		if seen[name] != 1 {
-			t.Errorf("%s appears %d times across held and lacked, want once", name, seen[name])
-		}
-	}
-}
-
-func TestAnApprovedProcessIsReportedWithWhatWouldObserveIt(t *testing.T) {
-	approval, pid := approved(t)
-	report := take(t, approval)
-
-	if len(report.Approved) != 1 {
-		t.Fatalf("%d rules reported, want 1", len(report.Approved))
-	}
-	rule := report.Approved[0]
-	if rule.Arguments == 0 {
-		t.Error("the rule is reported as naming no arguments")
-	}
-
-	var found bool
-	for _, matched := range rule.Processes {
-		if matched.PID != pid {
-			continue
-		}
-		found = true
-		if !matched.Named {
-			t.Error("a process a rule matched is reported as a descendant of one")
-		}
-		if !matched.Support.Supported {
-			t.Errorf("a process running OpenSSL is unsupported: %s", matched.Support.Reason())
-		}
-		if matched.Support.Adapter != "openssl" {
-			t.Errorf("Adapter = %q", matched.Support.Adapter)
-		}
-		if len(matched.Libraries) == 0 {
-			t.Error("no OpenSSL library is reported for a process running one")
-		}
-		if matched.StartTime == 0 {
-			t.Error("StartTime = 0, so the process cannot be told from a later one reusing its pid")
-		}
-	}
-	if !found {
-		t.Fatalf("pid %d is absent from the report", pid)
-	}
-}
-
-// The report leaves the host, and command lines hold secrets, so no process's
-// arguments - including the rule's own - appear in it.
+// The readiness report leaves the host; selected process arguments must not.
 func TestTheReportCarriesNoProcessArguments(t *testing.T) {
 	secret := "preflight-must-not-carry-this-9d31"
 
-	// A shell holding a child keeps its command line as given. It runs from a
-	// copy of its own, so the rule names this shell alone: a rule naming the
-	// host's shell names every shell on the host, and Take refuses the whole
-	// report when any of them execs or exits while it is read.
+	// A private shell copy lets the rule select only this fixture.
 	shell := filepath.Join(t.TempDir(), "sh")
 	program, err := os.ReadFile("/bin/sh")
 	if err != nil {
@@ -252,11 +134,30 @@ func TestTheReportCarriesNoProcessArguments(t *testing.T) {
 		t.Fatalf("wiring, not the property: the child of pid %d is not running sleep after two seconds", pid)
 	}
 
-	report := take(t, process.Approval{Rules: []process.Rule{rule}})
-
-	// Guard: a report that matched nothing carries no arguments trivially.
-	if len(report.Approved) != 1 || len(report.Approved[0].Processes) == 0 {
-		t.Fatalf("pid %d was not reported, so there was nothing to leak", pid)
+	table, err := process.Read("/proc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval := process.Approval{Rules: []process.Rule{rule}}
+	table, err = approval.SettleArguments("/proc", table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := approval.Select(table)
+	if !slices.ContainsFunc(selected, func(p process.Process) bool {
+		return p.PID == pid && slices.Contains(p.Arguments, secret)
+	}) {
+		t.Fatal("wiring, not privacy: selected process does not carry the argument sentinel")
+	}
+	report := preflight.Assess(preflight.Running(), selected, catalog(t))
+	matches := 0
+	for _, r := range report.Requirements {
+		if r.Name == preflight.TLSLibrary && r.PID == pid {
+			matches++
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("wiring, not privacy: pid %d has %d TLS judgments, want 1", pid, matches)
 	}
 
 	encoded, err := json.Marshal(report)
@@ -271,49 +172,52 @@ func TestTheReportCarriesNoProcessArguments(t *testing.T) {
 	}
 }
 
-func TestAnApprovalMatchingNothingReportsTheRuleWithNoProcesses(t *testing.T) {
-	report := take(t, process.Approval{Rules: []process.Rule{{Executable: "/usr/bin/nothing-runs-this"}}})
-
-	if len(report.Approved) != 1 {
-		t.Fatalf("%d rules reported, want 1", len(report.Approved))
-	}
-	if got := len(report.Approved[0].Processes); got != 0 {
-		t.Fatalf("%d processes reported for a rule nothing matched", got)
-	}
-	if report.Approved[0].Executable != "/usr/bin/nothing-runs-this" {
-		t.Errorf("Executable = %q", report.Approved[0].Executable)
-	}
-}
-
-// A missing path and an unreadable one are different answers.
-func TestAPathThatIsNotThereIsReportedAbsentRatherThanUnreadable(t *testing.T) {
-	elsewhere := t.TempDir()
-
-	report, err := preflight.Take(preflight.Host{ProcFS: "/proc", SysFS: elsewhere, Debug: elsewhere}, process.Approval{}, catalog(t))
-	if err != nil {
-		t.Fatalf("Take: %v", err)
-	}
-
-	if report.Tracing.BTF.Present {
-		t.Errorf("%s is reported present", report.Tracing.BTF.Path)
-	}
-	if report.Tracing.BTF.Error != "" {
-		t.Errorf("a path that is simply not there is reported unreadable: %s", report.Tracing.BTF.Error)
-	}
-	if !strings.HasPrefix(report.Tracing.BTF.Path, elsewhere) {
-		t.Errorf("BTF.Path = %q, want it under %s", report.Tracing.BTF.Path, elsewhere)
+// Absence is a failed requirement; a failed read leaves the answer unknown.
+func TestReadinessDistinguishesAbsentAndUnreadableBTF(t *testing.T) {
+	for _, unreadable := range []bool{false, true} {
+		t.Run(strconv.FormatBool(unreadable), func(t *testing.T) {
+			c := meeting(t)
+			p := c.live()
+			if got := assess(c, p); got.Verdict != preflight.Ready {
+				t.Fatalf("wiring: free control is not ready: %+v", got)
+			}
+			c.remove("sys/kernel/btf/vmlinux")
+			wantStatus, wantVerdict := preflight.Missing, preflight.NotReady
+			if unreadable {
+				c.remove("sys/kernel/btf")
+				c.write("sys/kernel/btf", "not a directory")
+				wantStatus, wantVerdict = preflight.Indeterminate, preflight.Undetermined
+			}
+			_, err := os.Stat(filepath.Join(c.host.SysFS, "kernel/btf/vmlinux"))
+			if err == nil || os.IsNotExist(err) == unreadable {
+				t.Fatalf("wiring: requested BTF fault not reached: %v", err)
+			}
+			got := assess(c, p)
+			only(t, got, preflight.KernelBTF, wantStatus)
+			if got.Verdict != wantVerdict {
+				t.Fatalf("BTF fault verdict = %s, want %s", got.Verdict, wantVerdict)
+			}
+		})
 	}
 }
 
-// A tree that is not a procfs measured nothing, which must not read as a host
-// with nothing approved running.
-func TestTakeRefusesATreeThatIsNotAProcfs(t *testing.T) {
-	empty := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(empty, "1"), 0o755); err != nil {
-		t.Fatalf("make a process directory: %v", err)
+func TestReadinessRefusesAnUnmeasuredHost(t *testing.T) {
+	c := meeting(t)
+	p := c.live()
+	if got := assess(c, p); got.Verdict != preflight.Ready {
+		t.Fatalf("wiring: free control is not ready: %+v", got)
 	}
-
-	if _, err := preflight.Take(preflight.Host{ProcFS: empty, SysFS: empty}, process.Approval{}, catalog(t)); err == nil {
-		t.Fatal("Take accepted a tree that is not a procfs")
+	c.host.ProcFS = t.TempDir()
+	got := assess(c, p)
+	if got.Verdict != preflight.Undetermined {
+		t.Fatalf("unmeasured host verdict = %s, want undetermined", got.Verdict)
+	}
+	for _, name := range []string{preflight.KernelRelease, preflight.Capabilities, preflight.ProgramLoad, preflight.TLSLibrary} {
+		if r := requirement(t, got, name); r.Status != preflight.Indeterminate {
+			t.Errorf("%s = %s, want indeterminate", name, r.Status)
+		}
+	}
+	if c.loads != 1 {
+		t.Fatalf("unmeasured host attempted program load: total %d, want only the free control's 1", c.loads)
 	}
 }

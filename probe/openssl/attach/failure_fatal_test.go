@@ -59,11 +59,10 @@ func TestAFatalDiagnosticCarriesNoProtectedPlaintext(t *testing.T) {
 				// exchange is waited for in the approved file, which is elsewhere.
 				failureHolds(t, filepath.Join(c.directory, processing.ArtifactName), "hlt-after-the-fill", 20*time.Second)
 				w.signal(t, syscall.SIGTERM)
-				// The guard: the fatal site really ran, for want of space, with exit
-				// status 1.
+				// Require main's exit 1 and the account write's own ENOSPC. A
+				// separate stop-result publication failure cannot satisfy this guard.
 				stderr := w.stderrText()
-				if w.state == nil || w.state.ExitCode() != 1 || !strings.Contains(stderr, "observer: write the sealed account") ||
-					!strings.Contains(stderr, "no space left on device") {
+				if w.state == nil || w.state.ExitCode() != 1 || !failureAccountENOSPC(stderr, w.directory(c)) {
 					t.Fatalf("wiring, not the property: main's fatal exit did not run for want of space: %v\n%s", w.state, stderr)
 				}
 				t.Logf("stopped records %v; stderr %q", w.records("stopped"), stderr)
@@ -94,6 +93,51 @@ func TestAFatalDiagnosticCarriesNoProtectedPlaintext(t *testing.T) {
 				}
 			}
 			failureClean(t, w)
+		})
+	}
+}
+
+// failureAccountENOSPC binds the diagnostic to the current session's account
+// temporary write. The stage, path and cause must occur on the same stderr line.
+func failureAccountENOSPC(stderr, directory string) bool {
+	prefix := "observer: account publication: write " + filepath.Join(directory, ".seal-")
+	for _, line := range strings.Split(stderr, "\n") {
+		if rest, ok := strings.CutPrefix(line, prefix); ok {
+			name, full := strings.CutSuffix(rest, ": "+syscall.ENOSPC.Error())
+			if full && name != "" && !strings.ContainsAny(name, `/\`) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func TestFatalAccountENOSPCGuardRejectsUnrelatedFailures(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "sessions", "own-session")
+	write := "observer: account publication: write " + filepath.Join(directory, ".seal-123")
+	full := write + ": no space left on device"
+	stop := "stop result publication: write " + filepath.Join(directory, "control", ".seal-456") + ": no space left on device"
+	for _, test := range []struct {
+		name   string
+		stderr string
+		want   bool
+	}{
+		{"own account write", full, true},
+		{"account and receipt failures", full + "\n" + stop, true},
+		{"receipt only", "observer: " + stop, false},
+		{"projection only", strings.Replace(full, "account publication", "projection publication", 1), false},
+		{"another session", strings.Replace(full, "own-session", "other-session", 1), false},
+		{"receipt path under account label", strings.Replace(full, ".seal-123", "control/.seal-123", 1), false},
+		{"cause belongs to another failure", write + ": permission denied\n" + stop, false},
+		{"wrong cause", write + ": permission denied", false},
+		{"wrong operation", strings.Replace(full, ": write ", ": open ", 1), false},
+		{"missing main diagnostic", strings.TrimPrefix(full, "observer: "), false},
+		{"obsolete wording", "observer: write the sealed account: no space left on device", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := failureAccountENOSPC(test.stderr, directory); got != test.want {
+				t.Errorf("account ENOSPC prerequisite=%t want %t for %q", got, test.want, test.stderr)
+			}
 		})
 	}
 }

@@ -156,7 +156,7 @@ func TestAnExitedProcessKeepsItsQueuedEmissionWithoutARefusal(t *testing.T) {
 func TestALiveWithdrawalStillRefusesQueuedInventoryRecording(t *testing.T) {
 	s, _, p, event, unblock := queuedAdmission(t)
 	before := emissionRefusals(t, s)
-	s.Retract(authorise(p))
+	s.Retract(s.Inventory())
 	grants, err := s.Held()
 	reading := process.Inspect(procfs, p.PID, process.Group{Namespace: p.Namespace, NamespacePID: p.NamespacePID, Start: p.Start()})
 	if err != nil || len(grants) != 0 || len(s.Inventory()) != 0 || reading.Liveness != process.LivenessRunning {

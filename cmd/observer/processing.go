@@ -4,6 +4,7 @@ import (
 	"context"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/evandukss/edge-observer/account"
@@ -23,48 +24,71 @@ const processingEvery = 10 * time.Millisecond
 // never waits on writer I/O. Cleanup state and errors remain private to this
 // owner.
 type processingRun struct {
-	run      *processing.Run
-	mutex    sync.Mutex
-	finished bool
-	err      error
-	failed   chan struct{}
-	final    chan processing.Finalization
-	done     chan struct{}
+	run          *processing.Run
+	mutex        sync.Mutex
+	finished     bool
+	err          error
+	failed       chan struct{}
+	final        chan processing.Finalization
+	done         chan struct{}
+	finalContext context.Context
+	beforeFinal  func(context.Context, string) error
+	stage        atomic.Value
+}
+
+func (d *daemon) currentProcessing() *processingRun {
+	d.processingMutex.Lock()
+	defer d.processingMutex.Unlock()
+	return d.processing
 }
 
 // startProcessing fixes the workers' inputs before serving any control request.
 // begin already fixed this plan, revision, intake, gate and writer before
-// admission. Reload cannot replace the processing plan or the worker count
-// during this session.
+// admission. Reload cannot replace the processing plan or the worker count.
+// The start operation is outside processingMutex, so a held extension startup
+// cannot prevent the cutoff from closing this session's admission.
 func (d *daemon) startProcessing() <-chan struct{} {
-	if d.processing != nil {
-		return d.processing.failed
+	d.processingStart.Do(func() {
+		if d.currentProcessing() != nil {
+			return
+		}
+
+		if d.output == nil {
+			// A controller without an output owner has no processing path. Production
+			// begin requires that owner before constructing its delivery gate.
+			return
+		}
+		// Extensions start here, after the capabilities were given up and after
+		// the activation record listing them was enqueued. Log delivery is best
+		// effort and cannot prevent monitoring.
+		opts := processing.Options{Plan: d.policy.Processing, PolicyRevision: d.policy.ProcessingRevision,
+			Intake: d.intake, Gate: d.gate, Output: d.output, Workers: d.policy.Settings.Workers, Taken: d.processingTaken,
+			Session: d.session, Derived: d.output, Supervision: d.extensionLogged}
+		r := &processingRun{
+			failed: make(chan struct{}), final: make(chan processing.Finalization, 1), done: make(chan struct{}),
+		}
+		r.run, r.err = processing.Start(opts)
+		d.processingMutex.Lock()
+		if d.processingClosed && r.run != nil {
+			r.run.CloseAdmission()
+		}
+		d.processing = r
+		d.processingMutex.Unlock()
+		go r.serve(d.output)
+
+	})
+	if r := d.currentProcessing(); r != nil {
+		return r.failed
 	}
-	if d.output == nil {
-		// A controller without an output owner has no processing path. Production
-		// begin requires that owner before constructing its delivery gate.
-		return nil
-	}
-	// Extensions start here, after the capabilities were given up and after
-	// the activation record listing them was enqueued. Log delivery is best
-	// effort and cannot prevent monitoring.
-	opts := processing.Options{Plan: d.policy.Processing, PolicyRevision: d.policy.ProcessingRevision,
-		Intake: d.intake, Gate: d.gate, Output: d.output, Workers: d.policy.Settings.Workers, Taken: d.processingTaken,
-		Session: d.session, Derived: d.output, Supervision: d.extensionLogged}
-	r := &processingRun{
-		failed: make(chan struct{}), final: make(chan processing.Finalization, 1), done: make(chan struct{}),
-	}
-	r.run, r.err = processing.Start(opts)
-	d.processing = r
-	go r.serve(d.output)
-	return r.failed
+	return nil
 }
 
 func (r *processingRun) serve(output *processing.Writer) {
 	defer close(r.done)
 	if r.run != nil {
-		defer func() { _ = r.run.Close() }()
+		defer func() { go func() { _ = r.run.Close() }() }()
 	}
+
 	ticker := time.NewTicker(processingEvery)
 	defer ticker.Stop()
 	poll := ticker.C
@@ -82,9 +106,15 @@ func (r *processingRun) serve(output *processing.Writer) {
 		case facts := <-r.final:
 			var err error
 			if r.run != nil {
-				_, err = r.run.Finish(context.Background(), facts)
+				ctx := r.finalContext
+				if ctx == nil {
+					ctx = context.Background()
+				}
+				_, err = r.run.FinishStages(ctx, facts, r.beforeFinal)
 			}
-			_ = output.Close()
+			if r.finalContext == nil {
+				_ = output.Close()
+			}
 			r.record(r.run != nil, err)
 			return
 		case <-failed:
@@ -126,7 +156,7 @@ func (d *daemon) processingSnapshot() *account.Processing {
 		return nil
 	}
 	state := account.Processing{}
-	if r := d.processing; r != nil && r.run != nil {
+	if r := d.currentProcessing(); r != nil && r.run != nil {
 		outcome := r.run.Snapshot()
 		state.ProcessingFailures, state.OutputFailures = outcome.ProcessingFailures, outcome.OutputFailures
 		state.ConnectionsCut, state.InputCut = outcome.ConnectionsCut, outcome.InputCut
@@ -137,6 +167,7 @@ func (d *daemon) processingSnapshot() *account.Processing {
 	delivery := d.output.DeliveryStats()
 	state.Authorized, state.Written, state.OutputFailures = delivery.Authorized, delivery.Written, delivery.Failed
 	state.Delivery = delivery
+	state.StdoutDelivery = d.output.StdoutDeliveryStats()
 	state.GateReason = d.gate.Snapshot().Reason
 	if state.Extensions == nil {
 		state.Extensions = []account.ExtensionCounts{}
@@ -183,20 +214,35 @@ func (d *daemon) extensionLogged(e extension.Event) {
 }
 
 // finishProcessing runs only after withdrawal, delivery drain and capture's
-// final records. False facts discard pending payload. This wait has no invented
-// timeout: no deadline covers processing or the whole session (finish).
-func (d *daemon) finishProcessing(facts processing.Finalization) error {
+// final records. False facts discard pending payload. The first shutdown
+// trigger supplies the deadline; this owner never starts another allowance.
+func (d *daemon) finishProcessing(ctx context.Context, facts processing.Finalization) error {
 	d.startProcessing()
-	if d.processing == nil {
+	r := d.currentProcessing()
+	if r == nil {
 		return processing.ErrFinished
 	}
-	d.processing.final <- facts
-	<-d.processing.done
-	// done establishes that the owner has stopped modifying these private facts.
-	if d.processing.err != nil {
-		return d.processing.err
+	r.stage.Store(shutdownWorkers)
+	r.finalContext = ctx
+	r.beforeFinal = func(ctx context.Context, stage string) error {
+		r.stage.Store(shutdownStage(stage))
+		switch shutdownStage(stage) {
+		case shutdownWorkers, shutdownExtensions:
+			return d.beforeShutdown(ctx, shutdownStage(stage))
+		}
+		return nil
 	}
-	if !d.processing.finished {
+	r.final <- facts
+	select {
+	case <-r.done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	// done establishes that the owner has stopped modifying these private facts.
+	if r.err != nil {
+		return r.err
+	}
+	if !r.finished {
 		return processing.ErrFinished
 	}
 	return nil

@@ -75,7 +75,7 @@ func TestALateEventOfAWithdrawnAdmissionDoesNotBlockReadmission(t *testing.T) {
 		t.Fatal("wiring, not the property: no decoded transfer reached the hold before recording")
 	}
 	before := generationRetracted(t, r.session)
-	r.session.Retract(authorise(r.who))
+	r.session.Retract(r.session.Inventory())
 	close(release)
 	released = true
 	deadline := time.Now().Add(5 * time.Second)
@@ -130,7 +130,7 @@ func TestALateReadOfAWithdrawnAdmissionLeavesNoReadEntry(t *testing.T) {
 	if state != 2 {
 		t.Fatalf("wiring, not the property: no return reached the barrier past its grant check (state %d)", state)
 	}
-	r.session.Retract(authorise(r.who))
+	r.session.Retract(r.session.Inventory())
 	held, err := ebpf.ReadBarrierState(r.session)
 	if err != nil || held != 2 {
 		t.Fatalf("wiring, not the property: the return was no longer held when the retraction completed (state %d, %v)", held, err)

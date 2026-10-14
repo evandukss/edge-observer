@@ -308,6 +308,10 @@ type logger struct {
 const logQueueBytes int64 = 1 << 20
 
 func openLog(settings policy.Settings, foreground bool, stdout io.Writer) (*logger, error) {
+	return openLogTo(settings, foreground, "stdout", stdout)
+}
+
+func openLogTo(settings policy.Settings, foreground bool, consoleName string, console io.Writer) (*logger, error) {
 	if settings.Log == policy.Stdout && !foreground {
 		return nil, errors.New("stdout logging requires foreground operation")
 	}
@@ -318,9 +322,9 @@ func openLog(settings policy.Settings, foreground bool, stdout io.Writer) (*logg
 		l.destinations = append(l.destinations, "file")
 	}
 	if foreground {
-		l.out = stdout
-		_ = l.queue.Register("stdout", &logOutput{out: stdout})
-		l.destinations = append(l.destinations, "stdout")
+		l.out = console
+		_ = l.queue.Register(consoleName, &logOutput{out: console})
+		l.destinations = append(l.destinations, consoleName)
 	}
 	return l, nil
 }
@@ -343,17 +347,7 @@ func (l *logger) write(record any) error {
 	line = append(line, '\n')
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
-	if l.queue == nil {
-		l.queue, _ = sink.NewQueue(logQueueBytes)
-		if l.file != nil {
-			_ = l.queue.Register("file", &logOutput{out: l.file})
-			l.destinations = append(l.destinations, "file")
-		}
-		if l.out != nil {
-			_ = l.queue.Register("stdout", &logOutput{out: l.out})
-			l.destinations = append(l.destinations, "stdout")
-		}
-	}
+	l.prepareLocked()
 	var errs []error
 	for _, name := range l.destinations {
 		if err := l.queue.Enqueue(name, append([]byte(nil), line...)); err != nil {
@@ -613,7 +607,8 @@ func startFailed(session string, at time.Time, err error) failedStart {
 }
 
 // stopped is the record a session leaves as it ends: whether it sealed, where
-// its account is, and why not where it did not.
+// its account is, and why not where it did not. It follows account publication
+// and is the sole operational record outside the account's frozen log counts.
 type stopped struct {
 	Record   string    `json:"record"`
 	Version  int       `json:"version"`

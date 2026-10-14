@@ -92,9 +92,10 @@ func zstdDeclaresMore(b []byte, read int, limit uint64) bool {
 
 // zstdFramesEnd walks the frames at the start of b by their headers alone
 // (RFC 8878 section 3.1) and returns the offset where the last complete frame
-// ends. The decoder has already accepted every frame up to the end of its
-// stream; the walk finds what it accepted without consuming, since it reads
-// a lone byte after the last frame as the end of the stream.
+// ends. This is an additional framing check after the decoder accepts the
+// stream. The pinned decoder's streaming reader already rejects a lone
+// trailing byte: readerWrapper.readSmall turns EOF while reading the rest of
+// the frame magic into io.ErrUnexpectedEOF, which frameDec.reset rejects.
 func zstdFramesEnd(b []byte) int {
 	end := 0
 	for {

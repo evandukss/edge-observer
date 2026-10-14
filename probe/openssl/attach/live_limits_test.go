@@ -5,6 +5,8 @@ package attach_test
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
@@ -126,11 +128,7 @@ func TestTheAdmissionLimitCostsConnectionsAndTheSessionGoesOn(t *testing.T) {
 			if holding := liveHolding(t, c.directory, secret); len(holding) != 0 {
 				t.Errorf("the credential reached %v", holding)
 			}
-			files := liveFiles(t, s.directory(c))
-			slices.Sort(files)
-			if want := []string{"account.json", "contract-account.json"}; !slices.Equal(files, want) {
-				t.Errorf("the session directory holds %v, want only %v: approved output is at its stable path", files, want)
-			}
+			liveLimitSessionFiles(t, s, c, sealed)
 			if !limited {
 				if sealed.Seen.GateRefused != 0 {
 					t.Errorf("the control refused %d events under the default allowance", sealed.Seen.GateRefused)
@@ -208,12 +206,45 @@ func TestAFullVolatileIntakeCostsConnectionsAndTheSessionGoesOn(t *testing.T) {
 	if sealed.Processing == nil || sealed.Processing.GateReason != "" {
 		t.Errorf("the account gives %+v as a reason the session ended; it was stopped", sealed.Processing)
 	}
-	files := liveFiles(t, s.directory(c))
-	slices.Sort(files)
-	if want := []string{"account.json", "contract-account.json"}; !slices.Equal(files, want) {
-		t.Errorf("the session directory holds %v, want only %v: approved output is at its stable path", files, want)
-	}
+	liveLimitSessionFiles(t, s, c, sealed)
 	if holding := liveHolding(t, c.directory, "liv-intake-secret"); len(holding) != 0 {
 		t.Errorf("the credential reached %v", holding)
 	}
+}
+
+// The terminal receipt is command control state. It is allowed beside the two
+// accounts only when it describes this successful stop and this session's seal;
+// the control directory is still included in the exact no-extra-files check.
+func liveLimitSessionFiles(t *testing.T, s *liveSession, c configured, sealed account.Account) {
+	t.Helper()
+	directory := s.directory(c)
+	files := liveFiles(t, directory)
+	slices.Sort(files)
+	if want := []string{"account.json", "contract-account.json", "control/stop-result.json"}; !slices.Equal(files, want) {
+		t.Errorf("the session directory holds %v, want only %v: approved output is at its stable path", files, want)
+	}
+	if sealed.Version != account.Version || sealed.Kind != account.Sealed || sealed.Session != s.session ||
+		sealed.Seal == nil || sealed.Seal.Sealed.IsZero() || !sealed.Seal.Complete || sealed.SealError != "" {
+		t.Fatalf("the successful stop has no valid complete seal for session %s: %+v", s.session, sealed)
+	}
+	content, err := os.ReadFile(filepath.Join(directory, "control", "stop-result.json"))
+	if err != nil {
+		t.Fatalf("read the stop receipt: %v", err)
+	}
+	var receipt struct {
+		Session string    `json:"session"`
+		Sealed  time.Time `json:"sealed"`
+		Outcome string    `json:"outcome"`
+		Error   string    `json:"error"`
+	}
+	if err := json.Unmarshal(content, &receipt); err != nil {
+		t.Fatalf("decode the stop receipt: %v", err)
+	}
+	if receipt.Session != s.session || !receipt.Sealed.Equal(sealed.Seal.Sealed) ||
+		receipt.Outcome != "complete" || receipt.Error != "" {
+		t.Errorf("stop receipt %+v does not describe the successful stop of session %s sealed at %s",
+			receipt, s.session, sealed.Seal.Sealed)
+	}
+	t.Logf("stop receipt session %s, sealed %s, outcome %s, error %q",
+		receipt.Session, receipt.Sealed, receipt.Outcome, receipt.Error)
 }

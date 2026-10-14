@@ -327,7 +327,7 @@ func (d *daemon) reload(at time.Time, body []byte) reloadRecord {
 		admit.Admit = append(admit.Admit, one)
 		admit.Read[p.PID] = read
 		attempts[p.PID] = attachment.Attempt{Process: p, Admitted: one, Alive: true, Support: read.Report,
-			Catalogued: catalogued()}
+			Catalogued: cataloguedFor(read.Report)}
 	}
 
 	if len(admit.Processes) > 0 {
@@ -357,17 +357,28 @@ func (d *daemon) reload(at time.Time, body []byte) reloadRecord {
 			kept = append(kept, one)
 		}
 		if len(taken) > 0 {
-			admitting.Retract(taken)
+			if admitted.Retract != nil {
+				admitted.Retract(taken)
+			} else {
+				admitting.Retract(taken)
+			}
 		}
 		record.Admitted = len(kept)
 		for _, one := range kept {
 			attempt := attempts[one.ObserverPID]
 			attempt.Admitted = one
-			if attested, canAttest := d.attached.(probe.Attested); canAttest {
+			owner := d.attached
+			if grouped, ok := owner.(*attachment.Group); ok {
+				owner, attempt.Err = grouped.ForProcess(one.ObserverPID)
+			}
+			if owner != nil {
+				attempt.Capability = owner.Capability()
+			}
+			if attested, canAttest := owner.(probe.Attested); canAttest {
 				attempt.Attested = true
 				attempt.Placements, attempt.Err = attested.Placements(one.ObserverPID)
 			}
-			if covering, can := d.attached.(probe.Covering); can {
+			if covering, can := owner.(probe.Covering); can {
 				if capability, err := covering.Capable(one.ObserverPID); err == nil {
 					attempt.Capability = capability
 				}
@@ -404,10 +415,12 @@ func (d *daemon) reload(at time.Time, body []byte) reloadRecord {
 	return record
 }
 
+type selectionResolver func(process.Approval) (process.Resolution, process.Table, error)
+
 // readForReload is the reload command reading the candidate for the running
 // session, with the privileges that session dropped.
-func readForReload(candidate policy.Policy) (reloadRequest, error) {
-	resolution, table, err := resolve(candidate.Approval)
+func readForReload(candidate policy.Policy, resolveSelection selectionResolver) (reloadRequest, error) {
+	resolution, table, err := resolveSelection(candidate.Approval)
 	if err != nil {
 		return reloadRequest{}, err
 	}
@@ -424,12 +437,11 @@ func readForReload(candidate policy.Policy) (reloadRequest, error) {
 			continue
 		}
 		request.Processes = append(request.Processes, p)
-		// Re-checked fields are read first and the executable again last, so an exec
-		// between resolution and this reading is caught here.
+		// Bracket library and network discovery with determined process identity.
+		// These readings detect observed changes, not an atomic host snapshot.
 		exec, err := process.ReadExec(procfs, p.PID)
-		if err != nil || exec.StartTime != p.StartTime {
-			request.Unread[p.PID] = "it exited or its pid was reused while the reload command read it"
-			continue
+		if err != nil || p.StartTime == 0 || exec.StartTime != p.StartTime {
+			return reloadRequest{}, fmt.Errorf("pid %d (%s): process identity changed or is undetermined during reload reading", p.PID, p.Executable)
 		}
 		if exec.ArgumentEvidence != process.ArgumentsKnown || exec.Cmdline == "" {
 			return reloadRequest{}, process.ArgumentsRefusal{PID: p.PID, Executable: p.Executable,
@@ -437,7 +449,7 @@ func readForReload(candidate policy.Policy) (reloadRequest, error) {
 		}
 		reading := probe.Reading{Report: catalog.Inspect(p), Exec: exec}
 		if reading.Report.Supported {
-			library, libc, err := adapter.Identify(p, reading.Report)
+			library, libc, err := catalog.Identify(p, reading.Report)
 			if err != nil {
 				request.Unread[p.PID] = "the reload command could not name the libraries it runs: " + err.Error()
 				continue
@@ -447,19 +459,51 @@ func readForReload(candidate policy.Policy) (reloadRequest, error) {
 		if device, inode, err := process.Network(procfs, p.PID); err == nil {
 			reading.Network = probe.Netns{Device: device, Inode: inode}
 		}
-		again, err := os.Readlink(filepath.Join(procfs, strconv.Itoa(int(p.PID)), "exe"))
-		if err != nil || again != p.Executable {
-			request.Unread[p.PID] = "it execed while the reload command read it"
-			continue
+		if why, same := reloadIdentityUnchanged(procfs, p, reading); !same {
+			return reloadRequest{}, fmt.Errorf("pid %d (%s): reload reading refused: %s", p.PID, p.Executable, why)
 		}
 		request.Read[p.PID] = reading
 	}
 	return request, nil
 }
 
+// reloadIdentityUnchanged checks the closing identity of a command reading.
+func reloadIdentityUnchanged(root string, p process.Process, read probe.Reading) (string, bool) {
+	if p.StartTime == 0 || p.Namespace.Device == 0 || p.Namespace.Inode == 0 ||
+		p.NamespacePID <= 0 || p.Numbering == process.NumberingUnknown {
+		return "the original birth or pid namespace is undetermined", false
+	}
+	againProcess, err := process.Identify(root, p.PID)
+	if err != nil {
+		return fmt.Sprintf("the closing process identity could not be read: %v", err), false
+	}
+	if againProcess.StartTime == 0 || againProcess.StartTime != p.StartTime ||
+		againProcess.Namespace != p.Namespace || againProcess.NamespacePID != p.NamespacePID ||
+		againProcess.Numbering != p.Numbering || againProcess.Executable != p.Executable {
+		return "the birth, pid namespace or executable changed during the reload command reading", false
+	}
+	if againProcess.ArgumentEvidence != process.ArgumentsKnown {
+		return "the closing command line is undetermined", false
+	}
+	// ReadExec closes the namespace reading too: Identify reads namespace fields
+	// after its internal argv identity check. A changed birth cannot bridge them.
+	if why, same := unchanged(root, p, read); !same {
+		return why, false
+	}
+	again, err := os.Readlink(filepath.Join(root, strconv.Itoa(int(p.PID)), "exe"))
+	if err != nil || again != p.Executable {
+		return "it execed while the reload command read it", false
+	}
+	return "", true
+}
+
 // reloadCommand reads the running session's configuration with this command's
 // privileges and asks the session to put in force what it adds.
 func reloadCommand(path string, stdout io.Writer) error {
+	return reloadCommandWithResolver(path, stdout, resolve)
+}
+
+func reloadCommandWithResolver(path string, stdout io.Writer, resolveSelection selectionResolver) error {
 	read, err := loadProcessing(path)
 	if err != nil {
 		return err
@@ -467,7 +511,7 @@ func reloadCommand(path string, stdout io.Writer) error {
 	if _, _, err := holder(read.Settings.Directory); err != nil {
 		return err
 	}
-	request, err := readForReload(read)
+	request, err := readForReload(read, resolveSelection)
 	if err != nil {
 		return err
 	}

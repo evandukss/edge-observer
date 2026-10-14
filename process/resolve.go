@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/evandukss/edge-observer/admission"
 )
@@ -58,6 +59,38 @@ type ListeningSocket struct {
 type Listeners struct {
 	Sockets    []ListeningSocket
 	Unreadable []int32
+	owners     map[int32]listenerOwner
+}
+
+type listenerOwner struct {
+	start      uint64
+	executable string
+	changed    bool
+	err        error
+}
+
+type listenerProblem struct {
+	process Process
+	socket  ListeningSocket
+	changed bool
+	detail  string
+}
+
+func readListenerOwner(root string, pid int32) listenerOwner {
+	directory := filepath.Join(root, strconv.Itoa(int(pid)))
+	stat, err := os.ReadFile(filepath.Join(directory, "stat"))
+	if err != nil {
+		return listenerOwner{err: err}
+	}
+	_, start, _, err := parseStat(stat)
+	if err != nil {
+		return listenerOwner{err: err}
+	}
+	if start == 0 {
+		return listenerOwner{err: errors.New("birth is undetermined")}
+	}
+	executable, err := os.Readlink(filepath.Join(directory, "exe"))
+	return listenerOwner{start: start, executable: executable, err: err}
 }
 
 // listenState is TCP_LISTEN as /proc/net/tcp writes it.
@@ -68,12 +101,22 @@ const listenState = "0A"
 // each. Another namespace's same port is an unrelated socket. Holders are found
 // by socket inode in their descriptor tables, whatever their namespace.
 func ReadListeners(root string) (Listeners, error) {
+	return readListeners(root, time.Time{})
+}
+
+func readListeners(root string, deadline time.Time) (Listeners, error) {
 	var sockets []ListeningSocket
 	for _, table := range []struct {
 		name     string
 		required bool
 	}{{"tcp", true}, {"tcp6", false}} {
+		if err := checkResolutionDeadline(deadline); err != nil {
+			return Listeners{}, err
+		}
 		found, err := listeningIn(filepath.Join(root, "net", table.name))
+		if expired := checkResolutionDeadline(deadline); expired != nil {
+			return Listeners{}, expired
+		}
 		if errors.Is(err, fs.ErrNotExist) && !table.required {
 			// A kernel without IPv6 publishes no tcp6 table.
 			continue
@@ -89,16 +132,24 @@ func ReadListeners(root string) (Listeners, error) {
 		at[one.Inode] = i
 	}
 
+	if err := checkResolutionDeadline(deadline); err != nil {
+		return Listeners{}, err
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return Listeners{}, fmt.Errorf("read %s: %w", root, err)
 	}
 	var unreadable []int32
+	owners := make(map[int32]listenerOwner)
 	for _, entry := range entries {
 		pid, err := strconv.ParseInt(entry.Name(), 10, 32)
 		if err != nil {
 			continue
 		}
+		if err := checkResolutionDeadline(deadline); err != nil {
+			return Listeners{}, err
+		}
+		before := readListenerOwner(root, int32(pid))
 		directory := filepath.Join(root, entry.Name(), "fd")
 		descriptors, err := os.ReadDir(directory)
 		if errors.Is(err, fs.ErrNotExist) {
@@ -114,6 +165,7 @@ func ReadListeners(root string) (Listeners, error) {
 		// another user's process refuses without CAP_SYS_PTRACE. So an unreadable link
 		// makes the table unreadable; only a vanished link is skipped.
 		refused := false
+		var held []int
 		for _, descriptor := range descriptors {
 			target, err := os.Readlink(filepath.Join(directory, descriptor.Name()))
 			if err != nil {
@@ -128,11 +180,30 @@ func ReadListeners(root string) (Listeners, error) {
 				continue
 			}
 			if index, listening := at[inode]; listening {
+				held = append(held, index)
+			}
+		}
+		if len(held) != 0 {
+			after := readListenerOwner(root, int32(pid))
+			owner := before
+			if before.err == nil {
+				owner.changed = os.IsNotExist(after.err) || (after.err == nil &&
+					(before.start != after.start || before.executable != after.executable))
+				owner.err = after.err
+			}
+			owners[int32(pid)] = owner
+			for _, index := range held {
 				sockets[index].Owners = append(sockets[index].Owners, int32(pid))
 			}
 		}
+		if err := checkResolutionDeadline(deadline); err != nil {
+			return Listeners{}, err
+		}
 	}
-	return Listeners{Sockets: sockets, Unreadable: unreadable}, nil
+	if err := checkResolutionDeadline(deadline); err != nil {
+		return Listeners{}, err
+	}
+	return Listeners{Sockets: sockets, Unreadable: unreadable, owners: owners}, nil
 }
 
 // socketInode reads the inode out of a descriptor link the kernel writes as
@@ -235,8 +306,29 @@ func TableOf(processes ...Process) Table {
 // keeping the reading so an unresolved port can say why.
 func (t Table) WithListeners(listeners Listeners) Table {
 	held := make(map[int32][]Listener)
+	var problems []listenerProblem
 	for _, socket := range listeners.Sockets {
 		for _, owner := range socket.Owners {
+			if listeners.owners != nil {
+				p, present := t.Lookup(owner)
+				if !present {
+					continue
+				}
+				identity, known := listeners.owners[owner]
+				problem := listenerProblem{process: p, socket: socket}
+				switch {
+				case identity.changed:
+					problem.changed, problem.detail = true, "the listener owner changed or exited during its descriptor read"
+				case !known || identity.err != nil || p.StartTime == 0:
+					problem.detail = "the listener owner's birth and executable could not be established"
+				case p.StartTime != identity.start || p.Executable != identity.executable:
+					problem.changed, problem.detail = true, "the listener owner differs from the process snapshot"
+				}
+				if problem.detail != "" {
+					problems = append(problems, problem)
+					continue
+				}
+			}
 			held[owner] = append(held[owner], socket.Listener)
 		}
 	}
@@ -248,7 +340,28 @@ func (t Table) WithListeners(listeners Listeners) Table {
 	table := TableOf(processes...)
 	table.listeners = &listeners
 	table.unreadable = t.unreadable
+	table.listenerProblems = problems
 	return table
+}
+
+// A port inclusion or exclusion may depend on this owner. A mismatch rebuilds;
+// an unread identity refuses. Neither supplies a listener to the wrong birth.
+func (a Approval) listenerEvidence(t Table) error {
+	for _, problem := range t.listenerProblems {
+		for _, rules := range [][]Rule{a.Rules, a.Exclusions} {
+			for _, rule := range rules {
+				if rule.Port == 0 || len(rule.sockets(Listeners{Sockets: []ListeningSocket{problem.socket}})) == 0 {
+					continue
+				}
+				p := problem.process
+				if problem.changed {
+					return candidateChanged{ArgumentsRefusal{PID: p.PID, Executable: p.Executable, Detail: problem.detail}}
+				}
+				return fmt.Errorf("pid %d (%s): listener ownership undetermined: %s", p.PID, p.Executable, problem.detail)
+			}
+		}
+	}
+	return nil
 }
 
 // Host is everything a resolution reads besides the policy: processes, boot,

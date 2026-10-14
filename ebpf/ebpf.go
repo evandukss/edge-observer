@@ -80,6 +80,26 @@ type Options struct {
 	// inventory. It runs without the session lock; production leaves it nil.
 	BeforeRecord func(Event)
 
+	// BeforeRetireGrants holds Grants after it has computed the grant and ended
+	// snapshots, before it applies any retirement. It runs without the session
+	// lock and does not receive mutable snapshots. Production leaves it nil.
+	BeforeRetireGrants func()
+
+	// BeforeDeleteAdmission holds a guarded allowlist deletion after its final
+	// matching lookup, immediately before the atomic take. Operation is "stale_denial",
+	// "retract", "admit_rollback", or "sweep"; key includes the generation read
+	// by that lookup, not a later occupant's. It preserves the caller's locks:
+	// "retract" holds the session lock, so its hook must not call Session methods
+	// that acquire that lock. Production leaves it nil.
+	BeforeDeleteAdmission func(operation string, key admission.Key)
+
+	// AfterTakeAdmission runs after a successful atomic take, before any restore.
+	// Key names the expected generation; matched compares the taken birth and
+	// generation with the expected occupant. Operations and caller locks are the
+	// same as BeforeDeleteAdmission, including Retract's session lock. Production
+	// leaves this hook nil. There is no secondary take or post-restore callback.
+	AfterTakeAdmission func(operation string, key admission.Key, matched bool)
+
 	// Program is the embedded program to load: full or metadata-only.
 	Program obpf.Program
 
@@ -378,8 +398,11 @@ type Origin struct {
 
 // Session is a loaded program, its links, and the events they report.
 type Session struct {
-	beforeRecord    func(Event)
-	retractedEvents atomic.Int64
+	beforeRecord          func(Event)
+	beforeRetireGrants    func()
+	beforeDeleteAdmission func(string, admission.Key)
+	afterTakeAdmission    func(string, admission.Key, bool)
+	retractedEvents       atomic.Int64
 
 	collection *ebpf.Collection
 	links      []link.Link
@@ -421,9 +444,9 @@ type Session struct {
 	enumerated []admission.Namespace
 
 	// excluded is what the caller denied and denied what went into the map for
-	// it, so nothing admitted later can take those keys.
+	// it, qualified by birth so a later occupant does not inherit the denial.
 	excluded []admission.Denial
-	denied   map[instanceKey]bool
+	denied   map[instanceKey]admission.Start
 
 	// skipReturn names functions whose return probe is deliberately not placed, a
 	// test seam for a return that never fires (Options.SkipReturn).
@@ -437,7 +460,8 @@ type Session struct {
 	// placed, a test seam for the partial-placement refusal (Options.FailEntry).
 	failEntry map[string]bool
 
-	// namedBy is every target that named an instance; the allowlist holds one.
+	// namedBy belongs to the generation in index/inventory under the same key.
+	// Replacement and retirement remove both together under held.
 	namedBy map[instanceKey][]admission.Provenance
 
 	// indexChurn and namedByChurn shed what the ends of executions
@@ -610,13 +634,16 @@ func Attach(options Options) (*Session, error) {
 		staging = options.Staging
 	}
 	session := &Session{
-		beforeRecord:  options.BeforeRecord,
-		monotonicBase: pairClocks(),
-		collection:    collection,
-		events:        make(chan Event, staging),
-		done:          make(chan struct{}),
-		idle:          make(chan struct{}, 1),
-		stopped:       make(chan struct{}),
+		beforeRecord:          options.BeforeRecord,
+		beforeRetireGrants:    options.BeforeRetireGrants,
+		beforeDeleteAdmission: options.BeforeDeleteAdmission,
+		afterTakeAdmission:    options.AfterTakeAdmission,
+		monotonicBase:         pairClocks(),
+		collection:            collection,
+		events:                make(chan Event, staging),
+		done:                  make(chan struct{}),
+		idle:                  make(chan struct{}, 1),
+		stopped:               make(chan struct{}),
 	}
 
 	session.excluded = options.Deny
@@ -871,7 +898,7 @@ func (s *Session) authorise(who []admission.Selection) error {
 	}
 
 	for _, one := range who {
-		if s.denied[keyOf(one.Instance)] {
+		if s.denies(one.Instance) {
 			// A denial is already under this key; writing the admission would overwrite
 			// it.
 			s.refuse(one, ExcludedBySubtree, fmt.Errorf(
@@ -888,7 +915,7 @@ func (s *Session) authorise(who []admission.Selection) error {
 				one.Instance.Namespace))
 			continue
 		}
-		if held, already := s.namedBy[keyOf(one.Instance)]; already {
+		if held, already := s.namedBy[keyOf(one.Instance)]; already && s.recordedBirth(one.Instance) {
 			// A grant is already under this key, with its own generation and reasons.
 			// Refused rather than overwritten, so no reason is silently lost.
 			s.refuse(one, NamedTwice, fmt.Errorf(
@@ -920,12 +947,7 @@ func (s *Session) authorise(who []admission.Selection) error {
 		if err := allowed.Update(keyOf(granted.Instance), value, ebpf.UpdateAny); err != nil {
 			return fmt.Errorf("%w: admit pid %d: %v", ErrUnavailable, granted.Instance.PID, err)
 		}
-		s.accepted = append(s.accepted, granted)
-		s.recorded(granted)
-		if s.namedBy == nil {
-			s.namedBy = make(map[instanceKey][]admission.Provenance)
-		}
-		s.namedBy[keyOf(granted.Instance)] = granted.NamedBy()
+		s.recordAdmission(granted)
 	}
 
 	if len(s.accepted) == 0 {
@@ -963,7 +985,7 @@ func liveThreads(threads int32) uint32 {
 // by both finds the denial in its key. A denied entry carries no mode: the
 // instance has no grant and what it forks is denied.
 func (s *Session) deny(allowed *ebpf.Map) error {
-	s.denied = make(map[instanceKey]bool, len(s.excluded))
+	s.denied = make(map[instanceKey]admission.Start, len(s.excluded))
 	for _, one := range s.excluded {
 		if !s.resolvable(one.Instance.Namespace) {
 			s.refuseDenial(one, NamespaceUnenumerated, fmt.Errorf(
@@ -972,9 +994,19 @@ func (s *Session) deny(allowed *ebpf.Map) error {
 				one.Instance.PID, one.Instance.Namespace))
 			continue
 		}
+		selected := admission.Selection{Instance: one.Instance, ObserverPID: one.ObserverPID}
+		if reason, err := s.confirm(selected); err != nil {
+			s.refuseDenial(one, reason, err)
+			if reason == GoneBeforeAdmission || reason == IdentityChanged {
+				continue
+			}
+			return fmt.Errorf("%w: cannot establish the excluded instance: %v", ErrNotAuthorised, err)
+		}
+
 		s.generations++
 		value := admissionValue{
 			Generation: uint64(s.generations),
+			Birth:      uint64(one.Instance.Start.Ticks),
 			Target:     uint32(one.Provenance.Number),
 			Rule:       uint32(one.Provenance.Rule),
 			Threads:    liveThreads(s.threadsOf(one.ObserverPID)),
@@ -990,7 +1022,7 @@ func (s *Session) deny(allowed *ebpf.Map) error {
 		if err := allowed.Update(key, value, ebpf.UpdateAny); err != nil {
 			return fmt.Errorf("%w: deny pid %d: %v", ErrUnavailable, one.Instance.PID, err)
 		}
-		s.denied[key] = true
+		s.denied[key] = one.Instance.Start
 	}
 	return nil
 }
@@ -1237,9 +1269,9 @@ func (s *Session) adopt() error {
 	}
 
 	who := s.accepted
-	named := make(map[instanceKey]bool, len(who))
+	named := make(map[instanceKey]admission.Start, len(who))
 	for _, one := range who {
-		named[keyOf(one.Instance)] = true
+		named[keyOf(one.Instance)] = one.Instance.Start
 	}
 
 	var adopted []admission.Selection
@@ -1247,6 +1279,12 @@ func (s *Session) adopt() error {
 		// Descendants already running are covered by existing and follow, not by
 		// none. Only this walk finds them; the fork hook sees later creations only.
 		if !one.Mode.Answers().Existing {
+			continue
+		}
+		// This table was read after authorisation. A new occupant's children
+		// cannot inherit the former occupant's approval.
+		parent, present := table.Lookup(one.ObserverPID)
+		if !present || !confirms(parent, one.Instance) {
 			continue
 		}
 		for _, below := range table.Descendants(one.ObserverPID) {
@@ -1265,7 +1303,7 @@ func (s *Session) adopt() error {
 					ErrNotAuthorised, below.PID, one.ObserverPID, child.Namespace))
 				continue
 			}
-			if named[keyOf(child)] || s.denied[keyOf(child)] {
+			if start, found := named[keyOf(child)]; (found && start == child.Start) || s.denies(child) {
 				continue
 			}
 			if below.ArgumentEvidence != process.ArgumentsKnown {
@@ -1314,7 +1352,7 @@ func (s *Session) adopt() error {
 				return fmt.Errorf("%w: admit pid %d below pid %d: %v",
 					ErrUnavailable, below.PID, one.ObserverPID, err)
 			}
-			named[keyOf(child)] = true
+			named[keyOf(child)] = child.Start
 			s.recorded(inherited)
 			adopted = append(adopted, inherited)
 		}
@@ -1405,9 +1443,18 @@ func (s *Session) sweep(allowed *ebpf.Map, adopted []admission.Selection) error 
 		if alive && confirms(still, one.Instance) {
 			continue
 		}
-		if err := allowed.Delete(keyOf(one.Instance)); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return fmt.Errorf("%w: withdraw pid %d, which is not the process it was admitted as: %v",
-				ErrUnavailable, one.ObserverPID, err)
+		// The sweep holds a prior snapshot. A fork hook may already have
+		// installed a successor, which is not this adoption's to withdraw.
+		var current admissionValue
+		err := allowed.Lookup(keyOf(one.Instance), &current)
+		if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("%w: read adopted pid %d: %v", ErrUnavailable, one.ObserverPID, err)
+		}
+		if err == nil && current.Generation == uint64(one.Instance.Generation) {
+			if _, err := s.deleteAdmission(allowed, "sweep", keyOf(one.Instance), current); err != nil {
+				return fmt.Errorf("%w: withdraw pid %d, which is not the process it was admitted as: %v",
+					ErrUnavailable, one.ObserverPID, err)
+			}
 		}
 		// Withdrawn and said so: a descendant that finished between the readings is
 		// not the same absence as one never eligible.
@@ -1814,6 +1861,7 @@ func (s *Session) Denials() ([]admission.Denial, error) {
 				Namespace:  admission.Namespace{Device: key.NamespaceDevice, Inode: key.NamespaceInode},
 				PID:        int32(key.PID),
 				Generation: admission.Generation(value.Generation),
+				Start:      birth(value.Birth),
 			},
 			Provenance: admission.Provenance{
 				Number: int(value.Target),
@@ -1825,8 +1873,7 @@ func (s *Session) Denials() ([]admission.Denial, error) {
 				},
 			},
 		}
-		if p, found := located[key]; found {
-			one.Instance.Start = p.Start()
+		if p, found := located[key]; found && confirms(p, one.Instance) {
 			one.Instance.Executable = p.Executable
 			one.ObserverPID = p.PID
 		}
@@ -1838,26 +1885,27 @@ func (s *Session) Denials() ([]admission.Denial, error) {
 	return refused, nil
 }
 
-// recorded puts an instance into the inventory once, keeping the first record:
-// an authorised selection carries its mode, start and executable, which a later
-// event does not.
+// recorded keeps the first record of a generation: an authorised selection
+// carries evidence a later event does not. A different generation replaces the
+// predecessor only after the allowlist authenticates the incoming generation.
 func (s *Session) recorded(one admission.Selection) {
 	s.held.Lock()
-	defer s.held.Unlock()
-	s.recordedLocked(one)
+	ended := s.recordedLocked(one)
+	s.held.Unlock()
+	s.tellEnded(ended)
 }
 
 // recordedLocked is recorded with s.held already held.
-func (s *Session) recordedLocked(one admission.Selection) {
+func (s *Session) recordedLocked(one admission.Selection) *probe.Ended {
 	if s.collection != nil {
 		var grant admissionValue
 		allowed := s.collection.Maps["allowed_processes"]
 		if allowed == nil {
-			return
+			return nil
 		}
 		err := allowed.Lookup(keyOf(one.Instance), &grant)
 		if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return
+			return nil
 		}
 		if err != nil ||
 			grant.Generation != uint64(one.Instance.Generation) || grant.Kind == denied {
@@ -1869,18 +1917,60 @@ func (s *Session) recordedLocked(one admission.Selection) {
 			if s.inspect(one).Liveness == process.LivenessRunning {
 				s.retractedEvents.Add(1)
 			}
-			return
+			return nil
 		}
 	}
 	if s.index == nil {
 		s.index = make(map[instanceKey]int)
 	}
 	key := keyOf(one.Instance)
-	if _, already := s.index[key]; already {
-		return
+	var ended *probe.Ended
+	if i, already := s.index[key]; already {
+		prior := s.inventory[i].Instance
+		if prior.Generation == one.Instance.Generation || one.Instance.Generation == 0 {
+			return nil
+		}
+		ended = s.retireLocked(key, prior.Generation, "a different admission now occupies its process id", time.Now())
 	}
 	s.index[key] = len(s.inventory)
 	s.inventory = append(s.inventory, one)
+	return ended
+}
+
+// recordAdmission installs the provenance with the same generation as its
+// inventory entry. A grant that ended before recording leaves neither behind.
+func (s *Session) recordAdmission(one admission.Selection) {
+	s.held.Lock()
+	ended := s.recordedLocked(one)
+	if i, found := s.index[keyOf(one.Instance)]; found && s.inventory[i].Instance.Same(one.Instance) {
+		s.accepted = append(s.accepted, one)
+		if s.namedBy == nil {
+			s.namedBy = make(map[instanceKey][]admission.Provenance)
+		}
+		s.namedBy[keyOf(one.Instance)] = one.NamedBy()
+	}
+	s.held.Unlock()
+	s.tellEnded(ended)
+}
+
+// recordedBirth is used before admission, when the offered process has no
+// generation. Exec preserves birth, so it preserves the restart-only rule.
+func (s *Session) recordedBirth(one admission.Instance) bool {
+	s.held.Lock()
+	defer s.held.Unlock()
+	i, found := s.index[keyOf(one)]
+	return found && sameBirth(s.inventory[i].Instance, one)
+}
+
+func sameBirth(a, b admission.Instance) bool {
+	return keyOf(a) == keyOf(b) && a.Start.Determined && b.Start.Determined && a.Start == b.Start
+}
+
+// An unread denial cannot authorize a process it might exclude. Known births
+// distinguish a stale denial from a genuinely excluded successor.
+func (s *Session) denies(one admission.Instance) bool {
+	start, found := s.denied[keyOf(one)]
+	return found && (!start.Determined || !one.Start.Determined || start == one.Start)
 }
 
 // Inventory is every instance this session recorded a grant for: what authorise
@@ -1940,21 +2030,23 @@ func (s *Session) Withdrawn() ([]Withdrawal, error) {
 	if allowed == nil {
 		return nil, fmt.Errorf("%w: the program has no allowlist map", ErrUnavailable)
 	}
-	holds := make(map[instanceKey]bool)
+	holds := make(map[instanceKey]admission.Generation)
 	var (
 		key   instanceKey
 		value admissionValue
 	)
 	entries := allowed.Iterate()
 	for entries.Next(&key, &value) {
-		holds[key] = true
+		if value.Kind != denied {
+			holds[key] = admission.Generation(value.Generation)
+		}
 	}
 	if err := entries.Err(); err != nil {
 		return nil, fmt.Errorf("%w: read the allowlist back: %v", ErrUnavailable, err)
 	}
 	var gone []Withdrawal
 	for _, one := range s.Inventory() {
-		if holds[keyOf(one.Instance)] {
+		if generation, found := holds[keyOf(one.Instance)]; found && generation != 0 && generation == one.Instance.Generation {
 			continue
 		}
 		gone = append(gone, WhatBecameOf(one, s.inspect(one)))

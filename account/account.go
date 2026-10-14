@@ -381,6 +381,7 @@ type ExtensionCounts struct {
 // ExcludedExchanges is the exchanges processing excluded alone, by reason.
 // Its presence identifies a session that does not create a raw spool.
 type Processing struct {
+	StdoutDelivery     *sink.Stats      `json:"stdout_delivery,omitempty"`
 	Delivery           sink.Stats       `json:"delivery"`
 	GateReason         probe.GateReason `json:"gate_reason"`
 	ProcessingFailures uint64           `json:"processing_failures"`
@@ -907,6 +908,9 @@ func Render(to io.Writer, a Account, local bool) {
 		say("processed  %d route processing failures, %d output failures", p.ProcessingFailures, p.OutputFailures)
 		say("approved   %d route records authorized, %d written", p.Authorized, p.Written)
 		say("delivery   %d failed, %d dropped, %d pending; %d discarded at shutdown", p.Delivery.Failed, p.Delivery.Dropped, p.Delivery.Pending, p.Delivery.Discarded)
+		if d := p.StdoutDelivery; d != nil {
+			say("stdout     %d authorized, %d written, %d failed, %d dropped, %d pending; %d discarded at shutdown", d.Authorized, d.Written, d.Failed, d.Dropped, d.Pending, d.Discarded)
+		}
 		if p.GateReason != "" {
 			say("release    refused: %s", p.GateReason)
 		}

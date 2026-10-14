@@ -200,6 +200,9 @@ func unattempted(attempt Attempt) []string {
 	}
 	explained := make(map[string]bool)
 	for _, support := range attempt.Support.Support {
+		if attempt.Support.Supported && support.Adapter != attempt.Support.Adapter {
+			continue
+		}
 		for _, symbol := range support.Missing {
 			explained[symbol] = true
 		}
@@ -226,6 +229,9 @@ func runtime(report probe.Report) string {
 func uncatalogued(report probe.Report) []string {
 	var found []string
 	for _, support := range report.Support {
+		if report.Supported && support.Adapter != report.Adapter {
+			continue
+		}
 		found = append(found, support.Unknown...)
 	}
 	return found
@@ -234,6 +240,9 @@ func uncatalogued(report probe.Report) []string {
 func absent(report probe.Report) []string {
 	var found []string
 	for _, support := range report.Support {
+		if report.Supported && support.Adapter != report.Adapter {
+			continue
+		}
 		found = append(found, support.Missing...)
 	}
 	return found

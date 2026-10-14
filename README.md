@@ -195,6 +195,22 @@ Check what it would select, attaching nothing:
     ./observer dry-run observer.config.json --text
 
 A target that selected nothing says why. Fix the target until yours shows the process you meant.
+Selection is a reading of a changing host, not an atomic snapshot. If a candidate is established to
+have changed or exited during resolution, the observer rebuilds the selection, including listeners,
+ancestry and exclusions. At most three rebuilds share one second from the first established change.
+A procfs read already in flight can return later, but an over-budget selection is never accepted.
+Unreadable evidence and exhausted retries refuse the selection. On reload, a selection or identity
+resolution refusal before the reload request leaves the running session unchanged. This does not
+promise atomic preservation through later admission rollback or restore failures.
+
+Check which TLS library the selected process has mapped:
+
+    sudo awk '/libssl[.]so/ {print $NF}' /proc/<pid>/maps | sort -u
+
+Each supported process attaches through the adapter selected for it by the catalogue. Unsupported
+processes retain their reason in the account. If a selected adapter fails to attach, startup fails
+and closes any attachments already made. The shipped catalogue contains only the OpenSSL eBPF
+adapter; this routing does not add support for another TLS implementation.
 
 ### 2. Check the host
 
@@ -231,17 +247,27 @@ Launched the way preflight was:
 
     sudo systemd-run --scope -p MemoryMax=512M -p MemorySwapMax=0 ./observer start observer.config.json
 
-It runs in the foreground and prints one JSON record per line; its activation record, normally the
-first, says what it attached to. Now use the service you approved so traffic crosses it - nothing is
+It runs in the foreground and prints operational JSON records, one per line; its activation record,
+normally the first, says what it attached to. Now use the service you approved so traffic crosses it - nothing is
 observed on a quiet process. Each eligible exchange reaches `approved.jsonl` once its request and
 its response have both been read whole, while its connection is still open, so the last one before a
 connection goes idle is not held back. The connection's own line, with its final facts, comes when
 the connection ends - its TLS handle released or its socket closed - or when the session stops.
 
-**How soon.** Under a light load an exchange is written within 100 ms of the last library call that
-carried it, with a healthy output file, complete supported messages with uncompressed bodies, no
-capture loss, no extensions, and default limits with one worker. On one host with that traffic, over
-a two-minute interval of a ten-minute run at about 20 exchanges a second, all 2381 exchanges were
+To also stream the approved exchange and connection JSONL, run in the same memory envelope with
+`./observer start observer.config.json --stdout`. Configure `log` as an absolute file path first.
+Standard output carries only released approved lines, with the same bytes and release order as the
+approved-file delivery path; operational records go to stderr and the configured log file. Derived
+extension output is not mirrored. The two approved destinations deliver independently: a full,
+blocked or closed stdout pipe can lose its own lines without stopping capture or approved-file
+progress. Their separate delivery counts say what each accepted, failed or dropped. `--stdout` is
+foreground-only: `--daemonize --stdout`, `restart --stdout`, and `log: "stdout"` with `--stdout` are
+refused before session side effects; a refused restart leaves the live session running.
+
+**How soon.** Latency depends on the host, traffic and output destination. With a healthy output file,
+complete supported messages with uncompressed bodies, no capture loss, no extensions, and default
+limits with one worker, one host measured the following. Over a two-minute interval of a ten-minute
+run at about 20 exchanges a second, all 2381 exchanges were
 written within 100 ms, measured from the entry of that call to the successful write: median 6.6 ms,
 99th percentile 14.1 ms, maximum 16.8 ms. At about 135 exchanges a second the maximum was 22.9 ms,
 measured and not promised. Extensions add their own wait ([docs/extensions.md](docs/extensions.md)).
@@ -253,7 +279,14 @@ session's account as it stands; add `--session <session>` to see its approved re
 
 (or Ctrl-C in the first terminal) ends the run. `stop` prints the session it ended, whether it sealed
 completely, on the same line anything the account says was lost and why release was refused, and the
-path of the account it sealed.
+path of the account it sealed. The first stop notification, processing failure or capture-wide
+withdrawal starts one deadline, independently of the controller. Finalization work is decided within
+20 seconds, including the existing 5-second producer drain. Authorization and enqueue then close.
+The account is published, or its publication fails, and the daemon exits within 25 seconds; normal
+stops finish sooner. After signaling, the stop client uses one 30-second deadline to observe that
+the session ended. An unknown holder observation keeps it waiting against that same deadline;
+persistent uncertainty returns a timeout, not success. Synchronous reads can run beyond the deadline.
+Bytes already handed to the operating system may still land.
 
 For supervised operation, adapt [examples/systemd/observer.service](examples/systemd/observer.service).
 It runs the observer in its own finite memory domain with swap disabled and `Restart=on-failure`.
@@ -281,12 +314,21 @@ first seen after it has its exchanges written only if the observer saw its TLS h
 
 Two reasons end the capture: `unknown_length` and `unknown_kind`. Either one refuses every line not yet
 queued for writing, seals the account as it stands and exits with status 1. Startup errors, internal
-processing errors and failures to write the sealed account also exit nonzero. A normal operator
-stop exits zero after successful finalization. A supervisor restart starts a new session; its
-activation records the gap since the prior seal only when that session's matching sealed account
-is still readable. A missing or unreadable account does not imply a zero gap. A session killed before
-it sealed leaves no seal, so the next one's gap runs from the last session that sealed, across the
-killed one.
+processing errors and failures to write the sealed account also exit nonzero. A successful operator
+stop exits zero. A sealed INCOMPLETE account names the stage that failed or expired and the withdrawal
+outcome; both the daemon and `stop` exit nonzero. Failure to publish the session's account leaves it
+unsealed. Failure to publish the projection or last-seal pointer after the account is published keeps
+the seal, but also makes the daemon and `stop` exit nonzero.
+
+The session's own validated account is its seal. All final facts, including log delivery counts, are
+prepared before publication; the account is never rewritten afterwards. The projection follows it,
+then the last-seal pointer, which serves discovery only. The final `stopped` log record reports the
+actual publication outcome and is the sole record outside those frozen log counts. `stop` validates the session it actually
+stopped by its own directory. Inspecting an earlier or copied session does not depend on the pointer.
+
+A new session's activation record names the last validated seal found, its time and the new activation
+time. Coverage in between is not established. An observing session that ended without sealing may
+have run in that interval; the gap text never claims that nothing was observed.
 
 ### 4. Inspect
 

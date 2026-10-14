@@ -34,6 +34,7 @@ type Process struct {
 	// including a rewrite and its trailing padding; matching strips the padding.
 	Arguments        []string
 	ArgumentEvidence ArgumentEvidence `json:",omitempty"`
+	argumentChanged  bool
 
 	// Cgroup is the process's path on the unified (v2) hierarchy from
 	// /proc/<pid>/cgroup, empty where none. A process cannot rewrite it, and it is
@@ -131,7 +132,8 @@ type Table struct {
 
 	// unreadable is every process whose executable this reader was refused, as
 	// against one that has none.
-	unreadable []int32
+	unreadable       []int32
+	listenerProblems []listenerProblem
 }
 
 func (t Table) All() []Process { return t.processes }
@@ -152,6 +154,13 @@ func (t Table) Lookup(pid int32) (Process, bool) {
 // host). A process that exits mid-read is skipped; a root that cannot be
 // listed is an error, not an empty host.
 func Read(root string) (Table, error) {
+	return readTable(root, time.Time{}, nil)
+}
+
+func readTable(root string, deadline time.Time, changed func(Process) error) (Table, error) {
+	if err := checkResolutionDeadline(deadline); err != nil {
+		return Table{}, err
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return Table{}, fmt.Errorf("read %s: %w", root, err)
@@ -163,13 +172,24 @@ func Read(root string) (Table, error) {
 		if err != nil {
 			continue
 		}
+		if err := checkResolutionDeadline(deadline); err != nil {
+			return Table{}, err
+		}
 		p, err := readProcess(root, int32(pid))
+		if expired := checkResolutionDeadline(deadline); expired != nil {
+			return Table{}, expired
+		}
 		if _, closed := err.(unreadableLink); closed {
 			table.unreadable = append(table.unreadable, int32(pid))
 			continue
 		}
 		if err != nil {
 			continue
+		}
+		if changed != nil {
+			if err := changed(p); err != nil {
+				return Table{}, err
+			}
 		}
 		table.processes = append(table.processes, p)
 		table.byPID[p.PID] = p
@@ -180,6 +200,66 @@ func Read(root string) (Table, error) {
 		return Table{}, fmt.Errorf("read %s: no process is readable, not even the reader", root)
 	}
 	return table, nil
+}
+
+// ResolveFrom reads and resolves a complete host snapshot under root.
+func (a Approval) ResolveFrom(root string) (Resolution, Table, error) {
+	return a.ResolveWith(ResolutionReader{
+		Snapshot: func(deadline time.Time) (Host, error) { return a.readHost(root, deadline) },
+		Process:  func(pid int32) (Process, error) { return readProcess(root, pid) },
+	})
+}
+
+func (approval Approval) readHost(root string, deadline time.Time) (Host, error) {
+	table, err := readTable(root, deadline, approval.changingCandidate)
+	if err != nil {
+		return Host{}, err
+	}
+	names := func(has func(Rule) bool) bool {
+		return slices.ContainsFunc(approval.Rules, has) || slices.ContainsFunc(approval.Exclusions, has)
+	}
+	if names(func(rule Rule) bool { return rule.Port != 0 }) {
+		listeners, err := readListeners(root, deadline)
+		if err != nil {
+			return Host{}, fmt.Errorf("read the listening sockets a port "+
+				"resolves against: %w", err)
+		}
+		table = table.WithListeners(listeners)
+	}
+	host := Host{Table: table}
+	if names(func(rule Rule) bool { return rule.PID != nil }) {
+		if err := checkResolutionDeadline(deadline); err != nil {
+			return Host{}, err
+		}
+		if boot, err := ReadBoot(root); err == nil {
+			host.Boot = boot
+		}
+	}
+	return host, checkResolutionDeadline(deadline)
+}
+
+func (a Approval) changingCandidate(p Process) error {
+	if !p.argumentChanged {
+		return nil
+	}
+	for _, rules := range [][]Rule{a.Rules, a.Exclusions} {
+		for _, rule := range rules {
+			// Listening evidence is read after processes. Do not discard a
+			// changed potential port owner merely because it is not read yet.
+			if rule.Port != 0 {
+				rule.Port, rule.Interface = 0, ""
+				if !rule.conditions() {
+					return candidateChanged{ArgumentsRefusal{PID: p.PID, Executable: p.Executable,
+						Detail: "the potential listener owner changed during the snapshot read"}}
+				}
+			}
+			if rule.Decide(p) != NoMatch {
+				return candidateChanged{ArgumentsRefusal{PID: p.PID, Executable: p.Executable,
+					Detail: "the candidate changed or exited during the snapshot read"}}
+			}
+		}
+	}
+	return nil
 }
 
 func readProcess(root string, pid int32) (Process, error) {
@@ -216,6 +296,9 @@ func readProcess(root string, pid int32) (Process, error) {
 	after, statErr := os.ReadFile(filepath.Join(directory, "stat"))
 	_, afterStart, _, parseErr := parseStat(after)
 	afterExe, exeErr := os.Readlink(filepath.Join(directory, "exe"))
+	changed := os.IsNotExist(statErr) || os.IsNotExist(exeErr) ||
+		(statErr == nil && parseErr == nil && startTime != 0 && afterStart != 0 && afterStart != startTime) ||
+		(exeErr == nil && afterExe != executable)
 	if statErr != nil || parseErr != nil || exeErr != nil ||
 		afterStart != startTime || afterExe != executable {
 		evidence = ArgumentsUndetermined
@@ -244,6 +327,7 @@ func readProcess(root string, pid int32) (Process, error) {
 		Executable:       executable,
 		Arguments:        parseCmdline(cmdline),
 		ArgumentEvidence: evidence,
+		argumentChanged:  changed,
 		Cgroup:           parseCgroup(cgroup),
 		Numbering:        numbering,
 		Namespace:        namespaceOf(directory),
@@ -663,7 +747,7 @@ type Approval struct {
 	// Libraries is the attach policy: approved libssl builds by build id, with
 	// every entry point's offset. Empty places a probe on whatever the process
 	// maps. Non-empty refuses a library or offset nobody approved, rather than
-	// trusting the resolver. preflight.Take produces the offsets.
+	// trusting the resolver.
 	Libraries []LibraryApproval `json:"libraries,omitempty"`
 }
 

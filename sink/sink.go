@@ -28,6 +28,7 @@ type Factory func(path string) Sink
 // of Dropped discarded at shutdown. PendingBytes includes queued AND in-flight
 // encoded bytes, including LF; HighWaterBytes is its maximum. A discarded
 // in-flight line retains its charge until the blocked write actually returns.
+// After Freeze or Shutdown, these facts stay fixed at that boundary.
 type Stats struct {
 	Authorized     uint64 `json:"authorized"`
 	Written        uint64 `json:"written"`
@@ -58,7 +59,8 @@ func (q *Queue) DestinationStats(name string) Stats           { return q.stats(n
 func (q *Queue) Drain(ctx context.Context) error { return q.drain(ctx) }
 
 // Shutdown closes admission, drains up to ctx's bound, then counts all remaining
-// pending lines as discarded. A late write completion cannot change that count.
+// pending lines as discarded and freezes all reported statistics. A late write
+// completion cannot change them.
 func (q *Queue) Shutdown(ctx context.Context) error { return q.shutdown(ctx) }
 func (q *Queue) Reopen(ctx context.Context) error   { return q.reopen(ctx) }
 func NewFile(path string) Sink                      { return newFile(path) }

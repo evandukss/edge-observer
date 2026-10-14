@@ -311,7 +311,10 @@ func (w *Worker) excludeAlone(b *batch, x reconstruct.Exchange, role reconstruct
 	p := b.parse
 	index := p.exchanges
 	p.exchanges++
-	id := w.release.issued.Add(1)
+	id := w.release.nextID()
+	if id == 0 {
+		return index, 0
+	}
 	p.exclusions.add(reason)
 	w.outcome.Excluded.add(reason)
 	request, response := directions(role)

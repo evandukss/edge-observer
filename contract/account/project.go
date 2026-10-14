@@ -241,6 +241,7 @@ func Project(source observed.Account, supply Supply) (Account, error) {
 				OutputFailures: decimalOf(p.OutputFailures), ConnectionsCut: decimalOf(p.ConnectionsCut),
 				InputCut: decimalOf(p.InputCut), Authorized: decimalOf(p.Authorized),
 				Written: decimalOf(p.Written), Delivery: deliveryOf(p.Delivery),
+				StdoutDelivery:    optionalDeliveryOf(p.StdoutDelivery),
 				ExcludedExchanges: excludedOf(p.ExcludedExchanges), DecoderFaults: faultsOf(p.DecoderFaults),
 			},
 			ExchangeIDs: decimalOf(p.ExchangeIDs), Extensions: extensions,
@@ -817,4 +818,11 @@ func countersOf(counters connection.Counters) map[string]record.Count {
 
 func deliveryOf(s sink.Stats) *SinkDelivery {
 	return &SinkDelivery{Authorized: decimalOf(s.Authorized), Written: decimalOf(s.Written), Failed: decimalOf(s.Failed), Dropped: decimalOf(s.Dropped), Pending: decimalOf(s.Pending), Discarded: decimalOf(s.Discarded), Bytes: strconv.FormatInt(s.Bytes, 10), PendingBytes: strconv.FormatInt(s.PendingBytes, 10), HighWaterBytes: strconv.FormatInt(s.HighWaterBytes, 10), LimitBytes: strconv.FormatInt(s.LimitBytes, 10)}
+}
+
+func optionalDeliveryOf(s *sink.Stats) *SinkDelivery {
+	if s == nil {
+		return nil
+	}
+	return deliveryOf(*s)
 }
