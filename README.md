@@ -70,8 +70,8 @@ and receives over TLS.
   those already placed. Every other change - anything it would take away, a rule, an extension, a
   limit, and a library nothing has attached to - waits for a restart, and a reload holding any of them
   is refused whole.
-- **No stable release**: one pre-release, `v0.1.0-rc1`. The program reports no version; an archive
-  names the commit it was built from in its `COMMIT` file.
+- **The program reports no version**: an archive names the commit it was built from in its `COMMIT`
+  file.
 - **Every published format is a draft and not frozen**: the record (`observer.record/1-draft`), the
   approved output (`observer.approved/5`), the account and bundle (`observer.account/2-draft`,
   `observer.bundle/1-draft`), the configuration (`observer.config/1`), and the extension protocol and
@@ -98,8 +98,8 @@ must provide.
 
 ### Release archive
 
-One pre-release has been published, `v0.1.0-rc1`, from an earlier commit; its archive holds fewer of
-the files below. A release is an archive, `observer-linux-amd64.tar.gz`, built from one tagged commit.
+The first release is `v1.0.0`; the pre-release before it, `v0.1.0-rc1`, holds fewer of the files
+below. A release is an archive, `observer-linux-amd64.tar.gz`, built from one tagged commit.
 It unpacks into one directory, `observer-linux-amd64`, holding exactly these files:
 
     observer                     the program: one static file, linux/amd64
