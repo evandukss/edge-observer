@@ -53,7 +53,9 @@ and receives over TLS.
   CONNECT, Upgrade, informational responses, close-delimited bodies and transfer codings other than
   chunked also stop it. Only complete, paired, certified exchanges can be decoded. A message whose
   framing establishes no body needs no decoding, whatever well-formed content coding it names.
-- **A connection is cut when it holds too much it has not written.** It holds only what is not written
+- **The observer stops recording a connection (a cut) when it holds too much of it unwritten.** The
+  connection itself is untouched: the observer only reads, and the program's traffic carries on. It holds
+  only what is not written
   yet - a request waiting for its response, a message still being read - so a long keep-alive
   connection is not cut for its length. Its limit is half of `limits.events`, rounded down
   with a minimum of one message or transfer. It is cut for reaching that limit, as many requests left
@@ -183,7 +185,7 @@ many captured events, and an allowance for held work of that many times 4096 byt
 default), shared by the captured events, processing copies, decoded output and decoder workspace, so
 large bodies hold fewer events at once. This bounds held work in the accounting units, not total
 allocation volume or the Go heap. Decoding allocates over time as it processes input; the work and
-history limits above constrain its cost. A connection is cut when its unwritten messages
+history limits above constrain its cost. Recording of a connection is cut when its unwritten messages
 and transfers reach half of `limits.events`, rounded down with a minimum of one (Limits, above). `limits.workers` is the number of
 processing workers, 1 by default. Changing a limit takes a restart.
 [contract/config/CONFIG.md](contract/config/CONFIG.md) has every key, and
