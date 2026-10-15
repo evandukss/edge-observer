@@ -96,10 +96,11 @@ type fullHandleKey struct {
 }
 
 type fullHolding struct {
-	_       structs.HostLayout
-	Entries uint8
-	Events  uint8
-	Padding [6]uint8
+	_          structs.HostLayout
+	Generation uint64
+	Entries    uint8
+	Events     uint8
+	Padding    [6]uint8
 }
 
 type fullInstanceKey struct {

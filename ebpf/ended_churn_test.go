@@ -24,7 +24,7 @@ func TestEndedExecutionsAreShedFromTheMapsKeyedByThem(t *testing.T) {
 		}
 		s.namedBy[key] = []admission.Provenance{{Target: "t"}}
 		s.held.Unlock()
-		s.forgetEnded(key, "exited", time.Time{})
+		s.forgetEnded(key, one.Instance.Generation, "exited", time.Time{})
 	}
 	if total := s.EndedCounts(); len(total) != 1 || total[0].Count != executions {
 		t.Fatalf("wiring, not the property: %v ended, want %d", total, executions)

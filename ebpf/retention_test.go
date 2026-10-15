@@ -107,7 +107,7 @@ func TestAdmissionChurnReclaimsGenerationStores(t *testing.T) {
 		r.consume()
 		r.command(t, "F 0")
 		r.consume()
-		r.session.Retract(authorise(r.who))
+		r.session.Retract(r.session.Inventory())
 		off := retainedKernel(t, r.session)
 		if off["bpf.allowed_processes"].Held != 0 {
 			t.Fatal("wiring, not the property: explicit retraction did not remove grant")

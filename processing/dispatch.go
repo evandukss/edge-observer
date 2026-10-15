@@ -292,13 +292,19 @@ func (w *Worker) releaseExchange(ctx context.Context, b *batch, x reconstruct.Ex
 		return nil
 	case verdictExclude:
 		index, id := w.excludeAlone(b, x, role, prep.reason)
+		if id == 0 {
+			return nil
+		}
 		w.reportOne(b, index, id, releaseExcluded)
 		return nil
 	}
 	if prep.verdict == verdictStop {
 		index := p.exchanges
 		p.exchanges++
-		id := w.release.issued.Add(1)
+		id := w.release.nextID()
+		if id == 0 {
+			return nil
+		}
 		if !p.excluded {
 			p.excluded = true
 			for _, side := range []struct {
@@ -349,7 +355,10 @@ func (w *Worker) releaseExchange(ctx context.Context, b *batch, x reconstruct.Ex
 	}
 	index := p.exchanges
 	p.exchanges++
-	id := w.release.issued.Add(1)
+	id := w.release.nextID()
+	if id == 0 {
+		return nil
+	}
 	p.good++
 	p.released[request], p.released[response] = x.Request.End, x.Response.End
 	evidence := b.exchangeEvidence(x, role)
@@ -828,10 +837,13 @@ var releaseEvidence = probe.ReleaseEvidence{InputsSettled: true, LifecycleSettle
 // release orders short enqueue decisions shared by all workers. Sink I/O runs
 // on the queue's goroutine, outside both this lock and the gate's lock.
 type release struct {
-	mutex  sync.Mutex
-	gate   *probe.DeliveryGate
-	output Output
-	err    error
+	admission  sync.Mutex
+	closed     bool
+	extensions *extensions
+	mutex      sync.Mutex
+	gate       *probe.DeliveryGate
+	output     Output
+	err        error
 	// issued is the exchange ids issued so far, from 1: a batch takes its
 	// range with one addition, so ranges are contiguous and never overlap.
 	issued atomic.Uint64
@@ -853,7 +865,20 @@ func (r *release) write(ctx context.Context, line Approved, outcome *Outcome, lo
 	var delivery error
 	accepted := false
 	decision := r.gate.AuthorizeEnqueue(evidence, func() {
+		r.admission.Lock()
+		defer r.admission.Unlock()
+		if r.closed {
+			return
+		}
 		accepted = loss.Authorize(func() { delivery = r.output.WriteApproved(ctx, line) })
+		if accepted {
+			outcome.Authorized++
+			if delivery != nil {
+				outcome.OutputFailures++
+			} else {
+				outcome.Written++
+			}
+		}
 	})
 	if !decision.Authorized {
 		outcome.GateReason = decision.Reason
@@ -862,12 +887,9 @@ func (r *release) write(ctx context.Context, line Approved, outcome *Outcome, lo
 	if !accepted {
 		return releaseWithdrawn, nil
 	}
-	outcome.Authorized++
 	if delivery != nil {
-		outcome.OutputFailures++
 		return releaseDropped, nil
 	}
-	outcome.Written++
 	return releaseEnqueued, nil
 }
 

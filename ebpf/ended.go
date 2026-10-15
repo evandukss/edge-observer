@@ -25,20 +25,37 @@ func (s *Session) endedAt(event Event) {
 		NamespaceInode:  event.Namespace.Inode,
 		PID:             uint32(event.NamespacePID),
 	}
-	s.forgetEnded(key, "the program reported its last thread's exit", event.At)
+	s.forgetEnded(key, event.Generation, "the program reported its last thread's exit", event.At)
 }
 
-// forgetEnded lets go of everything this session recorded for the instance at
-// key, whose execution is established as ended: its inventory record, its
-// grant's provenance and its start identity. It is counted under its target and
-// told once to whoever asked (Options.Ended); a key holding nothing, or one
-// already let go of, does nothing.
-func (s *Session) forgetEnded(key instanceKey, evidence string, at time.Time) {
+// forgetEnded retires only the admission named by the observation. A queued
+// end or an earlier Grants snapshot cannot retire a successor under the key.
+// Generation zero names no admission and retires nothing.
+func (s *Session) forgetEnded(key instanceKey, generation admission.Generation, evidence string, at time.Time) {
 	s.held.Lock()
+	ended := s.retireLocked(key, generation, evidence, at)
+	s.held.Unlock()
+	s.tellEnded(ended)
+}
+
+func (s *Session) retireLocked(key instanceKey, generation admission.Generation, evidence string, at time.Time) *probe.Ended {
+	one, removed := s.removeRecordedLocked(key, generation)
+	if !removed {
+		return nil
+	}
+	if s.endedBy == nil {
+		s.endedBy = make(map[endedTarget]int)
+	}
+	s.endedBy[endedTarget{name: one.Provenance.Target, number: one.Provenance.Number}]++
+	return &probe.Ended{Selection: one, Evidence: evidence, At: at}
+}
+
+// removeRecordedLocked removes one generation without interpreting why it
+// ended. Retraction therefore does not turn a rolled-back grant into coverage.
+func (s *Session) removeRecordedLocked(key instanceKey, generation admission.Generation) (admission.Selection, bool) {
 	i, recorded := s.index[key]
-	if !recorded {
-		s.held.Unlock()
-		return
+	if !recorded || generation == 0 || s.inventory[i].Instance.Generation != generation {
+		return admission.Selection{}, false
 	}
 	one := s.inventory[i]
 	last := len(s.inventory) - 1
@@ -52,17 +69,14 @@ func (s *Session) forgetEnded(key instanceKey, evidence string, at time.Time) {
 	s.index = held.Deleted(s.index, key, &s.indexChurn)
 	s.namedBy = held.Deleted(s.namedBy, key, &s.namedByChurn)
 	s.accepted = slices.DeleteFunc(s.accepted, func(granted admission.Selection) bool {
-		return keyOf(granted.Instance) == key
+		return granted.Instance.Same(one.Instance)
 	})
-	if s.endedBy == nil {
-		s.endedBy = make(map[endedTarget]int)
-	}
-	s.endedBy[endedTarget{name: one.Provenance.Target, number: one.Provenance.Number}]++
-	told := s.endedTo
-	s.held.Unlock()
+	return one, true
+}
 
-	if told != nil {
-		told(probe.Ended{Selection: one, Evidence: evidence, At: at})
+func (s *Session) tellEnded(ended *probe.Ended) {
+	if ended != nil && s.endedTo != nil {
+		s.endedTo(*ended)
 	}
 }
 

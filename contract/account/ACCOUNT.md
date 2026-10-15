@@ -313,17 +313,25 @@ and counts in the published account are decimal strings.
 | Destination | Operational account JSON path | Published account JSON path |
 |---|---|---|
 | Approved file, `<output>/approved.jsonl` | `processing.delivery` | `processing.aggregate.delivery` |
+| Approved stdout mirror with `start --stdout` | `processing.stdout_delivery` | `processing.aggregate.stdout_delivery` |
 | Derived file, `<output>/derived-<name>.jsonl` | `processing.extensions[]` entry whose `name` is the configured extension name, then `delivery` | `processing.extensions["<name>"].delivery` |
 | Configured operational-log file | `log_destinations.file` | `log_destinations.file` |
 | Operational-log foreground stdout | `log_destinations.stdout` | `log_destinations.stdout` |
+| Operational-log foreground stderr with `start --stdout` | `log_destinations.stderr` | `log_destinations.stderr` |
 
 `log_destinations` contains only destinations registered for the session: `file`
-when `log` names a file, and `stdout` in foreground operation. A foreground run
-with a configured log file has both entries. The optional `log_delivery` is the
+when `log` names a file, and `stdout` in ordinary foreground operation or `stderr`
+when `start --stdout` selects approved output for stdout. A foreground run with a
+configured log file has both the file and selected operational-console entries. The optional `log_delivery` is the
 aggregate over those log destinations; one record sent to both is two attempts.
 It is not the per-file count. Planned and historical accounts may omit these
 optional delivery objects; absence does not mean zero. Current live and sealed
 accounts carry the registered destinations even when their counts are zero.
+
+`processing.stdout_delivery` is present only when the approved stdout mirror is enabled.
+It counts the mirror's own delivery attempts and is not part of `log_delivery` or the approved
+file's `processing.delivery`. Text rendering includes these stdout delivery counts when present.
+Only approved exchange and connection lines reach it; derived-file delivery remains separate.
 
 Every delivery object has these JSON members: `authorized`, `written`, `failed`,
 `dropped`, `pending`, `discarded`, `bytes`, `pending_bytes`, `high_water_bytes`,
@@ -338,12 +346,15 @@ file's current size. `pending_bytes` includes queued and in-flight encoded
 bytes, including LF; `high_water_bytes` is their maximum. `limit_bytes` is the
 shared queue's bound, not a separately reserved allowance for each destination.
 Approved and derived destinations share one queue; log destinations share another.
+The optional approved stdout mirror has its own queue and runner, bounded independently.
 
 After bounded shutdown, pending lines become discarded and `pending` is zero.
 A discarded in-flight line retains its byte charge until its write returns, so
 `pending_bytes` can remain nonzero. Its later completion cannot revise the
 sealed discarded count, and discarded does not prove absence from the file.
-The sealed account's log counts include the attempt to emit its stopped record.
+The `stopped` record follows account publication and reports the actual seal and projection outcome.
+It is the sole operational record outside the account's frozen log counts; its delivery is best effort
+within the same 25-second shutdown bound.
 These counts are never an inventory of files; retention belongs to the operator.
 
 `exchange_ids` is the number of exchange ids the session issued: one per exchange the reconstructor
@@ -383,6 +394,29 @@ so rather than holding a smaller total. With `write_content` false no id is issu
 exchange counts is `"0"`.
 
 ### seal
+
+The session's own validated operational `account.json` is the seal commit point. All final facts,
+including log delivery accounting, are prepared before that file is published. It is never rewritten
+afterwards. `contract-account.json` is published next, then the last-seal pointer. The pointer serves
+only discovery: a newer seal or a copied session directory does not invalidate an earlier seal.
+`inspect`, `stop` and restart discovery validate the session's own account by the same rule. `stop`
+reads the directory of the session it stopped, even when the pointer names another session.
+
+The first shutdown trigger starts a 20-second work allowance and a 25-second daemon exit bound,
+independently of the controller. The 5-second producer drain is inside the work allowance. Work is
+released or withheld, and authorization and enqueue close, by the work deadline. A timed-out work owner
+leaves a sealed INCOMPLETE account naming its stage and the withdrawal outcome. Only established
+counts are retained; a worker's last returned counts do not assert it finished. The stop client waits
+at most 30 seconds. Normal stops finish sooner, and bytes handed to the operating system before exit
+may still land.
+
+A successful operator stop exits 0. INCOMPLETE finalization, account publication failure and later
+projection or pointer publication failure all make the daemon and `stop` exit nonzero. Failure to
+publish the operational account leaves the session unsealed. Failure after its valid publication
+keeps the seal. Per-session command control state reports the command outcome; it is not a second
+seal criterion, and missing command state never proves a successful stop. Existing capture-invalidating
+failures still exit nonzero. A later activation names the last validated seal found and both times;
+coverage between the seal and activation is not established.
 
 `stopped` and `sealed` instants; `complete` and `because[]`; `withdrawal` `{at, instances, complete, because}`;
 `drain` `{delivered, outstanding, complete, because}`; `interrupted`, calls inside the library when authority

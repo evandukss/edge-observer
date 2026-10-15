@@ -30,7 +30,6 @@ package preflight_test
 //	BTF                 a presence marker, removed or made a link loop
 //	unreadable paths    a symlink loop, a real filesystem error even as root
 //	program load        a callback with a call counter; nothing is loaded
-//	debug filesystem    supplied as a path, not populated
 
 import (
 	"errors"
@@ -115,7 +114,6 @@ func readinessFixture(t *testing.T, libs readinessLibraries) *readinessHost {
 	f.host = preflight.Host{
 		ProcFS:  filepath.Join(root, "proc"),
 		SysFS:   filepath.Join(root, "sys"),
-		Debug:   filepath.Join(root, "debug"),
 		OS:      "linux",
 		Machine: func() (string, error) { return "x86_64", nil },
 		Loads: func() error {

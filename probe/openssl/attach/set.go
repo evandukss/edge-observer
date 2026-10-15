@@ -43,31 +43,66 @@ type set struct {
 
 	// routed is which member the last Admit wrote each grant to, for Retract. Each
 	// Admit replaces it.
-	routed map[int32]int
+	routed          map[int32]int
+	identities      map[int32]placedIdentity
+	identitiesChurn held.Churn
 }
 
 // member is one placement and the processes it observes; file is the library
 // file a reload routes new processes by.
 type member struct {
+	origin *placementOwner
 	covers []int32
 	live   probe.Attachment
 	file   fileID
 }
 
-func newSet() *set { return &set{refusals: make(map[int32]error)} }
+// Each placement has a separate Session allocator. A generation is meaningful
+// only beside this token; its numeric value is never compared across owners.
+// The nonzero size makes separately allocated tokens have distinct addresses.
+type placementOwner = probe.AdmissionScope
+type placedIdentity struct {
+	origin   *placementOwner
+	instance admission.Instance
+}
+
+func (held placedIdentity) matches(origin *placementOwner, instance admission.Instance) bool {
+	return held.origin == origin && held.instance.Same(instance) && held.instance.Start == instance.Start
+}
+
+func newSet() *set {
+	return &set{refusals: make(map[int32]error), identities: make(map[int32]placedIdentity)}
+}
 
 // place records one placement and the processes it observes.
 func (s *set) place(live probe.Attachment, covers ...int32) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	s.members = append(s.members, member{covers: covers, live: live})
+	s.members = append(s.members, member{origin: &placementOwner{}, covers: covers, live: live})
 }
 
 // placeOn records one placement on a library file and its processes.
-func (s *set) placeOn(file fileID, live probe.Attachment, covers ...int32) {
+func (s *set) placeOn(origin *placementOwner, file fileID, live probe.Attachment, covers ...int32) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	s.members = append(s.members, member{covers: covers, live: live, file: file})
+	if attached, ok := live.(*ebpfAttachment); ok {
+		current := make(map[int32]admission.Instance)
+		for _, one := range attached.session.Inventory() {
+			current[one.ObserverPID] = one.Instance
+		}
+		covers = slices.DeleteFunc(slices.Clone(covers), func(pid int32) bool { _, found := current[pid]; return !found })
+		for _, pid := range covers {
+			s.identities[pid] = placedIdentity{origin: origin, instance: current[pid]}
+		}
+		attached.mutex.Lock()
+		for pid, key := range attached.networkOwners {
+			if current[pid].Key() != key {
+				attached.forgetNetwork(pid, key)
+			}
+		}
+		attached.mutex.Unlock()
+	}
+	s.members = append(s.members, member{origin: origin, covers: covers, live: live, file: file})
 }
 
 // ending wraps told: the set first lets go of what it keeps for a process whose
@@ -75,25 +110,35 @@ func (s *set) placeOn(file fileID, live probe.Attachment, covers ...int32) {
 // reload routed it, and the namespace each placement read for it. The
 // placements are replaced rather than edited, since a reader may still hold the
 // list it copied.
-func (s *set) ending(told func(probe.Ended)) func(probe.Ended) {
+func (s *set) ending(origin *placementOwner, told func(probe.Ended)) func(probe.Ended) {
 	return func(one probe.Ended) {
+		one.Scope = origin
 		pid := one.Selection.ObserverPID
 		s.mutex.Lock()
 		members := slices.Clone(s.members)
-		for i := range members {
-			if slices.Contains(members[i].covers, pid) {
-				members[i].covers = slices.DeleteFunc(slices.Clone(members[i].covers),
-					func(covered int32) bool { return covered == pid })
+		if identity, found := s.identities[pid]; found && identity.matches(origin, one.Selection.Instance) {
+			s.identities = held.Deleted(s.identities, pid, &s.identitiesChurn)
+			for i := range members {
+				if members[i].origin == origin && slices.Contains(members[i].covers, pid) {
+					members[i].covers = slices.DeleteFunc(slices.Clone(members[i].covers),
+						func(covered int32) bool { return covered == pid })
+				}
 			}
+			s.members = members
+			delete(s.refusals, pid)
+			delete(s.routed, pid)
 		}
-		s.members = members
-		delete(s.refusals, pid)
-		delete(s.routed, pid)
 		s.mutex.Unlock()
 		for _, member := range members {
+			if member.origin != origin {
+				continue
+			}
 			if live, placed := member.live.(*ebpfAttachment); placed {
 				live.mutex.Lock()
-				live.networks = held.Deleted(live.networks, pid, &live.networksChurn)
+				live.forgetNetwork(pid, one.Selection.Instance.Key())
+				if known, found := live.known[pid]; found && known.instance.Key() == one.Selection.Instance.Key() {
+					live.known = held.Deleted(live.known, pid, &live.knownChurn)
+				}
 				live.mutex.Unlock()
 			}
 		}
@@ -133,6 +178,7 @@ func (s *set) Retained() ([]held.Occupancy, error) {
 		{Store: "attach.covers", Held: covered},
 		{Store: "attach.refusals", Held: len(s.refusals)},
 		{Store: "attach.routed", Held: len(s.routed)},
+		{Store: "attach.cover_owners", Held: len(s.identities), Rebuilds: s.identitiesChurn.Rebuilds()},
 	}
 	s.mutex.Unlock()
 
@@ -318,7 +364,10 @@ func (s *set) Grants() ([]probe.Grant, error) {
 		if err != nil {
 			return nil, err
 		}
-		all = append(all, grants...)
+		for _, grant := range grants {
+			grant.Scope = at.origin
+			all = append(all, grant)
+		}
 	}
 	return all, nil
 }
@@ -382,13 +431,8 @@ func (s *set) Admit(request probe.Request) (probe.Added, error) {
 		routes = append(routes, routed{index: index, live: live, one: one})
 	}
 
-	var (
-		added probe.Added
-		done  []struct {
-			live    *ebpfAttachment
-			granted []admission.Selection
-		}
-	)
+	added := probe.Added{Scopes: make(map[admission.Key]*probe.AdmissionScope)}
+	var done []placementGrant
 	s.mutex.Lock()
 	s.routed = make(map[int32]int)
 	s.mutex.Unlock()
@@ -406,53 +450,120 @@ func (s *set) Admit(request probe.Request) (probe.Added, error) {
 		added.Skipped = append(added.Skipped, skipped...)
 		if err != nil {
 			for _, back := range done {
-				back.live.retract(back.granted)
+				s.retractFrom(back.origin, back.granted)
 			}
 			return probe.Added{Skipped: added.Skipped}, err
 		}
-		done = append(done, struct {
-			live    *ebpfAttachment
-			granted []admission.Selection
-		}{route.live, granted})
+		done = append(done, placementGrant{members[route.index].origin, slices.Clone(granted)})
 		added.Selections = append(added.Selections, granted...)
+		for _, one := range granted {
+			added.Scopes[one.Instance.Key()] = members[route.index].origin
+		}
 
 		s.mutex.Lock()
+		current := make(map[admission.Key]bool)
+		for _, one := range route.live.session.Inventory() {
+			current[one.Instance.Key()] = true
+		}
 		for _, one := range granted {
+			if !current[one.Instance.Key()] {
+				continue
+			}
+			for i := range s.members {
+				s.members[i].covers = slices.DeleteFunc(slices.Clone(s.members[i].covers), func(pid int32) bool { return pid == one.ObserverPID })
+			}
+			delete(s.refusals, one.ObserverPID)
+			s.identities[one.ObserverPID] = placedIdentity{origin: s.members[route.index].origin, instance: one.Instance}
 			s.members[route.index].covers = append(s.members[route.index].covers, one.ObserverPID)
 			s.routed[one.ObserverPID] = route.index
 		}
 		s.mutex.Unlock()
 	}
+	added.Retract = s.retraction(done)
+	if err := added.Validate(); err != nil {
+		added.Retract(added.Selections)
+		return probe.Added{Skipped: added.Skipped}, err
+	}
 	return added, nil
+}
+
+type placementGrant struct {
+	origin  *placementOwner
+	granted []admission.Selection
+}
+
+func (s *set) retraction(done []placementGrant) func([]admission.Selection) {
+	done = slices.Clone(done)
+	for i := range done {
+		done[i].granted = slices.Clone(done[i].granted)
+		for j := range done[i].granted {
+			done[i].granted[j].AlsoNamedBy = slices.Clone(done[i].granted[j].AlsoNamedBy)
+		}
+	}
+	var all []admission.Selection
+	for _, batch := range done {
+		all = append(all, batch.granted...)
+	}
+	return probe.BindRetraction(all, func(requested []admission.Selection) {
+		for _, batch := range done {
+			var take []admission.Selection
+			for _, original := range batch.granted {
+				if slices.ContainsFunc(requested, func(one admission.Selection) bool {
+					return one.ObserverPID == original.ObserverPID && one.Instance.Same(original.Instance) && one.Instance.Start == original.Instance.Start
+				}) {
+					take = append(take, original)
+				}
+			}
+			if len(take) > 0 {
+				s.retractFrom(batch.origin, take)
+			}
+		}
+	})
 }
 
 // Retract takes back the last Admit's grants from the member that wrote each.
 func (s *set) Retract(granted []admission.Selection) {
 	s.mutex.Lock()
-	defer s.mutex.Unlock()
+	single := len(s.members) == 1
+	s.mutex.Unlock()
+	if !single {
+		return
+	}
+	s.retractFrom(nil, granted)
+}
+
+// retractFrom keeps an internal rollback attached to its allocating placement.
+// A nil origin is the legacy last-Admit boundary, whose selections carry no
+// receipt; callers must not reuse that boundary for an older Admit.
+func (s *set) retractFrom(origin *placementOwner, granted []admission.Selection) {
+	s.mutex.Lock()
 	byMember := make(map[int][]admission.Selection)
-	taken := make(map[int32]bool, len(granted))
 	for _, one := range granted {
-		index, wrote := s.routed[one.ObserverPID]
-		if !wrote {
+		index := -1
+		if origin != nil {
+			index = slices.IndexFunc(s.members, func(at member) bool { return at.origin == origin })
+		} else if at, found := s.routed[one.ObserverPID]; found {
+			index = at
+		}
+		if index < 0 {
+			continue
+		}
+		if origin == nil && !s.identities[one.ObserverPID].matches(s.members[index].origin, one.Instance) {
 			continue
 		}
 		byMember[index] = append(byMember[index], one)
-		taken[one.ObserverPID] = true
-		delete(s.routed, one.ObserverPID)
+		if s.identities[one.ObserverPID].matches(s.members[index].origin, one.Instance) {
+			delete(s.routed, one.ObserverPID)
+			s.identities = held.Deleted(s.identities, one.ObserverPID, &s.identitiesChurn)
+			s.members[index].covers = slices.DeleteFunc(slices.Clone(s.members[index].covers), func(pid int32) bool { return pid == one.ObserverPID })
+		}
 	}
+	members := slices.Clone(s.members)
+	s.mutex.Unlock()
 	for index, grants := range byMember {
-		if live, isBPF := s.members[index].live.(*ebpfAttachment); isBPF {
+		if live, ok := members[index].live.(interface{ retract([]admission.Selection) }); ok {
 			live.retract(grants)
 		}
-		// A new slice: a caller may still be reading the old one.
-		kept := make([]int32, 0, len(s.members[index].covers))
-		for _, pid := range s.members[index].covers {
-			if !taken[pid] {
-				kept = append(kept, pid)
-			}
-		}
-		s.members[index].covers = kept
 	}
 }
 

@@ -3,17 +3,19 @@ package sink
 import (
 	"context"
 	"errors"
-	"io"
 	"sync"
 
 	"github.com/evandukss/edge-observer/held"
 )
 
 type destination struct {
-	sink     Sink
-	boundary chan struct{}
-	stats    Stats
-	dirty    bool
+	sink      Sink
+	boundary  chan struct{}
+	stats     Stats
+	dirty     bool
+	frozen    *Stats
+	final     bool
+	finalLine []byte
 }
 type queued struct {
 	destination *destination
@@ -28,6 +30,8 @@ type queueState struct {
 	inflight     *queued
 	stats        Stats
 	closed       bool
+	closing      bool
+	frozen       *Stats
 	wake         chan struct{}
 	changed      chan struct{}
 }
@@ -69,6 +73,9 @@ func (q *Queue) enqueue(name string, line []byte) error {
 	}
 	if len(line) == 0 || line[len(line)-1] != '\n' {
 		return errors.New("sink requires a complete line")
+	}
+	if st.frozen != nil {
+		return ErrClosed
 	}
 	st.stats.Authorized++
 	d.stats.Authorized++
@@ -119,29 +126,12 @@ func (q *Queue) run() {
 		st.mutex.Unlock()
 		d := item.destination
 		d.boundary <- struct{}{}
+		st.mutex.Lock()
+		discarded := item.discarded
+		st.mutex.Unlock()
 		n, err := 0, error(nil)
-		if d.dirty {
-			var repaired int
-			repaired, err = d.sink.Write(context.Background(), []byte{'\n'})
-			if err == nil && repaired != 1 {
-				err = io.ErrShortWrite
-			}
-			if err == nil {
-				d.dirty = false
-			}
-		}
-		if err == nil {
-			n, err = d.sink.Write(context.Background(), item.line)
-		}
-		if n < 0 || n > len(item.line) {
-			n = 0
-			err = io.ErrShortWrite
-		}
-		if n != len(item.line) && err == nil {
-			err = io.ErrShortWrite
-		}
-		if n > 0 {
-			d.dirty = item.line[n-1] != '\n'
+		if !discarded {
+			n, err = d.writeLine(context.Background(), item.line)
 		}
 		<-d.boundary
 		st.mutex.Lock()
@@ -175,6 +165,11 @@ func (q *Queue) Retained() ([]held.Occupancy, error) {
 	st.mutex.Lock()
 	defer st.mutex.Unlock()
 	lines := len(st.items)
+	for _, d := range st.destinations {
+		if d.finalLine != nil {
+			lines++
+		}
+	}
 	if st.inflight != nil {
 		lines++
 	}
@@ -193,9 +188,15 @@ func (q *Queue) stats(name string) Stats {
 	st.mutex.Lock()
 	defer st.mutex.Unlock()
 	if name == "" {
+		if st.frozen != nil {
+			return *st.frozen
+		}
 		return st.stats
 	}
 	if d := st.destinations[name]; d != nil {
+		if d.frozen != nil {
+			return *d.frozen
+		}
 		return d.stats
 	}
 	return Stats{}
@@ -223,37 +224,12 @@ func (q *Queue) shutdown(ctx context.Context) error {
 	if q == nil || q.state == nil {
 		return nil
 	}
+	q.CloseAdmission()
+	err := q.drain(ctx)
+	q.Freeze()
 	st := q.state
 	st.mutex.Lock()
-	st.closed = true
-	st.mutex.Unlock()
-	select {
-	case st.wake <- struct{}{}:
-	default:
-	}
-	err := q.drain(ctx)
-	st.mutex.Lock()
-	discard := func(item *queued, inflight bool) {
-		if item.discarded {
-			return
-		}
-		item.discarded = true
-		for _, v := range []*Stats{&st.stats, &item.destination.stats} {
-			v.Pending--
-			v.Dropped++
-			v.Discarded++
-			if !inflight {
-				v.PendingBytes -= int64(len(item.line))
-			}
-		}
-	}
-	for _, item := range st.items {
-		discard(item, false)
-	}
-	st.items = nil
-	if st.inflight != nil {
-		discard(st.inflight, true)
-	}
+	st.closing = true
 	ds := make([]*destination, 0, len(st.destinations))
 	for _, d := range st.destinations {
 		ds = append(ds, d)
@@ -320,4 +296,69 @@ func (q *Queue) reopen(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// CloseAdmission refuses subsequent enqueues, while the runner drains admitted lines.
+func (q *Queue) CloseAdmission() {
+	if q == nil || q.state == nil {
+		return
+	}
+	st := q.state
+	st.mutex.Lock()
+	st.closed = true
+	st.mutex.Unlock()
+	select {
+	case st.wake <- struct{}{}:
+	default:
+	}
+}
+
+// Freeze closes admission and fixes Stats and DestinationStats without waiting
+// for I/O. Pending lines become discarded exactly once. PendingBytes records
+// bytes still held by an in-flight call at this boundary; Retained continues to
+// describe actual retention. A call already in flight may still deliver bytes.
+func (q *Queue) Freeze() {
+	if q == nil || q.state == nil {
+		return
+	}
+	st := q.state
+	st.mutex.Lock()
+	defer st.mutex.Unlock()
+	if st.frozen != nil {
+		return
+	}
+	st.closed = true
+	discard := func(item *queued, inflight bool) {
+		if item.discarded {
+			return
+		}
+		item.discarded = true
+		for _, v := range []*Stats{&st.stats, &item.destination.stats} {
+			v.Pending--
+			v.Dropped++
+			v.Discarded++
+			if !inflight {
+				v.PendingBytes -= int64(len(item.line))
+			}
+		}
+	}
+	for _, item := range st.items {
+		discard(item, false)
+	}
+	st.items = nil
+	if st.inflight != nil {
+		discard(st.inflight, true)
+	}
+
+	frozen := st.stats
+	st.frozen = &frozen
+	for _, d := range st.destinations {
+		one := d.stats
+		d.frozen = &one
+	}
+	st.signal()
+	select {
+	case st.wake <- struct{}{}:
+	default:
+	}
 }

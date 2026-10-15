@@ -109,9 +109,9 @@ func (a EBPF) Attach(request probe.Request, sink probe.Sink) (probe.Attachment, 
 		attached.refuse(pid, err)
 	}
 
-	ended := attached.ending(request.Ended)
 	for _, one := range objects {
-		live, declined, err := a.place(one, sink, request.DeliveryGate, ended)
+		origin := &placementOwner{}
+		live, declined, err := a.place(one, sink, request.DeliveryGate, attached.ending(origin, request.Ended))
 		if err == nil {
 			for _, refused := range declined {
 				attached.refuse(refused.Selection.ObserverPID, refused.Err)
@@ -119,7 +119,7 @@ func (a EBPF) Attach(request probe.Request, sink probe.Sink) (probe.Attachment, 
 			// A placement covers only the processes it was authorised for. A declined
 			// process is left out: the probes are on the file, but the allowlist refuses
 			// its calls, so it is not observed and must not be reported as observed.
-			attached.placeOn(one.file, live, observed(one.processes, declined)...)
+			attached.placeOn(origin, one.file, live, observed(one.processes, declined)...)
 			continue
 		}
 		if !errors.Is(err, ebpf.ErrUnavailable) && !errors.Is(err, ebpf.ErrRefused) {
@@ -193,6 +193,18 @@ func (a EBPF) objects(request probe.Request) ([]object, map[int32]error) {
 			// could later withdraw by name.
 			unsupported[p.PID] = fmt.Errorf("pid %d is in the request and no admission says why, "+
 				"so nothing here can say which target selected it", p.PID)
+			continue
+		}
+		if !p.Start().Determined || p.Start() != granted.Instance.Start {
+			unsupported[p.PID] = fmt.Errorf("pid %d: process and admission have different or unknown birth identities", p.PID)
+			continue
+		}
+		if p.Namespace != granted.Instance.Namespace || p.NamespacePID != granted.Instance.PID {
+			unsupported[p.PID] = fmt.Errorf("pid %d: process and admission have different namespace identities", p.PID)
+			continue
+		}
+		if reading, given := request.Read[p.PID]; given && reading.Exec.StartTime != p.StartTime {
+			unsupported[p.PID] = fmt.Errorf("pid %d: reload reading belongs to another birth identity", p.PID)
 			continue
 		}
 		support, id, err := a.library(p, request)
@@ -354,6 +366,15 @@ func (a EBPF) place(one object, sink probe.Sink, gate *probe.DeliveryGate,
 		known:      make(map[int32]identity),
 		done:       make(chan struct{}),
 	}
+	attached.networkOwners = make(map[int32]admission.Key)
+	for _, granted := range session.Inventory() {
+		attached.networkOwners[granted.ObserverPID] = granted.Instance.Key()
+	}
+	for pid := range attached.networks {
+		if _, granted := attached.networkOwners[pid]; !granted {
+			delete(attached.networks, pid)
+		}
+	}
 	// The sink is given this program as a settler, so a connection still open
 	// when production stops can be settled against what the program numbered. A
 	// sink that cannot take one fails closed: every such connection's tail is
@@ -397,8 +418,16 @@ func (a EBPF) forkPoints(processes []process.Process) []ebpf.Point {
 func (a EBPF) networks(processes []process.Process) map[int32]probe.Netns {
 	held := make(map[int32]probe.Netns, len(processes))
 	for _, p := range processes {
+		before, err := process.Identify(a.Adapter.ProcFS, p.PID)
+		if err != nil || !p.Start().Determined || before.Start() != p.Start() {
+			continue
+		}
 		device, inode, err := process.Network(a.Adapter.ProcFS, p.PID)
 		if err != nil {
+			continue
+		}
+		after, err := process.Identify(a.Adapter.ProcFS, p.PID)
+		if err != nil || after.Start() != p.Start() {
 			continue
 		}
 		held[p.PID] = probe.Netns{Device: device, Inode: inode}
@@ -500,7 +529,9 @@ type ebpfAttachment struct {
 	// networks is each observed process's namespace at placement, the last moment
 	// it can be read. A reload adds to it while delivery reads it, so both hold
 	// mutex (networkOf).
-	networks map[int32]probe.Netns
+	networks           map[int32]probe.Netns
+	networkOwners      map[int32]admission.Key
+	networkOwnersChurn held.Churn
 
 	// libcs is the C library files this placement put fork and socket points on.
 	libcs map[fileID]bool
@@ -563,7 +594,7 @@ func (a *ebpfAttachment) deliverEvent(event ebpf.Event) {
 		a.sink.Closed(probe.Connection{
 			Process:  who.process,
 			Instance: who.instance,
-			Network:  a.networkOf(event.PID),
+			Network:  a.networkOf(event.PID, admission.Key{Namespace: event.Namespace, PID: event.NamespacePID, Generation: event.Generation}),
 			Stamp:    event.Stamp,
 			Sequence: event.Sequence,
 			Final:    event.Final,
@@ -575,7 +606,7 @@ func (a *ebpfAttachment) deliverEvent(event ebpf.Event) {
 		a.sink.Transfer(probe.Transfer{
 			Process:    who.process,
 			Instance:   who.instance,
-			Network:    a.networkOf(event.PID),
+			Network:    a.networkOf(event.PID, admission.Key{Namespace: event.Namespace, PID: event.NamespacePID, Generation: event.Generation}),
 			Stamp:      event.Stamp,
 			Sequence:   event.Sequence,
 			Descriptor: event.Descriptor,
@@ -651,8 +682,10 @@ type identity struct {
 func (a *ebpfAttachment) ended(event ebpf.Event) {
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
-	a.known = held.Deleted(a.known, event.PID, &a.knownChurn)
-	a.networks = held.Deleted(a.networks, event.PID, &a.networksChurn)
+	if known, found := a.known[event.PID]; found && known.instance.Key() == (admission.Key{Namespace: event.Namespace, PID: event.NamespacePID, Generation: event.Generation}) {
+		a.known = held.Deleted(a.known, event.PID, &a.knownChurn)
+	}
+	a.forgetNetwork(event.PID, admission.Key{Namespace: event.Namespace, PID: event.NamespacePID, Generation: event.Generation})
 }
 
 // EndedCounts is how many admissions this placement's session has let go of
@@ -661,31 +694,33 @@ func (a *ebpfAttachment) EndedCounts() ([]probe.EndedCount, error) {
 	return a.session.EndedCounts(), nil
 }
 
-// identify names the execution an event came from. The identity comes off the
-// event (pid namespace, pid inside it, admission generation), never off /proc,
-// which answers in the observer's own numbering. /proc supplies the start
-// identity and executable, read the first time a pid is seen under an admission:
-// a pid admitted again carries another generation and is read again. A process
-// that has exited leaves those indeterminate, and is still identified. The
-// reading is kept until the program reports the execution ended (ended).
+// identify enriches only the birth identity stamped on the event. A delayed
+// event for a retired generation cannot borrow the current occupant's /proc
+// facts or overwrite the current occupant's cached identity.
 func (a *ebpfAttachment) identify(event ebpf.Event) identity {
 	a.mutex.Lock()
 	known, found := a.known[event.PID]
 	a.mutex.Unlock()
-
-	if !found || known.instance.Generation != event.Generation {
-		known = identity{process: fragment.Process{PID: event.PID}}
-		if p, err := process.Identify(a.procfs, event.PID); err == nil {
+	key := admission.Key{Namespace: event.Namespace, PID: event.NamespacePID, Generation: event.Generation}
+	if !found || known.instance.Key() != key {
+		known = identity{
+			process: fragment.Process{PID: event.PID},
+			instance: admission.Instance{Namespace: event.Namespace, PID: event.NamespacePID,
+				Generation: event.Generation, Start: event.Start},
+		}
+		if event.Start.Determined {
+			known.process.StartTime = uint64(event.Start.Ticks)
+		}
+		if p, err := process.Identify(a.procfs, event.PID); err == nil && event.Start.Determined && p.Start() == event.Start && p.Namespace == event.Namespace && p.NamespacePID == event.NamespacePID {
 			known.process = p.Identity()
-			known.instance.Start = p.Start()
 			known.instance.Executable = p.Executable
 		}
-		known.instance.Generation = event.Generation
 		a.mutex.Lock()
-		a.known[event.PID] = known
+		if _, present := a.known[event.PID]; !present || a.networkOwners[event.PID] == key {
+			a.known[event.PID] = known
+		}
 		a.mutex.Unlock()
 	}
-
 	known.instance.Namespace = event.Namespace
 	known.instance.PID = event.NamespacePID
 	known.instance.Generation = event.Generation
@@ -789,6 +824,7 @@ func (a *ebpfAttachment) Retained() ([]held.Occupancy, error) {
 	out := []held.Occupancy{
 		{Store: "attach.identities", Held: len(a.known), Rebuilds: a.knownChurn.Rebuilds()},
 		{Store: "attach.networks", Held: len(a.networks), Rebuilds: a.networksChurn.Rebuilds()},
+		{Store: "attach.network_owners", Held: len(a.networkOwners), Rebuilds: a.networkOwnersChurn.Rebuilds()},
 		{Store: "attach.libcs", Held: len(a.libcs)},
 		{Store: "attach.gate_refused", Held: len(a.gateRefused)},
 	}
@@ -805,10 +841,22 @@ func (a *ebpfAttachment) Retained() ([]held.Occupancy, error) {
 
 // networkOf is an observed process's network namespace at admission, or zero
 // where it could not be read.
-func (a *ebpfAttachment) networkOf(pid int32) probe.Netns {
+func (a *ebpfAttachment) networkOf(pid int32, key admission.Key) probe.Netns {
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
+	if a.networkOwners[pid] != key {
+		return probe.Netns{}
+	}
 	return a.networks[pid]
+}
+
+// forgetNetwork is called under mutex and only retires the named admission.
+func (a *ebpfAttachment) forgetNetwork(pid int32, key admission.Key) {
+	// An unowned entry cannot be reported by networkOf and can be discarded.
+	if heldKey, found := a.networkOwners[pid]; !found || heldKey == key {
+		a.networks = held.Deleted(a.networks, pid, &a.networksChurn)
+		a.networkOwners = held.Deleted(a.networkOwners, pid, &a.networkOwnersChurn)
+	}
 }
 
 // admit adds grants to this placement for processes running its library, and
@@ -821,8 +869,22 @@ func (a *ebpfAttachment) admit(selections []admission.Selection, processes []pro
 		return nil, skipped, err
 	}
 	a.mutex.Lock()
-	for pid, netns := range networks {
-		a.networks[pid] = netns
+	if a.networks == nil {
+		a.networks = make(map[int32]probe.Netns)
+	}
+	if a.networkOwners == nil {
+		a.networkOwners = make(map[int32]admission.Key)
+	}
+	current := make(map[admission.Key]bool)
+	for _, one := range a.session.Inventory() {
+		current[one.Instance.Key()] = true
+	}
+	for _, one := range granted {
+		if !current[one.Instance.Key()] {
+			continue
+		}
+		a.networks[one.ObserverPID] = networks[one.ObserverPID]
+		a.networkOwners[one.ObserverPID] = one.Instance.Key()
 	}
 	a.mutex.Unlock()
 	return granted, skipped, nil
@@ -835,7 +897,7 @@ func (a *ebpfAttachment) retract(granted []admission.Selection) {
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 	for _, one := range granted {
-		a.networks = held.Deleted(a.networks, one.ObserverPID, &a.networksChurn)
+		a.forgetNetwork(one.ObserverPID, one.Instance.Key())
 	}
 }
 

@@ -70,11 +70,30 @@ instance by its pid, start time and boot, never a pid number alone. `port` is a 
 condition an entry names must hold.
 
 An unreadable or zero-byte command line is **arguments undetermined**, including for an executable-only
-entry. Start, preflight and reload reread affected candidates for up to 50 ms across the whole candidate
-set, at 1 ms intervals, plus an in-flight procfs read. The birth and executable must remain consistent.
-If arguments stay undetermined, the command refuses and names the process; an undecidable `ignore`
-entry also refuses. A known `argv[0]` with no following arguments is a known empty argument list.
-There is no automatic rediscovery after exec; an explicit start or reload resolves again.
+entry. Start, `dry-run`, preflight and reload reread affected candidates at 1 ms intervals, for up to
+50 ms across the whole candidate set in each snapshot. If arguments stay undetermined, the command
+refuses and names the process; an undecidable `ignore` entry also refuses. A known `argv[0]` with no
+following arguments is a known empty argument list.
+
+When a candidate is established to have changed or exited during resolution, the command rebuilds
+its complete snapshot: processes, listeners, boot identity and prepared rules. It resolves inclusion,
+exclusion and ancestry again. Rebuilds share one budget beginning at the first established change:
+at most three rebuilds after the initial snapshot, and one second, whichever ends first. A stable
+third rebuild may succeed; a needed fourth refuses and names the churning candidate. Unreadable
+evidence is a refusal, not a reason to rebuild.
+
+Each rebuilt snapshot's 50 ms argument allowance is clamped to the remaining outer second. During
+assembly no further process or listener-table read starts after the outer deadline. A synchronous
+read already in flight can finish later; expiry is checked after it returns and before a rebuilt
+selection is accepted. These reads do not form an atomic host snapshot. A refused reload leaves the
+running session and its grants unchanged. These rebuilds apply while a command resolves selection;
+an already-running session does not automatically rediscover selection after exec.
+
+Retiring an old admission during process replacement can leave the newer admission briefly absent;
+an event in that gap may be missed. If the replacement exits during that same gap, its entry can be
+restored after it has ended and remain in the map for the rest of the session. No later sweep is
+promised. The stale entry occupies one map slot, but kernel admission checks its recorded birth, so it
+does not admit a later process with the same pid and a different birth.
 
 **`children` says which descendants of a watched process are watched too:**
 
@@ -361,6 +380,25 @@ configuration, the executable and every directory through which either can be re
 participant or any other untrusted user must not be able to write them. An executable replaced behind an
 unchanged path is run at the next start of that extension; that is the operator's responsibility.
 
+## Foreground approved output
+
+`observer start <configuration> --stdout` mirrors released approved exchange and connection JSONL
+on standard output. This is a command option, not a configuration field. It uses the existing
+compiled removal, masking, truncation and extension approval rules; it does not expose raw capture
+or mirror derived extension files. Operational records go to stderr and the configured log file.
+The configured `log` must name an absolute file path: combining `log: "stdout"` with `--stdout` is
+refused before the session acquires its pid file or attaches.
+
+The mirror and approved file receive the same released bytes in the same order, with independent
+bounded queues and delivery counts. A failed file write does not prevent the mirror's attempt;
+a full, blocked or closed stdout pipe does not stall capture or file delivery. Either destination
+can lose lines, so matching release input is not a promise that their delivered contents match.
+The optional `processing.stdout_delivery` records the mirror's own outcomes and is absent when the
+flag is not used; the published account places it at `processing.aggregate.stdout_delivery`.
+
+`--stdout` requires the foreground. `start --daemonize --stdout` and `restart --stdout` are refused
+before starting or stopping a session. The latter leaves the existing session running unchanged.
+
 ## Reload and restart
 
 **The processing revision covers `remove`, `mask`, `truncate`, `write_content` and `extensions`, each
@@ -385,6 +423,24 @@ made in between takes effect at the next start, restart or reload.
 extension executable never prevents stopping or inspecting a session. `start`, `start --daemonize`,
 `restart`, `dry-run`, `preflight` and `reload` compile everything, commands included. `inspect` of a
 finished session's directory reads no configuration at all.
+
+Shutdown uses fixed deadlines, not configuration options. The first received stop notification,
+processing failure or capture-wide withdrawal starts the clock independently of the controller.
+Finalization work, including the 5-second producer drain, is decided within 20 seconds; authorization
+and enqueue close by then. Publication and daemon exit finish within 25 seconds. These are upper
+bounds: an ordinary stop finishes as soon as it can, and the stop client waits at most 30 seconds.
+Bytes already handed to the operating system before exit may still land.
+
+The `stopped` record follows account publication and reports the actual seal and projection outcome.
+It is the sole operational record outside the account's frozen log counts; its delivery is best effort
+within the same 25-second shutdown bound.
+
+A successful operator stop exits 0. A sealed INCOMPLETE account names the failed or expired stage and
+withdrawal outcome; the daemon and `stop` exit nonzero. Account publication failure leaves the session
+unsealed and exits nonzero. Projection or last-seal pointer publication failure keeps a validated
+session account sealed, but exits nonzero. Existing capture-invalidating and processing failure exits
+remain nonzero. Restart proceeds only after a successful stop. Its activation record names the last
+validated seal found and the new activation time, leaving coverage in between not established.
 
 ## Lost with the earlier format
 

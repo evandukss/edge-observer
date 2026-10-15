@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/evandukss/edge-observer/account"
 	"github.com/evandukss/edge-observer/contract/config"
 	"github.com/evandukss/edge-observer/process"
 )
@@ -185,17 +186,47 @@ func refusingStartedOver(t *testing.T, path string, except int) []int32 {
 	return found
 }
 
+type restartWaitEvent struct {
+	Kind       string `json:"kind"`
+	At         int64  `json:"at"`
+	Directory  string `json:"directory"`
+	Checked    string `json:"checked"`
+	Held       bool   `json:"held"`
+	Bytes      int    `json:"bytes"`
+	Device     uint64 `json:"device"`
+	Inode      uint64 `json:"inode"`
+	PID        int    `json:"pid"`
+	Session    string `json:"session"`
+	Error      string `json:"error"`
+	NotRunning bool   `json:"not_running"`
+}
+
+// restartWaitBuilt changes scheduling at the accepted stop-loop seam only.
+// The old session still uses the shipped binary; the restart and its eventual
+// replacement run the command through the test executable's private driver.
+func restartWaitBuilt(t *testing.T) string {
+	t.Helper()
+	binary := filepath.Join(t.TempDir(), "observer-restart-wait")
+	command := exec.Command("go", "test", "-c", "-o", binary, "github.com/evandukss/edge-observer/cmd/observer")
+	command.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build the restart wait driver: %v\n%s", err, output)
+	}
+	return binary
+}
+
 // A restart's configuration is changed after the restart checked it and
 // before its replacement starts: the change sets the log to stdout, which a
 // detached session refuses. The restart completes, and the replacement runs
 // the configuration that was checked, by its revision.
 //
-// The change is made while the restart is inside its stop, with nothing left
-// to chance: the test takes the pid file's lock the moment the first session
-// releases it, so the restart, which starts nothing while the lock is held,
-// waits until the change is written and the lock let go.
+// A pipe handshake stops the first post-signal poll until the fixture holds
+// the old session's emptied pidfile. The poll records the real holder error,
+// then returns that same observation after the configuration changes and the
+// fixture unlocks. Merely dwelling on the lock would not prove a poll saw it.
 func TestARestartWhoseConfigurationChangesBeforeItsReplacementStartsRunsTheCheckedOne(t *testing.T) {
 	binary := built(t)
+	driver := restartWaitBuilt(t)
 	client := speaking(t, serving(t))
 	c := configuring(t, target("under-test", client.process))
 	envelope := sessionEnvelope(t)
@@ -229,45 +260,160 @@ func TestARestartWhoseConfigurationChangesBeforeItsReplacementStartsRunsTheCheck
 	taken := make(chan error, 1)
 	go func() { taken <- syscall.Flock(int(pidFile.Fd()), syscall.LOCK_EX) }()
 
+	eventRead, eventWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	commandRead, commandWrite, err := os.Pipe()
+	if err != nil {
+		_ = eventRead.Close()
+		_ = eventWrite.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, file := range []*os.File{eventRead, eventWrite, commandRead, commandWrite} {
+			_ = file.Close()
+		}
+	})
+	type received struct {
+		event restartWaitEvent
+		err   error
+	}
+	events := make(chan received, 4)
+	go func() {
+		decoder := json.NewDecoder(eventRead)
+		for range 3 {
+			var event restartWaitEvent
+			err := decoder.Decode(&event)
+			events <- received{event, err}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	next := func(kind string) restartWaitEvent {
+		t.Helper()
+		select {
+		case got := <-events:
+			if got.err != nil || got.event.Kind != kind || got.event.At == 0 {
+				t.Fatalf("wiring: restart wait event %+v (%v), want %s", got.event, got.err, kind)
+			}
+			t.Logf("restart wait witness %+v", got.event)
+			return got.event
+		case <-time.After(60 * time.Second):
+			t.Fatalf("wiring: restart did not reach %s", kind)
+			return restartWaitEvent{}
+		}
+	}
+	send := func(command string) {
+		t.Helper()
+		if err := json.NewEncoder(commandWrite).Encode(command); err != nil {
+			t.Fatalf("send restart wait command %s: %v", command, err)
+		}
+	}
 	var output bytes.Buffer
-	restarting := exec.Command(binary, "restart", c.path)
+	restarting := exec.Command(driver, "restart", c.path)
+	restarting.Env = append(os.Environ(), "OBSERVER_RESTART_WAIT_DRIVER=1")
+	restarting.ExtraFiles = []*os.File{eventWrite, commandRead}
 	restarting.Stdout, restarting.Stderr = &output, &output
 	restarting.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(envelope.Fd())}
 	if err := restarting.Start(); err != nil {
 		t.Fatalf("start the restart: %v", err)
 	}
-	exited := make(chan error, 1)
-	go func() { exited <- restarting.Wait() }()
+	_ = eventWrite.Close()
+	_ = commandRead.Close()
+	finished := make(chan struct{})
+	var restartErr error
+	go func() {
+		restartErr = restarting.Wait()
+		close(finished)
+	}()
+	t.Cleanup(func() {
+		_ = restarting.Process.Kill()
+		<-finished
+	})
+	entered := next("poll-entered")
+	if entered.Directory != c.directory || entered.Checked != revision(checked) {
+		t.Fatalf("wiring: post-signal poll used directory/configuration %+v, want %s %s", entered, c.directory, revision(checked))
+	}
 
 	select {
 	case err := <-taken:
 		if err != nil {
 			t.Fatalf("wiring, not the property: the pid file's lock could not be taken: %v", err)
 		}
-	case err := <-exited:
+	case <-finished:
 		t.Fatalf("wiring, not the property: the restart ended (%v) before session %s released its pid file, so "+
-			"nothing changed between its check and its start:\n%s", err, first, output.String())
+			"nothing changed between its check and its start:\n%s", restartErr, first, output.String())
 	case <-time.After(60 * time.Second):
-		t.Fatalf("wiring, not the property: session %s never released its pid file:\n%s", first, output.String())
+		t.Fatalf("wiring, not the property: session %s never released its pid file", first)
+	}
+	var stat syscall.Stat_t
+	if err := syscall.Fstat(int(pidFile.Fd()), &stat); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(c.pidFile())
+	if err != nil || len(content) != 0 {
+		t.Fatalf("wiring: acquired pidfile is not empty: %q, %v", content, err)
 	}
 	if early := refusingStartedOver(t, c.path, firstPID); len(early) != 0 {
 		t.Fatalf("wiring, not the property: replacements %v started before the lock was taken, so this run does "+
 			"not change the configuration between the check and the start", early)
 	}
+	send("observe")
+	observed := next("held-empty")
+	wantError := "a session holds " + c.pidFile() + " and has not activated yet, so it answers nothing"
+	if !observed.Held || observed.Bytes != 0 || observed.Device != uint64(stat.Dev) || observed.Inode != stat.Ino ||
+		observed.PID != 0 || observed.Session != "" || observed.NotRunning || observed.Error != wantError || observed.At < entered.At {
+		t.Fatalf("wiring: the stop did not observe the same held-empty pidfile: %+v", observed)
+	}
+	// This is a successful old-session stop, not a terminal failure that a
+	// restart should conceal. Its own public seal and receipt establish that.
+	sealed := liveSealed(t, filepath.Join(c.sessions(), first), first)
+	if sealed.Version != account.Version || sealed.Seal == nil || !sealed.Seal.Complete || sealed.Seal.Sealed.IsZero() || sealed.SealError != "" {
+		t.Fatalf("wiring: old session has no complete seal: %+v", sealed)
+	}
+	receiptBytes, err := os.ReadFile(filepath.Join(c.sessions(), first, "control", "stop-result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt struct {
+		Session string    `json:"session"`
+		Sealed  time.Time `json:"sealed"`
+		Outcome string    `json:"outcome"`
+		Error   string    `json:"error"`
+	}
+	if err := json.Unmarshal(receiptBytes, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Session != first || !receipt.Sealed.Equal(sealed.Seal.Sealed) || receipt.Outcome != "complete" || receipt.Error != "" {
+		t.Fatalf("wiring: old-session terminal result does not prove successful stop: %+v", receipt)
+	}
+	t.Logf("restart old-session terminal witness %+v", receipt)
 	if err := os.WriteFile(c.path, changed, 0o600); err != nil {
 		t.Fatalf("change the configuration: %v", err)
 	}
 	if err := syscall.Flock(int(pidFile.Fd()), syscall.LOCK_UN); err != nil {
 		t.Fatalf("let the pid file go: %v", err)
 	}
+	t.Logf("restart fixture released inode %d at %d after configuration changed", stat.Ino, time.Now().UnixNano())
+	send("released")
+	returned := next("returning-observation")
+	if returned.Error != observed.Error || returned.At < observed.At {
+		t.Fatalf("wiring: real holder observation changed before return: observed %+v returned %+v", observed, returned)
+	}
+	if elapsed := time.Duration(returned.At - entered.At); elapsed >= 25*time.Second {
+		t.Fatalf("wiring: the handshake took %s, leaving insufficient margin inside the original 30s stop budget", elapsed)
+	}
 
 	select {
-	case err := <-exited:
-		if err != nil {
-			t.Fatalf("the restart stopped session %s and then exited %v:\n%s", first, err, output.String())
+	case <-finished:
+		if restartErr != nil {
+			t.Fatalf("the restart rejected the witnessed transient held-empty observation after release; stopped session %s, exit %v:\n%s", first, restartErr, output.String())
 		}
 	case <-time.After(120 * time.Second):
 		_ = restarting.Process.Kill()
+		<-finished
 		t.Fatalf("the restart did not end within 120s:\n%s", output.String())
 	}
 	secondPID, second := sessionOf(t, c)

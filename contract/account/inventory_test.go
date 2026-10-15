@@ -170,7 +170,7 @@ var represented = map[string]string{
 // Facts that recur at several places in the operational account, written once:
 // every instance, and every capability.
 func init() {
-	for _, pair := range [][2]string{{".log_destinations.*", "log_destinations.*"}, {".log_delivery", "log_delivery"}, {".processing.delivery", "processing.aggregate.delivery"}, {".processing.extensions[].delivery", "processing.extensions.*.delivery"}} {
+	for _, pair := range [][2]string{{".log_destinations.*", "log_destinations.*"}, {".log_delivery", "log_delivery"}, {".processing.delivery", "processing.aggregate.delivery"}, {".processing.stdout_delivery", "processing.aggregate.stdout_delivery"}, {".processing.extensions[].delivery", "processing.extensions.*.delivery"}} {
 		for _, field := range []string{"authorized", "written", "failed", "dropped", "pending", "discarded", "bytes", "pending_bytes", "high_water_bytes", "limit_bytes"} {
 			represented[pair[0]+"."+field] = pair[1] + "." + field
 		}

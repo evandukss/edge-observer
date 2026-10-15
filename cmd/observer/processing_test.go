@@ -136,6 +136,8 @@ func processingControllerWith(t *testing.T, setup controllerSetup) *processingCo
 		intake: store, gate: gate, output: output, attached: f.producer, processingTaken: setup.taken, log: setup.log,
 		plan: account.Account{Version: account.Version, Session: "integration", Policy: account.Policy{Revision: read.Revision, Generation: 1}},
 	}
+	f.d.plan.Attached(account.Live, f.d.session, nil, f.d.attached.Capability())
+	f.d.plan.Extensions = account.ExtensionsOf(read.Processing.Extensions())
 	go func() {
 		f.d.serveUntilStop(f.stop, nil, setup.ticks, nil, setup.log, account.Account{})
 		close(f.done)
@@ -293,9 +295,7 @@ func TestControllerProcessingUsesFinalizationEvidence(t *testing.T) {
 				t.Fatal("still-open batch escaped before producer drain")
 			}
 			var logs bytes.Buffer
-			if err := f.finish(&logger{out: &logs}); err != nil {
-				t.Fatal(err)
-			}
+			finishErr := f.finish(&logger{out: &logs})
 			if !reflect.DeepEqual(f.producer.calls, []string{"withdraw", "drain", "account", "close"}) {
 				t.Fatalf("producer finalization order: %v", f.producer.calls)
 			}
@@ -361,6 +361,9 @@ func TestControllerProcessingUsesFinalizationEvidence(t *testing.T) {
 				t.Fatalf("the open connection's connection line was written %d times; settled=%t", settled, one.settled)
 			}
 			processingAccount(t, f, uint64(len(all)), logs.Bytes())
+			if (finishErr == nil) != one.settled {
+				t.Errorf("shutdown outcome: settled=%t, finish returned %v", one.settled, finishErr)
+			}
 		})
 	}
 }

@@ -588,6 +588,7 @@ type ExtensionAccount struct {
 // failure, policy suppression or a capture-loss count. No whole-session
 // terminal-state claim is made here.
 type ProcessingAggregate struct {
+	StdoutDelivery     *SinkDelivery `json:"stdout_delivery,omitempty" account:"optional"`
 	Delivery           *SinkDelivery `json:"delivery,omitempty" account:"optional"`
 	GateReason         string        `json:"gate_reason"`
 	ProcessingFailures string        `json:"processing_failures" account:"count"`

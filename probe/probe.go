@@ -336,6 +336,11 @@ type Request struct {
 // nothing for it afterwards: it is counted under its target (Ending), and this
 // is the only record of its identity.
 type Ended struct {
+	// Scope identifies the allocator that issued Selection's generation. It is
+	// in-process routing evidence, not part of the process or kernel identity.
+	// It is the same token carried by this admission's Grant and Added facts,
+	// preserved unchanged by every enclosing attachment.
+	Scope     *AdmissionScope `json:"-"`
 	Selection admission.Selection
 
 	// Evidence is what established the end.
@@ -631,6 +636,74 @@ func NewCatalog(adapters ...Inspector) (Catalog, error) {
 // Adapters is what this catalog holds, in the order it asks them.
 func (c Catalog) Adapters() []Inspector { return c.adapters }
 
+// Named returns the inspector whose name a support report selected.
+func (c Catalog) Named(name string) (Inspector, bool) {
+	for _, adapter := range c.adapters {
+		if adapter.Name() == name {
+			return adapter, true
+		}
+	}
+	return nil, false
+}
+
+// Route is one selected adapter and its share of an approved request.
+type Route struct {
+	Adapter Adapter
+	Request Request
+}
+
+// Routes partitions processes, admissions and readings by the selected adapter.
+// Reports are the caller's support snapshot; a missing report is read here, or
+// taken from Read on reload. Denials and the delivery gate apply to every owner.
+// Routing finishes before any adapter is called, so a refusal has no side effect.
+func (c Catalog) Routes(request Request, reports map[int32]Report) ([]Route, error) {
+	grouped := make(map[string]Request)
+	for _, p := range request.Processes {
+		report, found := reports[p.PID]
+		if !found {
+			if reading, read := request.Read[p.PID]; read {
+				report = reading.Report
+			} else {
+				report = c.Inspect(p)
+			}
+		}
+		if !report.Supported {
+			return nil, fmt.Errorf("pid %d: %w: %s", p.PID, ErrUnsupported, report.Reason())
+		}
+		inspector, found := c.Named(report.Adapter)
+		if !found {
+			return nil, fmt.Errorf("pid %d: selected adapter %q is not registered", p.PID, report.Adapter)
+		}
+		if _, can := inspector.(Adapter); !can {
+			return nil, fmt.Errorf("pid %d: the selected %s adapter cannot attach", p.PID, report.Adapter)
+		}
+		group, found := grouped[report.Adapter]
+		if !found {
+			group = Request{DeliveryGate: request.DeliveryGate, Deny: request.Deny, Ended: request.Ended}
+			if request.Read != nil {
+				group.Read = make(map[int32]Reading)
+			}
+		}
+		group.Processes = append(group.Processes, p)
+		for _, one := range request.Admit {
+			if one.ObserverPID == p.PID {
+				group.Admit = append(group.Admit, one)
+			}
+		}
+		if reading, read := request.Read[p.PID]; read {
+			group.Read[p.PID] = reading
+		}
+		grouped[report.Adapter] = group
+	}
+	var routes []Route
+	for _, inspector := range c.adapters {
+		if group, found := grouped[inspector.Name()]; found {
+			routes = append(routes, Route{Adapter: inspector.(Adapter), Request: group})
+		}
+	}
+	return routes, nil
+}
+
 // Report is what the catalog concluded about one process, with every adapter's
 // answer behind it.
 type Report struct {
@@ -735,6 +808,25 @@ type Reading struct {
 	Libc    FileID       `json:"libc"`
 	Network Netns        `json:"network"`
 	Exec    process.Exec `json:"exec"`
+}
+
+// Identify asks the selected adapter for the files a reload must prove already
+// covered. An adapter unable to provide this evidence refuses reload.
+func (c Catalog) Identify(p process.Process, report Report) (FileID, FileID, error) {
+	if !report.Supported {
+		return FileID{}, FileID{}, fmt.Errorf("pid %d: %w: %s", p.PID, ErrUnsupported, report.Reason())
+	}
+	selected, found := c.Named(report.Adapter)
+	if !found {
+		return FileID{}, FileID{}, fmt.Errorf("selected adapter %q is not registered", report.Adapter)
+	}
+	identifier, can := selected.(interface {
+		Identify(process.Process, Report) (FileID, FileID, error)
+	})
+	if !can {
+		return FileID{}, FileID{}, fmt.Errorf("selected adapter %s cannot identify reload libraries; a restart applies it", report.Adapter)
+	}
+	return identifier.Identify(p, report)
 }
 
 // Known reports whether this names a namespace. The zero value, from an unread
@@ -951,6 +1043,9 @@ const (
 
 // Grant is one recorded admission and the state of its grant.
 type Grant struct {
+	// Scope is this admission's allocator token, also carried by Ended and
+	// Added. A compound attachment must preserve the originating token.
+	Scope     *AdmissionScope `json:"-"`
 	Selection admission.Selection
 	State     GrantState
 	Read      time.Time
@@ -970,7 +1065,33 @@ type Granting interface {
 type Added struct {
 	Selections []admission.Selection
 	Skipped    []Skip
+
+	// Scopes qualifies returned generations by their allocating attachment.
+	// Nil preserves adapters with one allocator whose owner already scopes it.
+	// Selections must have unique keys and observer PIDs within this batch; a
+	// duplicate is refused and the entire batch retracted, never overwritten in
+	// this map. Scoped batches must provide Retract.
+	Scopes map[admission.Key]*AdmissionScope `json:"-"`
+
+	// Retract is a receipt bound to this admission batch. It accepts a subset of
+	// Selections and retracts those original grants, even after a later Admit.
+	// A nil receipt supports only Admitting.Retract's last-Admit boundary.
+	// Only matching original observer PID, key and birth are accepted; unknown
+	// values are ignored and duplicate/repeated requests have no second effect.
+	// Implementations release their receipt lock before invoking owner methods.
+	Retract func([]admission.Selection) `json:"-"`
 }
+
+// AdmissionScope distinguishes independent allocators whose numeric generations
+// can coincide, including for the same process birth. It is deliberately opaque
+// and local to this observer; it neither changes nor enriches admission identity.
+// Allocate it before creating a Session, keep it for that Session's lifetime,
+// and never reuse it for another allocator. Outstanding callbacks and receipts
+// keep the token alive; there is no global registry or generation ordering.
+type AdmissionScope struct{ _ byte }
+
+// NewAdmissionScope returns a distinct allocator scope for one attachment.
+func NewAdmissionScope() *AdmissionScope { return &AdmissionScope{} }
 
 // Skip is one instance an attachment did not admit, and why.
 type Skip struct {
@@ -986,7 +1107,11 @@ type Admitting interface {
 	Admit(request Request) (Added, error)
 
 	// Retract takes back grants Admit wrote, for a program found not to be the
-	// one resolved.
+	// one resolved. This legacy boundary is valid only for a proven single
+	// allocator and the most recent Admit, before another Admit begins. Callers
+	// must serialize that interval. Compound attachments and delayed rollback
+	// use the returned Added.Retract receipt instead. A nil receipt declares the
+	// single-allocator restriction; it does not grant durable rollback authority.
 	Retract(granted []admission.Selection)
 }
 

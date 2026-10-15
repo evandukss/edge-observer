@@ -17,7 +17,8 @@ import (
 // Readiness answers whether a capture can run on this host for these
 // processes, against the declared support: Linux on x86-64, a kernel of
 // MinimumKernel or newer publishing its BTF, the capabilities attachment
-// needs, and OpenSSL 3.x linked dynamically into every selected process - and
+// needs, and each selected process's catalogue-supported TLS runtime (OpenSSL
+// 3.x linked dynamically in the shipped catalogue) - and
 // whether start can activate where it is run, in the envelope start's own check
 // judges (Envelope). Each requirement says what was declared, what was found,
 // and whether it is enough.
@@ -101,8 +102,8 @@ const (
 	// Without the capabilities a refusal would say nothing about the kernel.
 	ProgramLoad = "BPF program"
 
-	// TLSLibrary is one selected process running OpenSSL 3.x as a shared
-	// library, and the catalogue saying it can observe it. Its PID is set.
+	// TLSLibrary is the catalogue's verdict for one selected process. Its PID
+	// is set. For the shipped OpenSSL adapter the declared requirements are:
 	//
 	//   - its mapped files cannot be read                     Indeterminate
 	//   - no libssl.so is mapped with code                    Missing
@@ -408,6 +409,23 @@ const declaredTLS = "OpenSSL 3.x, linked dynamically, with every present entry p
 
 func tlsLibrary(host Host, p process.Process, catalog probe.Catalog) Requirement {
 	r := Requirement{Name: TLSLibrary, Declared: declaredTLS, PID: p.PID}
+	report := catalog.Inspect(p)
+	_, hasOpenSSL := catalog.Named(openssl.Name)
+	if !hasOpenSSL || (report.Supported && report.Adapter != openssl.Name) {
+		r.Declared = "a TLS runtime supported by the selected catalogue adapter"
+		r.Status, r.Found = Missing, report.Reason()
+		if report.Supported {
+			r.Status = Met
+		} else {
+			for _, support := range report.Support {
+				if support.Error != "" {
+					r.Status = Indeterminate
+					r.Found += ": " + support.Error
+				}
+			}
+		}
+		return r
+	}
 
 	mappings, err := process.Mappings(host.ProcFS, p.PID)
 	if err != nil {
@@ -441,7 +459,6 @@ func tlsLibrary(host Host, p process.Process, catalog probe.Catalog) Requirement
 		return r
 	}
 
-	report := catalog.Inspect(p)
 	if report.Supported {
 		r.Status, r.Found = Met, libssl.Path+" is OpenSSL "+stated+"; "+report.Reason()
 		return r
@@ -482,7 +499,7 @@ func majorOf(libssl openssl.Library, libraries []openssl.Library) (major, stated
 	return "", "", unread
 }
 
-// readWord is a one-word kernel file. Unlike text, an absent file is an error.
+// readWord reads a one-word kernel file; an absent file is an error.
 func readWord(path string) (string, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {

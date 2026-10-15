@@ -95,6 +95,8 @@ func overloadStarted(t *testing.T, events uint64, intakeBytes int64) *overloadCo
 		output: output, attached: overloadProducer{stamps: &f.stamp},
 		plan: account.Account{Version: account.Version, Session: "overload", Policy: account.Policy{Revision: read.Revision, Generation: 1}},
 	}
+	f.d.plan.Attached(account.Live, f.d.session, nil, f.d.attached.Capability())
+	f.d.plan.Extensions = account.ExtensionsOf(read.Processing.Extensions())
 	go func() {
 		f.d.serveUntilStop(f.stop, nil, nil, nil, nil, account.Account{})
 		close(f.done)

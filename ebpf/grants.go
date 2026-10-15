@@ -41,8 +41,11 @@ func (s *Session) Grants() []probe.Grant {
 	held, err := s.holding()
 	at := time.Now()
 	grants, ended := grantsOf(s.Inventory(), held, err, at, s.inspect)
+	if s.beforeRetireGrants != nil {
+		s.beforeRetireGrants()
+	}
 	for _, one := range ended {
-		s.forgetEnded(keyOf(one.Selection.Instance), one.Evidence, at)
+		s.forgetEnded(keyOf(one.Selection.Instance), one.Selection.Instance.Generation, one.Evidence, at)
 	}
 	return grants
 }

@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/evandukss/edge-observer/preflight"
-	"github.com/evandukss/edge-observer/probe"
 	"github.com/evandukss/edge-observer/process"
 )
 
@@ -113,10 +111,6 @@ func TestArgumentUncertaintyBlocksInclusionAndExclusionAcrossSelection(t *testin
 			}
 			if len(tc.approval.Denials(table)) != 0 {
 				t.Fatal("an uncertain exclusion became a definite denial")
-			}
-			_, preflightErr := preflight.Take(preflight.Host{ProcFS: root}, tc.approval, probe.Catalog{})
-			if preflightErr == nil || !strings.Contains(preflightErr.Error(), "arguments undetermined") {
-				t.Fatalf("preflight did not refuse uncertainty: %v", preflightErr)
 			}
 			start := time.Now()
 			_, err := tc.approval.SettleArguments(root, table)

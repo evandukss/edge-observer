@@ -42,7 +42,7 @@ func TestALateRetractedEventCannotPreventReadmission(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("wiring: no decoded transfer reached the barrier")
 			}
-			s.Retract(authorise(p))
+			s.Retract(s.Inventory())
 			if len(s.Inventory()) != 0 {
 				t.Fatal("wiring: Retract did not remove the initial inventory")
 			}

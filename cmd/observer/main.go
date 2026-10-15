@@ -19,7 +19,6 @@ import (
 	"io/fs"
 	"net"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -35,7 +34,6 @@ import (
 	"github.com/evandukss/edge-observer/connection"
 	"github.com/evandukss/edge-observer/fragment"
 	"github.com/evandukss/edge-observer/intake"
-	"github.com/evandukss/edge-observer/internal/published"
 	"github.com/evandukss/edge-observer/policy"
 	"github.com/evandukss/edge-observer/preflight"
 	"github.com/evandukss/edge-observer/privilege"
@@ -43,6 +41,7 @@ import (
 	"github.com/evandukss/edge-observer/probe/openssl/attach"
 	"github.com/evandukss/edge-observer/process"
 	"github.com/evandukss/edge-observer/processing"
+	"github.com/evandukss/edge-observer/sink"
 	"github.com/evandukss/edge-observer/spool"
 	"golang.org/x/sys/unix"
 )
@@ -57,25 +56,23 @@ const procfs = "/proc"
 // will never answer is reported.
 const askWithin = 10 * time.Second
 
-// stopWithin is how long stop waits for a session to seal and release its pid
-// file: the drain's bound, one file written, and a margin.
-const stopWithin = drainWithin + 25*time.Second
-
 func usage() string {
 	return name + `: usage:
   ` + name + ` preflight <configuration> [--text]
       whether a capture of this configuration can run on this host, asked
       before anything attaches: READY, or NOT READY naming what is missing, or
       INDETERMINATE naming what could not be read. It exits 0 only on READY
-  ` + name + ` start <configuration> [--daemonize]
+  ` + name + ` start <configuration> [--daemonize | --stdout]
       resolve the policy, attach, and record activation in the log. It runs in
       the foreground, and a supervisor supervises it as it is. --daemonize
       returns once the observer has activated and leaves it running detached,
-      or exits non-zero with the reason where it could not activate
+      or exits non-zero with the reason where it could not activate. --stdout
+      mirrors approved JSONL in the foreground and sends operational logs to
+      stderr; it cannot be combined with --daemonize or log configured as stdout
   ` + name + ` restart <configuration>
       end the running session, sealing it, and start a new one detached. Its
-      activation record says which session it follows and how long nothing was
-      observed in between. A configuration a detached session would refuse is
+      activation record names the last validated seal and leaves coverage
+      between that seal and activation not established. A configuration a detached session would refuse is
       refused before anything is stopped, and the new session runs the
       configuration as it was checked, whatever the file holds by then
   ` + name + ` stop <configuration>
@@ -121,6 +118,10 @@ func exitOnError(err error) {
 }
 
 func run(arguments []string, stdout io.Writer) error {
+	return runWith(arguments, stdout, commandDependencies{})
+}
+
+func runWith(arguments []string, stdout io.Writer, deps commandDependencies) error {
 	if len(arguments) < 2 {
 		return fmt.Errorf("a command and a configuration are named, and this names %d arguments\n%s",
 			len(arguments), usage())
@@ -136,7 +137,7 @@ func run(arguments []string, stdout io.Writer) error {
 
 	allowed := map[string][]string{
 		"preflight": {"--text"},
-		"start":     {"--daemonize"},
+		"start":     {"--daemonize", "--stdout"},
 		"restart":   nil,
 		"stop":      nil,
 		"reload":    nil,
@@ -184,10 +185,14 @@ func run(arguments []string, stdout io.Writer) error {
 	case "preflight":
 		return ready(configuration, text, stdout)
 	case "start":
+		mirror := slices.Contains(options, "--stdout")
+		if mirror && slices.Contains(options, "--daemonize") {
+			return errors.New("--stdout requires foreground operation and cannot be combined with --daemonize")
+		}
 		if slices.Contains(options, "--daemonize") {
 			return daemonize(configuration, stdout)
 		}
-		return start(configuration, stdout)
+		return startWith(configuration, stdout, mirror, deps)
 	case "restart":
 		return restart(configuration, stdout)
 	case "stop":
@@ -415,7 +420,7 @@ func inspectSelected(session fs.FS, stdout io.Writer, files []string, sessionFil
 }
 
 func inspectFinished(session fs.FS, text bool, stdout io.Writer) error {
-	content, err := fs.ReadFile(session, sealedName)
+	sealed, content, err := readSessionSeal(session)
 	if errors.Is(err, fs.ErrNotExist) {
 		if state, statErr := fs.Stat(session, controlName); statErr == nil {
 			if state.IsDir() {
@@ -433,17 +438,6 @@ func inspectFinished(session fs.FS, text bool, stdout io.Writer) error {
 	}
 	if err != nil {
 		return fmt.Errorf("read the sealed account: %w", err)
-	}
-	var sealed account.Account
-	if err := json.Unmarshal(content, &sealed); err != nil {
-		return fmt.Errorf("read the sealed account: %w", err)
-	}
-	switch {
-	case sealed.Version != account.Version:
-		return fmt.Errorf("the sealed account is version %d and this observer reads version %d",
-			sealed.Version, account.Version)
-	case sealed.Kind != account.Sealed:
-		return fmt.Errorf("%s holds a %s account, and a finished session's is %s", sealedName, sealed.Kind, account.Sealed)
 	}
 	if text {
 		var rendered bytes.Buffer
@@ -469,8 +463,8 @@ func emit(to io.Writer, a account.Account, text, local bool) error {
 	return encoder.Encode(a)
 }
 
-// sealedSession is the most recent session to seal, so the next can report how
-// long nothing was observed in between. Lost is the account's losses as one
+// sealedSession discovers the last validated seal. It establishes no coverage
+// between that seal and a later activation. Lost is the account's losses as one
 // clause (account.Account.Lost) and Reason the gate's reason for refusing
 // release, for stop to print beside how it sealed.
 type sealedSession struct {
@@ -491,6 +485,17 @@ func lastSealed(directory string) (sealedSession, error) {
 	if err := json.Unmarshal(content, &last); err != nil {
 		return sealedSession{}, fmt.Errorf("read %s: %w", lastName, err)
 	}
+	a, _, err := readSessionSeal(os.DirFS(filepath.Dir(last.Account)))
+	if err != nil {
+		return sealedSession{}, err
+	}
+	if a.Session != last.Session || !a.Seal.Sealed.Equal(last.Sealed) {
+		return sealedSession{}, errors.New("last-seal pointer does not identify its account")
+	}
+	last.Complete, last.Lost = a.Seal.Complete, a.Lost()
+	if a.Processing != nil {
+		last.Reason = a.Processing.GateReason
+	}
 	return last, nil
 }
 
@@ -505,6 +510,10 @@ func stop(path string, stdout io.Writer) error {
 
 // stopIn ends the session running over directory and waits for it to seal.
 func stopIn(directory string, stdout io.Writer) error {
+	return stopInUsing(directory, stdout, holder)
+}
+
+func stopInUsing(directory string, stdout io.Writer, observe func(string) (int, string, error)) error {
 	pid, session, err := holder(directory)
 	if err != nil {
 		return err
@@ -513,50 +522,55 @@ func stopIn(directory string, stdout io.Writer) error {
 		return fmt.Errorf("signal pid %d: %w", pid, err)
 	}
 	for deadline := time.Now().Add(stopWithin); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
-		if _, _, err := holder(directory); !errors.Is(err, errNotRunning) {
+		currentPID, currentSession, holderErr := observe(directory)
+		if holderErr == nil && currentPID == pid && currentSession == session {
 			continue
 		}
-		last, err := lastSealed(directory)
-		if err != nil || last.Session != session {
-			return fmt.Errorf("session %s ended and no account says it sealed: %v", session, err)
+		if holderErr != nil && !errors.Is(holderErr, errNotRunning) {
+			// Release can leave a held but empty pid file. An unknown observation
+			// does not establish that our session ended; keep the original deadline.
+			continue
 		}
-		how := "complete"
-		if !last.Complete {
-			how = "INCOMPLETE, and the account says why"
-		}
-		// What capture lost goes right after how it sealed: a seal says its steps
-		// succeeded, not that nothing was lost.
-		if last.Lost != "" {
-			how += " (LOST " + last.Lost + ")"
-		}
-		if last.Reason != "" {
-			how += ", release refused: " + string(last.Reason)
-		}
-		_, _ = fmt.Fprintf(stdout, "stopped    session %s, sealed %s, account %s\n", session, how, last.Account)
-		return nil
+		return stoppedSession(directory, session, stdout)
 	}
 	return fmt.Errorf("pid %d did not end within %s", pid, stopWithin)
 }
 
-// start runs one session until it is stopped: in the foreground, or as the
-// detached child daemonize started.
-func start(path string, stdout io.Writer) (err error) {
+// startWith runs one session until it is stopped: in the foreground, or as
+// the detached child daemonize started.
+func startWith(path string, stdout io.Writer, mirror bool, deps commandDependencies) (err error) {
+	boundary := newShutdownBoundary(os.Exit)
+	// Registered first, so the exit backstop remains armed through every cleanup.
+	defer boundary.disarm()
 	reporting := detachedReport()
 	defer func() {
 		if err != nil {
 			report(reporting, "failed %v", err)
 		}
 	}()
+	if mirror && reporting != nil {
+		return errors.New("--stdout requires foreground operation")
+	}
 	read, err := configurationFor(path, handedOver())
 	if err != nil {
 		return err
+	}
+	if mirror && read.Settings.Log == policy.Stdout {
+		return errors.New("--stdout cannot be combined with log configured as stdout")
 	}
 	held, err := acquire(read.Settings.Directory)
 	if err != nil {
 		return err
 	}
 	defer held.release()
-	log, err := openLog(read.Settings, reporting == nil, stdout)
+	console, consoleName := stdout, "stdout"
+	if mirror {
+		console, consoleName = deps.stderr, "stderr"
+		if console == nil {
+			console = os.Stderr
+		}
+	}
+	log, err := openLogTo(read.Settings, reporting == nil, consoleName, console)
 	if err != nil {
 		return err
 	}
@@ -564,19 +578,48 @@ func start(path string, stdout io.Writer) (err error) {
 
 	// Signals are taken first: a stop can arrive any time after this process
 	// exists, and the default action would end the run unsealed.
-	stopping := make(chan os.Signal, 1)
-	signal.Notify(stopping, os.Interrupt, syscall.SIGTERM)
-	asking := make(chan os.Signal, 1)
-	signal.Notify(asking, syscall.SIGUSR1)
+	stopping, asking, stopSignals := deps.signals()
+	defer stopSignals()
+	watchDone := make(chan struct{})
+	defer close(watchDone)
+	go func() {
+		select {
+		case <-stopping:
+			boundary.trigger()
+		case <-watchDone:
+		}
+	}()
 
+	options := processing.WriterOptions{Directory: read.Settings.Directory}
+	if mirror {
+		options.Stdout, err = sink.NewStream(stdout)
+		if err != nil {
+			return fmt.Errorf("open stdout delivery: %w", err)
+		}
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			_ = options.Stdout.Close(ctx)
+		}()
+	}
 	session := newIdentity()
-	running, err := begin(read, session)
+	var running *daemon
+	switch {
+	case deps.begin != nil:
+		running, err = deps.begin(read, session, options)
+	case mirror:
+		running, err = beginWithWriter(read, session, options)
+	default:
+		running, err = begin(read, session)
+	}
 	if err != nil {
 		_ = log.write(startFailed(session, time.Now(), err))
 		return err
 	}
+	running.shutdown = boundary
 	running.path = path
 	running.log = log
+	running.prepareShutdown()
 	// Ends of executions reach the session from here on, with its log in place.
 	running.ends.serve(running)
 	if err := held.record(os.Getpid(), session); err != nil {
@@ -591,7 +634,7 @@ func start(path string, stdout io.Writer) (err error) {
 	record.MemoryAssurance = "Current payload-holder membership and limits verified. Memory containment is conditional on entering the isolated bounded no-swap cgroup before exec and keeping membership and limits fixed through capture. These readings do not establish that no allocation predates entry."
 	record.Follows = running.follows(activatedAt)
 	if err := log.write(record); err != nil {
-		running.logFailures++
+		running.logFailures.Add(1)
 	}
 
 	notify("READY=1\nSTATUS=activated session " + session)
@@ -613,7 +656,7 @@ func start(path string, stdout io.Writer) (err error) {
 		case "reload":
 			record := running.reload(time.Now(), body)
 			if err := log.write(record); err != nil {
-				running.logFailures++
+				running.logFailures.Add(1)
 			}
 			return json.Marshal(record)
 		default:
@@ -630,31 +673,65 @@ func start(path string, stdout io.Writer) (err error) {
 // serveUntilStop is the production controller loop. Intake exhaustion can
 // withdraw idle capture; output failures are counted independently.
 func (d *daemon) serveUntilStop(stopping, asking <-chan os.Signal, ticks <-chan time.Time, control *controller, log *logger, previous account.Account) {
+	s := d.prepareShutdown()
+	// Receipt of a shutdown trigger is never dependent on control.serve returning.
+	watchDone := make(chan struct{})
+	defer close(watchDone)
+	go func() {
+		select {
+		case <-stopping:
+			s.trigger()
+		case <-d.gate.Withdrawal():
+			s.trigger()
+		case <-watchDone:
+		}
+	}()
 	failed := d.startProcessing()
-	for {
+	go func() {
 		select {
 		case <-failed:
-			return
-		case <-stopping:
-			return
-		case <-d.gate.Withdrawal():
+			s.trigger()
+		case <-watchDone:
+		}
+	}()
+	for {
+		select {
+		case <-s.started:
 			return
 		case <-asking:
-			control.serve()
-		case at := <-ticks:
-			now := d.snapshot(account.Live, at)
-			if err := log.write(stated(d.session, at, now, previous)); err != nil {
-				// An unwritable log does not stop observation; failures are counted and the
-				// final record reports them.
-				d.logFailures++
+			if !d.controllerStep(s, func() { control.serve() }) {
+				return
 			}
-			previous = now
+		case at := <-ticks:
+			if !d.controllerStep(s, func() {
+				now := d.snapshot(account.Live, at)
+				if err := log.write(stated(d.session, at, now, previous)); err != nil {
+					d.logFailures.Add(1)
+				}
+				previous = now
+			}) {
+				return
+			}
 		}
 	}
 }
 
 // daemon is one output session between its activation and its seal.
 type daemon struct {
+	shutdownInit       sync.Once
+	shutdown           *shutdownBoundary
+	shutdownPlan       account.Account
+	shutdownHooks      *shutdownHooks
+	shutdownEarlyHooks *shutdownHooks
+	controllerFailure  atomic.Pointer[shutdownFailure]
+	finishOnce         sync.Once
+	finishErr          error
+	withdrawalOnce     sync.Once
+	withdrawalResult   chan withdrawalResult
+	processingStart    sync.Once
+	processingMutex    sync.Mutex
+	processingClosed   bool
+
 	policy  policy.Policy
 	session string
 
@@ -696,13 +773,17 @@ type daemon struct {
 	endedLogFailures atomic.Int64
 	ends             *endings
 
-	logFailures int
+	logFailures atomic.Int64
 }
 
 // begin establishes dumpability in the payload holder and verifies the entire
 // protected setup before attach. Plaintext does not exist here before attach;
 // moving any plaintext earlier would invalidate this ordering argument.
 func begin(read policy.Policy, session string) (*daemon, error) {
+	return beginWithWriter(read, session, processing.WriterOptions{Directory: read.Settings.Directory})
+}
+
+func beginWithWriter(read policy.Policy, session string, options processing.WriterOptions) (*daemon, error) {
 	if read.Processing == nil || read.ProcessingRevision == "" {
 		return nil, &protected.Refusal{Check: protected.ProcessingPlan, PID: os.Getpid(), Detail: "a compiler-produced processing plan and revision are required"}
 	}
@@ -738,7 +819,7 @@ func begin(read policy.Policy, session string) (*daemon, error) {
 	if err := os.MkdirAll(filepath.Join(directory, controlName), 0700); err != nil {
 		return nil, err
 	}
-	output, err := processing.OpenWriter(processing.WriterOptions{Directory: read.Settings.Directory})
+	output, err := processing.OpenWriter(options)
 	if err != nil {
 		_ = os.RemoveAll(directory)
 		return nil, err
@@ -819,28 +900,7 @@ func kernelOf(root string) *account.Kernel {
 }
 
 func resolveFrom(root string, approval process.Approval) (process.Resolution, process.Table, error) {
-	table, err := process.Read(root)
-	if err != nil {
-		return process.Resolution{}, process.Table{}, err
-	}
-	names := func(has func(process.Rule) bool) bool {
-		return slices.ContainsFunc(approval.Rules, has) || slices.ContainsFunc(approval.Exclusions, has)
-	}
-	if names(func(rule process.Rule) bool { return rule.Port != 0 }) {
-		listeners, err := process.ReadListeners(root)
-		if err != nil {
-			return process.Resolution{}, process.Table{}, fmt.Errorf("read the listening sockets a port "+
-				"resolves against: %w", err)
-		}
-		table = table.WithListeners(listeners)
-	}
-	host := process.Host{Table: table}
-	if names(func(rule process.Rule) bool { return rule.PID != nil }) {
-		if boot, err := process.ReadBoot(root); err == nil {
-			host.Boot = boot
-		}
-	}
-	return approval.ResolveArguments(root, host)
+	return approval.ResolveFrom(root)
 }
 
 // undumpable makes this process non-dumpable, as the payload holder must be
@@ -940,129 +1000,11 @@ func (d *daemon) follows(activatedAt time.Time) *follows {
 	if err != nil || last.Session == "" {
 		return nil
 	}
-	content, err := os.ReadFile(last.Account)
-	var prior account.Account
-	if err != nil || json.Unmarshal(content, &prior) != nil || prior.Kind != account.Sealed ||
-		prior.Session != last.Session || prior.Seal == nil || !prior.Seal.Sealed.Equal(last.Sealed) {
-		return nil
-	}
 	return &follows{
 		Session: last.Session, Sealed: last.Sealed,
-		Gap: fmt.Sprintf("nothing was observed from %s, when session %s sealed, to %s, when this one activated",
+		Gap: fmt.Sprintf("last validated seal: %s, session %s; this session activated at %s; coverage in between is not established",
 			last.Sealed.UTC().Format(time.RFC3339Nano), last.Session, activatedAt.UTC().Format(time.RFC3339Nano)),
 	}
-}
-
-// finish is the finalisation in its one order - stop production, drain what
-// was in flight, read the counters, finalize capture and processing - then
-// writes the account once beside approved output. drainWithin bounds only the
-// producer drain; it is not a deadline for processing or the whole session.
-func (d *daemon) finish(log *logger) error {
-	sealer := &connection.Sealer{Producer: producing(d.attached), Within: drainWithin}
-	seal, sealErr := sealer.Stop()
-	// Every connection still open is settled against what the producer holds.
-	d.capture.Finish(seal.Sealed)
-	seal.Counters = seal.Counters.Join(d.capture.Counted())
-	// Raw fragments are not persisted in this pipeline. Approved route records
-	// have different units and cannot satisfy the legacy spool identity.
-	noSpool := connection.Uncounted("raw fragments are not persisted; approved route records are counted separately")
-	seal.Counters.Persisted, seal.Counters.PersistedDropped, seal.Counters.PersistedRefused = noSpool, noSpool, noSpool
-	processingErr := d.finishProcessing(processing.Finalization{Withdrawn: seal.Withdrawal.Complete, Drained: seal.Drain.Complete})
-	_ = d.intake.Close()
-	seal.Sealed = time.Now()
-
-	// Read while the program's maps are open; closing the attachment closes them.
-	final := d.snapshot(account.Sealed, time.Now())
-	if processingErr != nil {
-		seal.Complete = false
-		seal.Because = append(seal.Because, "processing did not finish successfully: "+processingErr.Error())
-	}
-	final.Closed(seal, sealErr)
-	if err := d.attached.Close(); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, name+": "+err.Error())
-	}
-
-	record := stopped{
-		Record: "stopped", Version: recordVersion, Session: d.session, At: time.Now(),
-		Sealed: sealErr == nil, Complete: sealErr == nil && seal.Complete, LogFailures: d.logFailures + int(d.extensionLogFailures.Load()) + int(d.endedLogFailures.Load()),
-		Processing: final.Processing,
-	}
-	if log != nil && log.queue != nil {
-		delivery := log.queue.Stats()
-		record.LogFailures = int(delivery.Failed + delivery.Dropped)
-	}
-	path := filepath.Join(d.directory, sealedName)
-	content, err := json.MarshalIndent(final, "", "  ")
-	if err == nil {
-		err = place(path, append(content, '\n'))
-	}
-	if err != nil {
-		record.Error = err.Error()
-		_ = log.write(record)
-		return fmt.Errorf("write the sealed account: %w", err)
-	}
-	record.Account = path
-
-	// The same session in the account contract, projected from the operational
-	// account. A failed projection leaves the operational account sealed and says
-	// so.
-	contractPath := filepath.Join(d.directory, published.Name)
-	contractAccount, err := published.Account(final)
-	if err == nil {
-		content, err = json.MarshalIndent(contractAccount, "", "  ")
-	}
-	if err == nil {
-		err = place(contractPath, append(content, '\n'))
-	}
-	if err != nil {
-		record.ContractError = err.Error()
-	} else {
-		record.Contract = contractPath
-	}
-
-	sealedAt := record.At
-	if final.Seal != nil {
-		sealedAt = final.Seal.Sealed
-	}
-	reason := probe.GateReason("")
-	if final.Processing != nil {
-		reason = final.Processing.GateReason
-	}
-	last, _ := json.Marshal(sealedSession{Session: d.session, Sealed: sealedAt, Account: path, Complete: record.Complete,
-		Lost: final.Lost(), Reason: reason})
-	if err := place(filepath.Join(d.policy.Settings.Directory, lastName), last); err != nil {
-		record.Error = err.Error()
-	}
-	_ = log.write(record)
-	_ = log.close()
-	if log.queue != nil {
-		stats := log.queue.Stats()
-		final.LogDelivery = &stats
-		final.LogDestinations = log.destinationStats()
-		content, err = json.MarshalIndent(final, "", "  ")
-		if err == nil {
-			err = place(path, append(content, '\n'))
-		}
-		if err != nil {
-			return fmt.Errorf("seal log delivery counts: %w", err)
-		}
-		if record.Contract != "" {
-			projected, err := published.Account(final)
-			if err == nil {
-				content, err = json.MarshalIndent(projected, "", "  ")
-			}
-			if err == nil {
-				err = place(contractPath, append(content, '\n'))
-			}
-			if err != nil {
-				return fmt.Errorf("seal contract log delivery counts: %w", err)
-			}
-		}
-	}
-	if reason.InvalidatesCapture() {
-		return fmt.Errorf("capture ended: %s", reason)
-	}
-	return errors.Join(sealErr, processingErr)
 }
 
 // notify tells a supervisor that named a notify socket that the session is up.
@@ -1119,17 +1061,16 @@ func (u unstoppable) Account() (connection.Counters, error) {
 	return connection.Counters{}, fmt.Errorf("the %s attachment counts nothing", u.backend)
 }
 
-// observe attaches to the selected processes an adapter supports and
-// describes what the kernel says about each. The whole set goes to the adapter
-// at once: a probe is placed on a file and fires for every process running it,
-// so per-process placement would report each call once per placement.
+// observe groups selected processes by their catalogue-selected adapter and
+// describes what the kernel says about each. Each adapter gets its complete
+// group at once: per-process placement on a shared file would duplicate calls.
 func observe(catalog probe.Catalog, resolution process.Resolution, table process.Table,
 	sink probe.Sink, gate *probe.DeliveryGate, ended func(probe.Ended)) (probe.Attachment, []attachment.Observed, error) {
 	state := gate.Snapshot()
 	if state.MaxEvents == 0 || state.Charged != 0 || state.Reason != "" {
 		return nil, nil, &protected.Refusal{Check: protected.DeliveryGate, PID: os.Getpid(), Detail: "attach requires the verified fresh delivery gate"}
 	}
-	adapter, canAttach := catalog.Adapters()[0].(probe.Adapter)
+	reports := make(map[int32]probe.Report)
 
 	attempts := make([]attachment.Attempt, 0, len(resolution.Selections))
 	request := probe.Request{Deny: resolution.Denials, DeliveryGate: gate, Ended: ended}
@@ -1139,12 +1080,13 @@ func observe(catalog probe.Catalog, resolution process.Resolution, table process
 			continue
 		}
 		attempt := attachment.Attempt{
-			Process:    p,
-			Admitted:   one,
-			Alive:      alive(p),
-			Support:    catalog.Inspect(p),
-			Catalogued: catalogued(),
+			Process:  p,
+			Admitted: one,
+			Alive:    alive(p),
+			Support:  catalog.Inspect(p),
 		}
+		attempt.Catalogued = cataloguedFor(attempt.Support)
+		reports[p.PID] = attempt.Support
 		if attempt.Support.Supported && attempt.Alive {
 			request.Processes = append(request.Processes, p)
 			request.Admit = append(request.Admit, one)
@@ -1154,11 +1096,12 @@ func observe(catalog probe.Catalog, resolution process.Resolution, table process
 
 	var live probe.Attachment
 	var attachErr error
-	switch {
-	case !canAttach:
-		attachErr = fmt.Errorf("the %s adapter cannot attach", catalog.Adapters()[0].Name())
-	case len(request.Processes) > 0:
-		live, attachErr = adapter.Attach(request, sink)
+	if len(request.Processes) > 0 {
+		group, err := attachment.Attach(catalog, request, reports, sink)
+		attachErr = err
+		if group != nil {
+			live = group
+		}
 	}
 
 	observed := make([]attachment.Observed, 0, len(attempts))
@@ -1169,14 +1112,21 @@ func observe(catalog probe.Catalog, resolution process.Resolution, table process
 		case attachErr != nil:
 			attempt.Err = attachErr
 		default:
-			attested, canAttest := live.(probe.Attested)
+			owner := live
+			if grouped, ok := live.(*attachment.Group); ok {
+				owner, attempt.Err = grouped.ForProcess(attempt.Process.PID)
+			}
+			attested, canAttest := owner.(probe.Attested)
 			attempt.Attested = canAttest
 			if canAttest {
 				attempt.Placements, attempt.Err = attested.Placements(attempt.Process.PID)
 			}
+			if owner != nil {
+				attempt.Capability = owner.Capability()
+			}
 			// What the attachment covering this process can do, which may be less than
 			// the whole attachment.
-			if covering, can := live.(probe.Covering); can {
+			if covering, can := owner.(probe.Covering); can {
 				capability, err := covering.Capable(attempt.Process.PID)
 				if err == nil {
 					attempt.Capability = capability
@@ -1215,6 +1165,23 @@ func catalogued() []string {
 		symbols = append(symbols, function.Symbol)
 	}
 	return symbols
+}
+
+// cataloguedFor names the selected runtime's expected placements.
+func cataloguedFor(report probe.Report) []string {
+	if report.Adapter == probe.OpenSSL.Name {
+		return catalogued()
+	}
+	for _, support := range report.Support {
+		if support.Adapter == report.Adapter {
+			var symbols []string
+			for _, point := range support.Probes {
+				symbols = append(symbols, point.Symbol)
+			}
+			return symbols
+		}
+	}
+	return nil
 }
 
 // losses is what the attachment discarded on the kernel side, or why that is

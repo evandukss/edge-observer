@@ -1041,9 +1041,11 @@ struct {
 // of its end, so its last thread looks itself up here and, only where present,
 // walks them for its entries (obs_reclaim): an exit this program holds nothing
 // for costs one lookup. A refused insertion is counted, and that execution's
-// entries outlive it. Each flag is only ever set to one, so concurrent setters
-// need no atomic.
+// entries outlive it. Flags only change to one. The retained event generation
+// is published separately with a compare-and-swap after authenticating its grant;
+// it survives grant removal and exec until the final thread deletes the holder.
 struct holding {
+	__u64 generation; // admission whose delivered events userspace retains
 	__u8 entries;
 	__u8 events;
 	__u8 padding[6];
@@ -1123,9 +1125,9 @@ static __always_inline __u64 obs_birth(void)
 	return obs_ticks(leader);
 }
 
-// obs_authentic is whether the running thread group is the one this grant was
-// written for. A grant is authority for one occupant of a number, and numbers
-// are reused. A birth of zero in the entry authenticates nothing.
+// obs_authentic is whether the running thread group is the one this entry was
+// written for. Both grants and denials belong to one occupant of a number, and
+// numbers are reused. A birth of zero in the entry authenticates nothing.
 static __always_inline int obs_authentic(const struct admission *entry)
 {
 	__u64 born = obs_birth();
@@ -1150,14 +1152,12 @@ static __always_inline struct admission *obs_grant_why(struct instance_key *key,
 	struct admission *entry = bpf_map_lookup_elem(&allowed_processes, key);
 	if (!entry)
 		return 0;
-	// A denial is not a grant and is not authenticated: an exclusion denies a
-	// subtree, and a stale denial only observes less.
-	if (entry->kind == OBS_DENIED)
-		return 0;
 	if (!obs_authentic(entry)) {
 		*why = OBS_GRANT_IMPOSTOR;
 		return 0;
 	}
+	if (entry->kind == OBS_DENIED)
+		return 0;
 	*why = OBS_GRANT_HELD;
 	return entry;
 }
@@ -1268,7 +1268,7 @@ static __always_inline int obs_capture_live(void)
 // obs_holds records what the program keeps for the execution who, for its end
 // to take away (holders). The lookup first: almost every call finds the
 // execution already there with the same bits.
-static __always_inline void obs_holds(const struct instance_key *who, __u32 what)
+static __always_inline void obs_holds(const struct instance_key *who, __u32 what, __u64 generation)
 {
 	struct holding *held = bpf_map_lookup_elem(&holders, who);
 	if (!held) {
@@ -1282,10 +1282,33 @@ static __always_inline void obs_holds(const struct instance_key *who, __u32 what
 		if (!held)
 			return;
 	}
-	if (what == OBS_HOLDS_ENTRIES)
+	if (what == OBS_HOLDS_ENTRIES) {
 		held->entries = 1;
-	else
-		held->events = 1;
+		return;
+	}
+	held->events = 1;
+	if (!generation)
+		return;
+	// Read the retained value BEFORE checking the grant. A delayed event cannot
+	// replace a newer stamp: either the grant no longer authenticates its own
+	// generation, or the compare-and-swap observes the intervening publication.
+	// Generations are never reused within this collection. Equal-generation
+	// writers converge; a different winning writer requires reauthentication.
+	// Bound contention just as insertion is bounded, and account for a stamp we
+	// could not retain rather than falling back to an unqualified end.
+#pragma unroll
+	for (int attempt = 0; attempt < 8; attempt++) {
+		__u64 before = __sync_val_compare_and_swap(&held->generation, 0, 0);
+		if (before == generation)
+			return;
+		struct admission *grant = bpf_map_lookup_elem(&allowed_processes, who);
+		if (!grant || grant->kind == OBS_DENIED || grant->generation != generation ||
+		    !obs_authentic(grant))
+			return;
+		if (__sync_val_compare_and_swap(&held->generation, before, generation) == before)
+			return;
+	}
+	obs_count(OBS_STAT_HOLDER_UNRECORDED);
 }
 
 // obs_handle_key names a handle of the instance who.
@@ -1343,7 +1366,7 @@ static __always_inline struct occupancy *obs_occupy(const struct instance_key *w
 		obs_unlocate();
 		return 0;
 	}
-	obs_holds(who, OBS_HOLDS_ENTRIES);
+	obs_holds(who, OBS_HOLDS_ENTRIES, 0);
 	if (born)
 		obs_count(OBS_STAT_BORN);
 	return bpf_map_lookup_elem(&occupancies, &hk);
@@ -1618,7 +1641,7 @@ static __always_inline void obs_socket_opened(__s32 fd)
 	who.ns_dev = key.ns_dev;
 	who.ns_ino = key.ns_ino;
 	who.pid = key.pid;
-	obs_holds(&who, OBS_HOLDS_ENTRIES);
+	obs_holds(&who, OBS_HOLDS_ENTRIES, 0);
 }
 
 // obs_socket_closed ends an occupancy; a binding made against it then finds no
@@ -1802,7 +1825,7 @@ static __always_inline void obs_associate(const struct instance_key *who, const 
 		if (bpf_map_update_elem(&handles, &hk, &made, BPF_ANY) != 0)
 			obs_count(OBS_STAT_BINDING_UNRECORDED);
 		else
-			obs_holds(who, OBS_HOLDS_ENTRIES);
+			obs_holds(who, OBS_HOLDS_ENTRIES, 0);
 		return;
 	}
 
@@ -1972,8 +1995,10 @@ static __always_inline int obs_emit(const struct instance_key *who, __u64 genera
 	bpf_ringbuf_submit(e, 0);
 	// Userspace keeps something for an execution once it has an event of it,
 	// so the execution's end is reported to it (obs_reclaim).
+	// Reclamation emits old occupancy endings too. They retain the delivery
+	// flag but cannot supply or replace an ordinary admission's end provenance.
 	if (kind != OBS_ENDED)
-		obs_holds(who, OBS_HOLDS_EVENTS);
+		obs_holds(who, OBS_HOLDS_EVENTS, at->exited ? 0 : generation);
 	return 1;
 }
 
@@ -3086,10 +3111,16 @@ int obs_fork(void *ctx)
 	struct instance_key born = parent;
 	born.pid = (__u32)nr;
 
+	// Neither permission nor exclusion is inherited from a reused creator key.
+	if (!obs_authentic(grant)) {
+		obs_count(OBS_STAT_UNAUTHENTICATED);
+		return 0;
+	}
+
 	if (grant->kind == OBS_DENIED) {
 		// An exclusion denies its instances and their descendants, so a denied
-		// creator's child is denied as it is created. A denial confers nothing and is
-		// not authenticated.
+		// creator's child is denied as it is created. The creator's birth was
+		// authenticated before reaching this branch.
 		struct admission denied = *grant;
 		denied.generation = obs_stamp();
 		if (!denied.generation) {
@@ -3109,11 +3140,6 @@ int obs_fork(void *ctx)
 		return 0;
 	}
 
-	// The creator's grant is authenticated before anything is passed on.
-	if (!obs_authentic(grant)) {
-		obs_count(OBS_STAT_UNAUTHENTICATED);
-		return 0;
-	}
 	// The ability, then the permission. Only follow covers descendants created
 	// after resolution; none covers none, and existing covers those already
 	// running, which userspace found and this event never sees.
@@ -3245,6 +3271,9 @@ static __always_inline void obs_reclaim(const struct instance_key *who, const st
 	if (!holding)
 		return;
 	__u8 delivered = holding->events;
+	// Snapshot before callbacks and deletion. The last thread has no ordinary
+	// publisher left; exec keeps this stamp for that eventual final exit.
+	__u64 ended_generation = holding->generation;
 	bpf_for_each_map_elem(&occupancies, obs_reclaim_occupancy, &r, 0);
 	bpf_for_each_map_elem(&handles, obs_reclaim_binding, &r, 0);
 	if (!descriptors)
@@ -3258,7 +3287,7 @@ static __always_inline void obs_reclaim(const struct instance_key *who, const st
 	struct place at = {};
 	struct origin origin = {};
 	struct ends none = {};
-	obs_emit(who, r.granted, &origin, 0, 0, 0, 0, 0, OBS_ENDED, 0, 0, 0, 0, OBS_FD_NONE, OBS_OUTCOME_NONE,
+	obs_emit(who, ended_generation, &origin, 0, 0, 0, 0, 0, OBS_ENDED, 0, 0, 0, 0, OBS_FD_NONE, OBS_OUTCOME_NONE,
 		 &none, &at, 0, 0, 0);
 }
 

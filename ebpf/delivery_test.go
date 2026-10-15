@@ -115,6 +115,9 @@ func TestExitedChildIsIdentifiedAfterItsGrantAndProcEntryAreGone(t *testing.T) {
 	}
 	waitActorState(t, childPID, "T")
 	child := loaded(t, childPID)
+	if !child.Start().Determined {
+		t.Fatal("stopped child has no captured birth identity to compare with delayed delivery")
+	}
 	sink.armed.Store(true)
 	if _, err := io.WriteString(actor.input, "P\n"); err != nil {
 		t.Fatal(err)
@@ -158,8 +161,13 @@ func TestExitedChildIsIdentifiedAfterItsGrantAndProcEntryAreGone(t *testing.T) {
 	if record.Instance.Generation == 0 || record.Instance.Generation == control[0].Instance.Generation {
 		t.Errorf("child inherited or lost its parent's generation: %+v", record.Instance)
 	}
-	if record.Instance.Start.Determined || record.Instance.Executable != "" {
-		t.Errorf("already-exited child received invented live-process evidence: %+v", record.Instance)
+	// Birth is retained kernel evidence from the queued event. Executable
+	// evidence would require a matching live process, which is already gone.
+	if record.Instance.Start != child.Start() {
+		t.Errorf("delayed child birth differs from its captured identity: got %v, want %v", record.Instance.Start, child.Start())
+	}
+	if record.Instance.Executable != "" {
+		t.Errorf("already-exited child received invented live executable evidence: %+v", record.Instance)
 	}
 	if record.Handle.Instance != record.Instance.Key() {
 		t.Errorf("persisted handle and instance disagree: %+v", record)

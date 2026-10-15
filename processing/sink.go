@@ -16,10 +16,13 @@ type WriterOptions struct {
 	Directory  string
 	QueueBytes int64
 	OpenSink   sink.Factory
+	// Stdout is an optional mirror of released approved lines, with its own runner.
+	Stdout           sink.Sink
+	StdoutQueueBytes int64
 }
 
 func OpenWriter(options WriterOptions) (*Writer, error) {
-	if options.Directory == "" || options.QueueBytes < 0 {
+	if options.Directory == "" || options.QueueBytes < 0 || options.StdoutQueueBytes < 0 {
 		return nil, ErrOptions
 	}
 	if options.QueueBytes == 0 {
@@ -37,6 +40,22 @@ func OpenWriter(options WriterOptions) (*Writer, error) {
 		_ = q.Shutdown(context.Background())
 		return nil, err
 	}
+	if options.Stdout != nil {
+		limit := options.StdoutQueueBytes
+		if limit == 0 {
+			limit = DefaultQueueBytes
+		}
+		w.stdout, err = sink.NewQueue(limit)
+		if err != nil {
+			_ = q.Shutdown(context.Background())
+			return nil, err
+		}
+		if err = w.stdout.Register(ArtifactName, options.Stdout); err != nil {
+			_ = q.Shutdown(context.Background())
+			_ = w.stdout.Shutdown(context.Background())
+			return nil, err
+		}
+	}
 	return w, nil
 }
 func (w *Writer) DeliveryStats() sink.Stats {
@@ -52,15 +71,50 @@ func (w *Writer) DerivedStats(name string) sink.Stats {
 	return w.queue.DestinationStats(DerivedName(name))
 }
 func (w *Writer) Reopen(ctx context.Context) error { return w.queue.Reopen(ctx) }
-func (w *Writer) Drain(ctx context.Context) error  { return w.queue.Drain(ctx) }
+func (w *Writer) Drain(ctx context.Context) error {
+	return errors.Join(w.queue.Drain(ctx), w.stdout.Drain(ctx))
+}
+
+// StdoutDeliveryStats is nil when mirroring is disabled; its population is
+// released approved lines, independently of the file's delivery outcome.
+func (w *Writer) StdoutDeliveryStats() *sink.Stats {
+	if w == nil || w.stdout == nil {
+		return nil
+	}
+	s := w.stdout.Stats()
+	return &s
+}
+
+// CloseAdmission closes both destinations and derived output without I/O.
+func (w *Writer) CloseAdmission() {
+	if w == nil {
+		return
+	}
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	w.closed = true
+	w.queue.CloseAdmission()
+	w.stdout.CloseAdmission()
+}
+
+// Freeze fixes all delivery statistics without waiting on a destination. The
+// owner closes authorization separately before taking its final processing snapshot.
+func (w *Writer) Freeze() {
+	if w == nil {
+		return
+	}
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	w.closed = true
+	w.queue.Freeze()
+	w.stdout.Freeze()
+}
 func (w *Writer) Shutdown(ctx context.Context) error {
 	if w == nil {
 		return nil
 	}
-	w.mutex.Lock()
-	w.closed = true
-	w.mutex.Unlock()
-	return w.queue.Shutdown(ctx)
+	w.CloseAdmission()
+	return errors.Join(w.queue.Shutdown(ctx), w.stdout.Shutdown(ctx))
 }
 
 // ReadArtifactFiles reads the explicitly named files, in order, selecting only

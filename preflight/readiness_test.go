@@ -39,7 +39,6 @@ func meeting(t *testing.T) *constructed {
 	c.host = preflight.Host{
 		ProcFS: filepath.Join(root, "proc"),
 		SysFS:  filepath.Join(root, "sys"),
-		Debug:  filepath.Join(root, "debug"),
 		OS:     "linux",
 	}
 	c.host.Machine = func() (string, error) { return c.machine, nil }
